@@ -1,0 +1,5 @@
+pefile>=2023.2.7
+capstone>=5.0.0
+rich>=13.0.0
+unicorn>=2.0.1
+frida-tools>=14.0.0
