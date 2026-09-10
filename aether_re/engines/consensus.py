@@ -1,82 +1,209 @@
-"""
-CONSENSUS ENGINE — O cérebro que une resultados de múltiplos motores.
-Vota no melhor resultado baseado em confiança, cobertura e redundância.
-
-Ensemble: Ghidra + Rizin + Capstone + Reconstruct + (futuro: Binary Ninja, angr)
-"""
+"""Consenso por função e calibração de confiança do AetherRE."""
 
 from __future__ import annotations
 
+from collections import defaultdict
+from itertools import combinations
 from typing import Any
 
-from aether_re.models import Finding
+from aether_re.models import Finding, FunctionConsensus, FunctionEvidence
 
 
-def weighted_vote(items: list[dict[str, Any]], weight_key: str = "confidence") -> Any:
-    """Vota no item com maior confiança ponderada."""
-    if not items:
-        return None
+SOURCE_WEIGHTS = {
+    "ghidra": 0.35,
+    "rizin": 0.20,
+    "angr": 0.15,
+    "binaryninja": 0.20,
+    "native": 0.10,
+}
 
-    best = max(items, key=lambda x: x.get(weight_key, 0.5))
-    return best
+
+def normalize_address(value: object, base_addr: int = 0) -> str:
+    if value is None:
+        return ""
+    # If already an integer, format as hex
+    if isinstance(value, int):
+        return f"0x{value:x}"
+    raw = str(value).strip().lower()
+    if raw.startswith("0x"):
+        raw = raw[2:]
+    if not raw:
+        return ""
+    try:
+        # Just normalize hex format, don't adjust for base address
+        # All adapter addresses are already virtual addresses
+        addr = int(raw, 16)
+        return f"0x{addr:x}"
+    except ValueError:
+        return ""
 
 
-def merge_function_signatures(
-    ghidra_funcs: list[dict],
-    rizin_funcs: list[dict],
-    reconstruct_sketches: list[dict],
-) -> list[dict[str, Any]]:
-    """
-    Une funções de múltiplas fontes.
+def _sets(values: list[str]) -> set[str]:
+    return {str(value).strip().lower() for value in values if str(value).strip()}
 
-    Prioridade: Ghidra > Rizin > Reconstruct
-    Ghidra tem decompilação real, então tem peso maior.
-    """
-    merged: dict[str, dict] = {}  # key = address
 
-    # Processar Ghidra (maior prioridade)
-    for func in ghidra_funcs:
-        addr = func.get("address", "")
-        merged[addr] = {
-            "address": addr,
-            "name": func.get("name", f"func_{addr}"),
-            "decompiled": func.get("decompiled", ""),
-            "signature": func.get("signature", ""),
-            "confidence": 0.95,
-            "source": "ghidra",
-        }
+def _jaccard(left: list[str], right: list[str]) -> float:
+    a = _sets(left)
+    b = _sets(right)
+    if not a and not b:
+        return 0.5
+    union = a | b
+    return len(a & b) / len(union) if union else 0.5
 
-    # Mesclar Rizin
-    for func in rizin_funcs:
-        addr = func.get("address", "")
-        if addr in merged:
-            # Já existe do Ghidra — melhorar se Rizin tem mais info
-            if func.get("calls"):
-                merged[addr]["rizin_calls"] = func["calls"]
+
+def _source_agreement(left: FunctionEvidence, right: FunctionEvidence) -> float:
+    call_score = _jaccard(left.calls, right.calls)
+    import_score = _jaccard(left.imports_used, right.imports_used)
+    left_name = left.name.lower()
+    right_name = right.name.lower()
+    name_score = (
+        1.0
+        if left_name == right_name
+        or left_name in right_name
+        or right_name in left_name
+        or left_name.startswith("fun_")
+        or right_name.startswith("fun_")
+        else 0.25
+    )
+    return round(0.5 * call_score + 0.2 * import_score + 0.3 * name_score, 4)
+
+
+def merge_function_evidence(
+    evidence_items: list[FunctionEvidence],
+    successful_sources: list[str] | None = None,
+    base_addr: int = 0,
+) -> list[FunctionConsensus]:
+    grouped: dict[str, list[FunctionEvidence]] = defaultdict(list)
+    for item in evidence_items:
+        address = normalize_address(item.address, base_addr)
+        if address:
+            grouped[address].append(item)
+
+    # Use all possible sources from SOURCE_WEIGHTS for coverage denominator
+    source_universe = set(SOURCE_WEIGHTS.keys())
+    denominator = max(len(source_universe), 1)
+    merged: list[FunctionConsensus] = []
+
+    for address in sorted(grouped, key=lambda value: int(value, 16)):
+        items = grouped[address]
+        items.sort(
+            key=lambda item: (
+                -SOURCE_WEIGHTS.get(item.source, 0.1),
+                -item.confidence,
+                -item.quality,
+            )
+        )
+        selected = items[0]
+        total_weight = sum(SOURCE_WEIGHTS.get(item.source, 0.1) for item in items)
+        weighted_confidence = sum(
+            item.confidence * SOURCE_WEIGHTS.get(item.source, 0.1) for item in items
+        ) / total_weight
+        weighted_quality = sum(
+            item.quality * SOURCE_WEIGHTS.get(item.source, 0.1) for item in items
+        ) / total_weight
+        agreement_values = [
+            _source_agreement(left, right)
+            for left, right in combinations(items, 2)
+        ]
+        agreement = sum(agreement_values) / len(agreement_values) if agreement_values else 1.0
+        # Coverage: proportion of source_universe that contributed evidence to this function
+        coverage = len({item.source for item in items}) / denominator
+
+        score = 0.65 * weighted_confidence + 0.25 * agreement + 0.10 * coverage
+        if len(items) == 1:
+            score = min(score, 0.92)
+        elif len(items) == 2:
+            score = min(score, 0.96)
         else:
-            merged[addr] = {
-                "address": addr,
-                "name": func.get("name", f"func_{addr}"),
-                "disasm": func.get("disasm", ""),
-                "confidence": 0.75,
-                "source": "rizin",
-            }
+            score = min(score, 0.98)
 
-    # Mesclar Reconstruct (menor prioridade)
-    for sketch in reconstruct_sketches:
-        addr = sketch.get("address", "")
-        if addr in merged:
-            merged[addr]["reconstruct_notes"] = sketch.get("notes", "")
-        else:
-            merged[addr] = {
-                "address": addr,
-                "name": sketch.get("name", f"func_{addr}"),
-                "role": sketch.get("role", "unknown"),
-                "confidence": 0.40,
-                "source": "reconstruct",
-            }
+        aliases = sorted({item.name for item in items})
+        names = {item.name.lower() for item in items}
+        warnings: list[str] = []
+        if len(items) == 1:
+            warnings.append("Função observada por apenas uma fonte; não há corroboração independente.")
+        if len(names) > 1:
+            warnings.append("As fontes atribuem nomes diferentes à mesma função.")
+        for item in items:
+            warnings.extend(f"[{item.source}] {warning}" for warning in item.warnings)
 
-    return list(merged.values())
+        merged.append(
+            FunctionConsensus(
+                address=address,
+                name=selected.name,
+                aliases=aliases,
+                confidence=round(max(0.0, min(score, 1.0)), 4),
+                evidence_quality=round(weighted_quality, 4),
+                source_agreement=round(agreement, 4),
+                coverage=round(coverage, 4),
+                selected_source=selected.source,
+                fallback_used=selected.source not in {"ghidra", "rizin", "angr"},
+                pseudocode=selected.pseudocode,
+                disassembly=selected.disassembly,
+                calls=sorted({call for item in items for call in item.calls}),
+                imports_used=sorted({imp for item in items for imp in item.imports_used}),
+                strings_near=sorted({value for item in items for value in item.strings_near}),
+                sources=sorted({item.source for item in items}),
+                warnings=list(dict.fromkeys(warnings)),
+                evidence={
+                    item.source: item.to_dict()
+                    for item in sorted(items, key=lambda value: value.source)
+                },
+            )
+        )
+    return merged
+
+
+def compute_overall_confidence(
+    merged_functions: list[FunctionConsensus],
+    native_confidence: float,
+    successful_sources: list[str] | None = None,
+    failed_sources: list[str] | None = None,
+) -> tuple[float, dict[str, Any]]:
+    if merged_functions:
+        function_confidence = sum(
+            function.confidence * max(function.coverage, 0.1)
+            for function in merged_functions
+        ) / sum(max(function.coverage, 0.1) for function in merged_functions)
+        average_coverage = sum(function.coverage for function in merged_functions) / len(
+            merged_functions
+        )
+        average_quality = sum(
+            function.evidence_quality * max(function.coverage, 0.1)
+            for function in merged_functions
+        ) / sum(max(function.coverage, 0.1) for function in merged_functions)
+        structure_weight = 0.15
+        function_weight = 0.70
+        coverage_weight = 0.15
+        overall = (
+            function_weight * function_confidence
+            + structure_weight * float(native_confidence)
+            + coverage_weight * average_coverage
+        )
+    else:
+        function_confidence = 0.0
+        average_coverage = 0.0
+        average_quality = 0.0
+        overall = min(float(native_confidence), 0.65)
+
+    successful = sorted(set(successful_sources or []))
+    failed = sorted(set(failed_sources or []))
+    rationale = {
+        "method": "function-weighted ensemble",
+        "successful_function_sources": successful,
+        "unavailable_or_failed_sources": failed,
+        "function_count": len(merged_functions),
+        "function_confidence": round(function_confidence, 4),
+        "mean_function_coverage": round(average_coverage, 4),
+        "mean_evidence_quality": round(average_quality, 4),
+        "native_structure_confidence": round(float(native_confidence), 4),
+        "weights": {
+            "functions": 0.70 if merged_functions else 0.0,
+            "native_structure": 0.15 if merged_functions else 0.70,
+            "coverage": 0.15 if merged_functions else 0.0,
+        },
+    }
+    return round(max(0.0, min(overall, 1.0)), 4), rationale
 
 
 def merge_findings(
@@ -84,133 +211,42 @@ def merge_findings(
     rizin_findings: list[Finding],
     native_findings: list[Finding],
 ) -> list[Finding]:
-    """
-    Une findings de múltiplas fontes, removendo duplicatas.
-
-    Usa título + severidade como chave de dedup.
-    """
     seen: dict[str, Finding] = {}
-
-    all_findings = [
-        *native_findings,
-        *(ghidra_findings or []),
-        *(rizin_findings or []),
-    ]
-
-    for f in all_findings:
-        key = f"{f.title}:{f.severity}"
-        if key not in seen:
-            seen[key] = f
-        else:
-            # Se já existe, manter o de maior confiança
-            if f.confidence > seen[key].confidence:
-                seen[key] = f
-
-    # Ordenar por severidade: critical > high > medium > low > info
+    for finding in [*native_findings, *(ghidra_findings or []), *(rizin_findings or [])]:
+        key = f"{finding.title}:{finding.severity}"
+        if key not in seen or finding.confidence > seen[key].confidence:
+            seen[key] = finding
     severity_order = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
-    sorted_findings = sorted(
-        seen.values(),
-        key=lambda x: (severity_order.get(x.severity, 5), -x.confidence)
-    )
-
-    return sorted_findings
+    return sorted(seen.values(), key=lambda item: (severity_order.get(item.severity, 5), -item.confidence))
 
 
-def compute_overall_confidence(
-    ghidra_available: bool,
-    rizin_available: bool,
-    capstone_available: bool,
-    native_confidence: float,
-) -> float:
-    """
-    Calcula confiança geral baseada em quais ferramentas estão disponíveis.
-
-   weights:
-    - Ghidra: 0.40 (decompilação real)
-    - Rizin: 0.25 (análise estática)
-    - Capstone: 0.15 (disasm)
-    - Native: 0.20 (strings/decode)
-    """
-    weights = {
-        "ghidra": 0.40,
-        "rizin": 0.25,
-        "capstone": 0.15,
-        "native": 0.20,
-    }
-
-    total = 0.0
-    divisor = 0.0
-
-    if ghidra_available:
-        total += weights["ghidra"]
-        divisor += weights["ghidra"]
-
-    if rizin_available:
-        total += weights["rizin"]
-        divisor += weights["rizin"]
-
-    if capstone_available:
-        total += weights["capstone"]
-        divisor += weights["capstone"]
-
-    # Native sempre disponível
-    total += weights["native"] * native_confidence
-    divisor += weights["native"]
-
-    if divisor == 0:
-        return 0.0
-
-    return total / divisor
+def weighted_vote(items: list[dict[str, Any]], weight_key: str = "confidence") -> Any:
+    return max(items, key=lambda item: item.get(weight_key, 0.5)) if items else None
 
 
-def build_ensemble_report(
-    ghidra_result: dict | None,
-    rizin_result: dict | None,
-    native_result: dict,
-    capstone_available: bool,
-) -> dict[str, Any]:
-    """
-    Monta relatório ensemble final com consenso.
-    """
-    # Calcular confiança baseada em quais ferramentas estão disponíveis
-    confidence = compute_overall_confidence(
-        ghidra_available=ghidra_result.get("ok", False) if ghidra_result else False,
-        rizin_available=rizin_result.get("ok", False) if rizin_result else False,
-        capstone_available=capstone_available,
-        native_confidence=native_result.get("confidence", 0.5),
-    )
-
-    # Fundir functions
-    merged_funcs = merge_function_signatures(
-        ghidra_funcs=ghidra_result.get("functions", []) if ghidra_result else [],
-        rizin_funcs=rizin_result.get("functions", []) if rizin_result else [],
-        reconstruct_sketches=native_result.get("function_sketches", []),
-    )
-
-    # Fundir findings
-    merged_findings = merge_findings(
-        ghidra_findings=[],  # GhidraAdapter já retorna findings formatados
-        rizin_findings=[],
-        native_findings=native_result.get("findings", []),
-    )
-
-    return {
-        "confidence": confidence,
-        "engines_used": _list_engines(ghidra_result, rizin_result),
-        "merged_functions": merged_funcs,
-        "merged_findings": merged_findings,
-        "sources": {
-            "ghidra": ghidra_result.get("ok", False) if ghidra_result else False,
-            "rizin": rizin_result.get("ok", False) if rizin_result else False,
-            "native": True,
-        },
-    }
-
-
-def _list_engines(ghidra: dict | None, rizin: dict | None) -> list[str]:
-    engines = ["triage", "structure", "strings_decode", "disasm", "reconstruct"]
-    if ghidra and ghidra.get("ok"):
-        engines.append("ghidra")
-    if rizin and rizin.get("ok"):
-        engines.append("rizin")
-    return engines
+def merge_function_signatures(
+    ghidra_funcs: list[dict[str, Any]],
+    rizin_funcs: list[dict[str, Any]],
+    reconstruct_sketches: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    evidence: list[FunctionEvidence] = []
+    for source, items in (("ghidra", ghidra_funcs), ("rizin", rizin_funcs)):
+        for item in items:
+            evidence.append(FunctionEvidence(**item))
+    for sketch in reconstruct_sketches:
+        address = normalize_address(sketch.get("address"))
+        if address:
+            evidence.append(
+                FunctionEvidence(
+                    address=address,
+                    name=sketch.get("name", f"sub_{address.removeprefix('0x')}"),
+                    source="native",
+                    confidence=float(sketch.get("confidence", 0.3)),
+                    quality=0.3,
+                    coverage=0.25,
+                    notes=str(sketch.get("notes", "")),
+                    imports_used=list(sketch.get("imports_used", [])),
+                    strings_near=list(sketch.get("strings_near", [])),
+                )
+            )
+    return [item.to_dict() for item in merge_function_evidence(evidence, ["ghidra", "rizin"])]

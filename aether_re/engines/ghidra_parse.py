@@ -52,7 +52,13 @@ def parse_decompiled_text(text: str) -> list[FunctionEvidence]:
                 if call != name and not call.startswith(("if", "for", "while", "switch", "return"))
             }
         )
-        warnings = [warning.group(1).strip() for warning in WARNING_RE.finditer(pseudocode)]
+        warnings = []
+        for warning in WARNING_RE.finditer(pseudocode):
+            w = warning.group(1).strip()
+            # Remove trailing comment markers if present
+            if w.endswith('*/'):
+                w = w[:-2].strip()
+            warnings.append(w)
         strings = [value.group(0)[:160] for value in STRING_RE.finditer(pseudocode)][:30]
         functions.append(
             FunctionEvidence(

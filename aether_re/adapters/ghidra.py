@@ -136,12 +136,21 @@ public class ExportDecompiled extends GhidraScript {
                 env=env,
                 cwd=str(out_dir),
             )
+            decompiled_exists = decompiled.exists()
             return {
                 "ok": proc.returncode == 0,
+                "executed": True,
+                "produced_evidence": proc.returncode == 0 and decompiled_exists,
+                "partial": proc.returncode != 0 or not decompiled_exists,
                 "returncode": proc.returncode,
                 "stdout_tail": (proc.stdout or "")[-2000:],
                 "stderr_tail": (proc.stderr or "")[-2000:],
-                "decompiled_path": str(decompiled) if decompiled.exists() else None,
+                "decompiled_path": str(decompiled) if decompiled_exists else None,
             }
         except Exception as e:
-            return {"ok": False, "error": str(e)}
+            return {
+                "ok": False,
+                "executed": True,
+                "produced_evidence": False,
+                "error": str(e),
+            }

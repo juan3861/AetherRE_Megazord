@@ -66,8 +66,11 @@ setImmediate(function () {
         )
         return {
             "ok": True,
+            "executed": True,
+            "produced_evidence": False,
+            "partial": True,
             "mode": "script_generated",
             "script": str(script),
             "guide": str(guide),
-            "note": "Dinâmico não auto-executa o alvo (segurança).",
+            "note": "Dinâmico não auto-executa o alvo (segurança); nenhum trace foi coletado nesta execução.",
         }

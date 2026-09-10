@@ -20,3 +20,12 @@ class Adapter(ABC):
 
     def status(self) -> dict[str, Any]:
         return {"name": self.name, "available": self.available()}
+
+    def execution_result(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "available": self.available(),
+            "executed": False,
+            "produced_evidence": False,
+            "partial": False,
+        }

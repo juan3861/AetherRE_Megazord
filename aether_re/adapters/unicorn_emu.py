@@ -56,6 +56,8 @@ class UnicornAdapter(Adapter):
         if IS_WINDOWS:
             return {
                 "ok": True,
+                "executed": True,
+                "produced_evidence": False,
                 "partial": True,
                 "note": "Unicorn desativado no Windows nesta versão para evitar falhas de memória/mapa.",
                 "entry": hex(ADDRESS),
