@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aether-re.local/schemas/program-baseline.v1.json",
+  "title": "RE_Megazord deterministic program baseline",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "scope", "files"],
+  "properties": {
+    "schema": {
+      "const": "program-baseline.v1"
+    },
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["included_count", "excluded"],
+      "properties": {
+        "included_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "excluded": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "files": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "sha256", "size"],
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "size": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      }
+    }
+  }
+}
