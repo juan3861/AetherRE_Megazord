@@ -10,7 +10,13 @@ htmlcov/
 output/
 !output/fixtures/
 samples/generated/
-tools/
+tools/*
+!tools/bootstrap_corpus.py
+!tools/complex_corpus.py
+!tools/f00_program_baseline.py
+# Task 1: only generated baseline evidence and SDD task reports stay local.
+output/f00_program_baseline.json
+.superpowers/sdd/**/task-*-report.md
 *.log
 =*.log
 *.tmp

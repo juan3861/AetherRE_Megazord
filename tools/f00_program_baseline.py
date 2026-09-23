@@ -6,13 +6,15 @@ import argparse
 import hashlib
 import json
 import os
+import subprocess
 import tempfile
+import xml.etree.ElementTree as ElementTree
 from pathlib import Path
 from typing import Any, Iterator
 
 
 SCHEMA = "program-baseline.v1"
-EXCLUDED_DIRS = frozenset(
+EXCLUDED_DIR_NAMES = frozenset(
     {
         ".git",
         ".mypy_cache",
@@ -24,9 +26,9 @@ EXCLUDED_DIRS = frozenset(
         "ghidra_12.1.2_public",
         "node_modules",
         "output",
-        "samples/generated",
     }
 )
+EXCLUDED_RELATIVE_DIRS = frozenset({"samples/generated"})
 
 
 def safe_iter_files(root: Path) -> Iterator[Path]:
@@ -34,13 +36,20 @@ def safe_iter_files(root: Path) -> Iterator[Path]:
     root = Path(root)
     if root.is_symlink() or not root.is_dir():
         raise ValueError("baseline_root_must_be_regular_directory")
-    excluded_names = {name.casefold() for name in EXCLUDED_DIRS if "/" not in name}
+    excluded_names = {name.casefold() for name in EXCLUDED_DIR_NAMES}
+    excluded_relative_dirs = {
+        relative.casefold() for relative in EXCLUDED_RELATIVE_DIRS
+    }
     for current, dirs, files in os.walk(root, topdown=True, followlinks=False):
         parent = Path(current)
         dirs[:] = [
             name
             for name in sorted(dirs)
             if name.casefold() not in excluded_names
+            and not _is_excluded_relative_dir(
+                (parent / name).relative_to(root).as_posix(),
+                excluded_relative_dirs,
+            )
             and not (parent / name).is_symlink()
             and not (
                 hasattr(parent / name, "is_junction")
@@ -53,13 +62,128 @@ def safe_iter_files(root: Path) -> Iterator[Path]:
                 yield path
 
 
-def sha256_file(path: Path) -> str:
-    """Hash a file in bounded chunks."""
+def _is_excluded_relative_dir(path: str, excluded_relative_dirs: set[str]) -> bool:
+    """Return whether a normalized directory is an excluded path or descendant."""
+    normalized = path.casefold().strip("/")
+    return any(
+        normalized == excluded or normalized.startswith(excluded + "/")
+        for excluded in excluded_relative_dirs
+    )
+
+
+def _stat_signature(path: Path) -> tuple[int, int, int, int]:
+    stat = path.stat()
+    return (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)
+
+
+def hash_file_stable(path: Path) -> tuple[str, int]:
+    """Hash one file and fail closed when it changes while being read."""
+    path = Path(path)
+    before = _stat_signature(path)
     digest = hashlib.sha256()
+    bytes_read = 0
     with Path(path).open("rb") as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
-    return digest.hexdigest()
+            bytes_read += len(chunk)
+    after = _stat_signature(path)
+    if before != after or bytes_read != before[2]:
+        raise ValueError(f"baseline_file_changed_during_hash:{path}")
+    return digest.hexdigest(), bytes_read
+
+
+def sha256_file(path: Path) -> str:
+    """Return a stable SHA-256 digest for one regular baseline file."""
+    return hash_file_stable(path)[0]
+
+
+def _canonical_json_sha256(payload: Any) -> str:
+    encoded = json.dumps(
+        payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _capture_git_status(root: Path) -> dict[str, Any]:
+    """Capture Git porcelain v1 without making Git availability a precondition."""
+    empty_digest = hashlib.sha256(b"").hexdigest()
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(root), "status", "--porcelain=v1", "--untracked-files=all"],
+            check=False,
+            capture_output=True,
+        )
+    except OSError:
+        return {
+            "available": False,
+            "reason": "git_unavailable",
+            "returncode": None,
+            "sha256": empty_digest,
+            "status_porcelain_v1": [],
+        }
+    if completed.returncode != 0:
+        return {
+            "available": False,
+            "reason": "git_status_failed",
+            "returncode": completed.returncode,
+            "sha256": hashlib.sha256(completed.stdout).hexdigest(),
+            "status_porcelain_v1": [],
+        }
+    return {
+        "available": True,
+        "returncode": 0,
+        "sha256": hashlib.sha256(completed.stdout).hexdigest(),
+        "status_porcelain_v1": completed.stdout.decode("utf-8", "surrogateescape").splitlines(),
+    }
+
+
+def _junit_summary(root: ElementTree.Element) -> dict[str, int]:
+    """Return a strict normalized JUnit summary from a testsuite(s) document."""
+    local_name = root.tag.rsplit("}", 1)[-1]
+    if local_name not in {"testsuite", "testsuites"}:
+        raise ValueError("baseline_junit_invalid_root")
+
+    def attribute(name: str, default: int) -> int:
+        value = root.get(name)
+        if value is None:
+            return default
+        try:
+            parsed = int(value)
+        except ValueError as error:
+            raise ValueError(f"baseline_junit_invalid_{name}") from error
+        if parsed < 0:
+            raise ValueError(f"baseline_junit_invalid_{name}")
+        return parsed
+
+    cases = list(root.iterfind(".//{*}testcase")) + list(root.iterfind(".//testcase"))
+    tests = attribute("tests", len(cases))
+    return {
+        "errors": attribute("errors", 0),
+        "failures": attribute("failures", 0),
+        "skipped": attribute("skipped", 0),
+        "tests": tests,
+    }
+
+
+def _capture_junit(junit_path: Path | None) -> dict[str, Any]:
+    """Link a supplied JUnit file by stable hash and normalized summary."""
+    if junit_path is None:
+        return {"provided": False}
+    path = Path(junit_path).resolve()
+    if path.is_symlink() or not path.is_file():
+        raise ValueError("baseline_junit_must_be_regular_file")
+    digest, size = hash_file_stable(path)
+    try:
+        root = ElementTree.fromstring(path.read_bytes())
+    except ElementTree.ParseError as error:
+        raise ValueError("baseline_junit_invalid_xml") from error
+    return {
+        "path": str(path),
+        "provided": True,
+        "sha256": digest,
+        "size": size,
+        "summary": _junit_summary(root),
+    }
 
 
 def atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -81,7 +205,9 @@ def atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
             os.unlink(temporary_name)
 
 
-def capture_program_baseline(root: Path, output: Path) -> dict[str, Any]:
+def capture_program_baseline(
+    root: Path, output: Path, junit_path: Path | None = None
+) -> dict[str, Any]:
     """Hash the RE project while explicitly removing Rotor artifacts from scope."""
     root = Path(root).resolve()
     output = Path(output).resolve()
@@ -94,20 +220,19 @@ def capture_program_baseline(root: Path, output: Path) -> dict[str, Any]:
         if "rotor" in relative.casefold():
             excluded.append(relative)
             continue
-        included.append(
-            {
-                "path": relative,
-                "sha256": sha256_file(path),
-                "size": path.stat().st_size,
-            }
-        )
+        digest, size = hash_file_stable(path)
+        included.append({"path": relative, "sha256": digest, "size": size})
+    files = sorted(included, key=lambda row: row["path"])
     report = {
         "schema": SCHEMA,
         "scope": {
             "included_count": len(included),
             "excluded": sorted(excluded),
         },
-        "files": sorted(included, key=lambda row: row["path"]),
+        "files": files,
+        "git": _capture_git_status(root),
+        "inventory": {"file_count": len(files), "sha256": _canonical_json_sha256(files)},
+        "junit": _capture_junit(junit_path),
     }
     atomic_write_json(output, report)
     return report
@@ -117,8 +242,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--junit", type=Path)
     arguments = parser.parse_args()
-    report = capture_program_baseline(arguments.root, arguments.output)
+    report = capture_program_baseline(arguments.root, arguments.output, arguments.junit)
     print(
         json.dumps(
             {

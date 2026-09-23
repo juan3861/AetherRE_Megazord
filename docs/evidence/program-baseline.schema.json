@@ -4,7 +4,7 @@
   "title": "RE_Megazord deterministic program baseline",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema", "scope", "files"],
+  "required": ["schema", "scope", "files", "inventory", "git", "junit"],
   "properties": {
     "schema": {
       "const": "program-baseline.v1"
@@ -48,6 +48,59 @@
           }
         }
       }
+    },
+    "inventory": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["file_count", "sha256"],
+      "properties": {
+        "file_count": {"type": "integer", "minimum": 0},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    },
+    "git": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["available", "returncode", "sha256", "status_porcelain_v1"],
+      "properties": {
+        "available": {"type": "boolean"},
+        "reason": {"type": "string"},
+        "returncode": {"type": ["integer", "null"]},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "status_porcelain_v1": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "junit": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["provided"],
+          "properties": {"provided": {"const": false}}
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["provided", "path", "sha256", "size", "summary"],
+          "properties": {
+            "provided": {"const": true},
+            "path": {"type": "string", "minLength": 1},
+            "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "size": {"type": "integer", "minimum": 0},
+            "summary": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["tests", "failures", "errors", "skipped"],
+              "properties": {
+                "tests": {"type": "integer", "minimum": 0},
+                "failures": {"type": "integer", "minimum": 0},
+                "errors": {"type": "integer", "minimum": 0},
+                "skipped": {"type": "integer", "minimum": 0}
+              }
+            }
+          }
+        }
+      ]
     }
   }
 }
