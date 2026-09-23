@@ -32,7 +32,6 @@ from aether_re.ir import IRDocument, IRLocation, IRNode
 from aether_re.ir_graph import project_ir
 from aether_re.engines.reconstruct import build_reconstruction
 from aether_re.profile_certification import certify_static_profile
-from aether_re.lab_policy import LabPolicy, preflight_dynamic_lab, validate_runtime_proof
 
 
 LIMITATIONS_BASE = [
@@ -54,7 +53,7 @@ class CasePolicy:
     authorization: AuthorizationPolicy
     intake_limits: IntakeLimits = field(default_factory=IntakeLimits)
     request_dynamic: bool = False
-    lab_policy: LabPolicy | None = None
+    lab_policy: dict[str, Any] | None = None
     runtime_proof: dict[str, Any] | None = None
 
     @classmethod
@@ -66,7 +65,7 @@ class CasePolicy:
 
     @classmethod
     def dynamic(
-        cls, principal: str = "local-owner", *, lab_policy: LabPolicy | None = None,
+        cls, principal: str = "local-owner", *, lab_policy: dict[str, Any] | None = None,
         runtime_proof: dict[str, Any] | None = None,
     ) -> "CasePolicy":
         return cls(AuthorizationPolicy.from_dict({
@@ -153,7 +152,17 @@ def normalize_observations(intake: Any, observations: tuple[CaseObservation, ...
         for item in observations if item.evidence_refs
     )
     document = IRDocument("ir.v1", intake.root_artifact.artifact_id, profile, nodes, (), ())
-    return {"document": document, "projection": project_ir(document)}
+    projection = project_ir(document)
+    projection["abstentions"] = [
+        {
+            "kind": item.kind, "value": item.value,
+            "epistemic_state": item.epistemic_state.value,
+            "evidence_refs": list(item.evidence_refs),
+            "losses": list(item.limitations) or ["evidence absent"],
+        }
+        for item in observations if not item.evidence_refs
+    ]
+    return {"document": document, "projection": projection}
 
 
 def verify_reconstruction(intake: Any, graph: dict[str, Any], policy: CasePolicy) -> tuple[Any, ...]:
@@ -188,11 +197,32 @@ def _dynamic_gate(policy: CasePolicy, target_sha256: str) -> str:
         raise ValueError("dynamic_not_authorized")
     if policy.lab_policy is None or policy.runtime_proof is None:
         raise ValueError("dynamic_vm_proof_required")
-    preflight = preflight_dynamic_lab(policy.lab_policy, require_runtime_proof=True)
-    proof = validate_runtime_proof(policy.runtime_proof, policy=policy.lab_policy)
-    if preflight["status"] != "ready" or proof["status"] != "verified":
+    lab = policy.lab_policy
+    proof = policy.runtime_proof
+    required_lab = {
+        "authorized": True, "isolation": "vm", "network_enabled": False,
+        "writable_project_mount": False, "host_execution": False,
+        "rollback_enabled": True, "collector_configured": True,
+    }
+    lab_valid = (
+        isinstance(lab, dict)
+        and all(lab.get(key) == value for key, value in required_lab.items())
+        and isinstance(lab.get("snapshot_id"), str) and bool(lab["snapshot_id"].strip())
+        and isinstance(lab.get("timeout_s"), int) and not isinstance(lab["timeout_s"], bool) and lab["timeout_s"] > 0
+        and isinstance(lab.get("memory_limit_mb"), int) and not isinstance(lab["memory_limit_mb"], bool) and lab["memory_limit_mb"] > 0
+    )
+    proof_valid = (
+        isinstance(lab, dict) and isinstance(proof, dict)
+        and proof.get("schema") == "dynamic-lab-runtime-proof.v1"
+        and proof.get("snapshot_id") == lab.get("snapshot_id")
+        and proof.get("rollback_verified") is True
+        and proof.get("network_isolated") is True
+        and proof.get("collector_heartbeat") is True
+        and isinstance(proof.get("events"), list) and bool(proof["events"])
+    )
+    if not lab_valid or not proof_valid:
         raise ValueError("dynamic_vm_proof_invalid")
-    if policy.runtime_proof.get("target_sha256") != target_sha256:
+    if proof.get("target_sha256") != target_sha256:
         raise ValueError("dynamic_target_mismatch")
     # There is no trusted VM executor in this repository.  Passing the gate is
     # not permission to fall back to host execution.
