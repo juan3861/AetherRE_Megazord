@@ -38,9 +38,14 @@ def detect_static_profiles(target:Path)->tuple[ProfileMatch,...]:
     if raw.startswith(b'\x7fELF'):candidates.append('native-elf');reasons['native-elf']=('elf_magic',)
     elif raw.startswith(b'MZ'): p='dotnet' if _is_dotnet(raw) else 'native-pe';candidates.append(p);reasons[p]=('pe_com_descriptor' if p=='dotnet' else 'pe_magic',)
     elif raw.startswith(b'\0asm'):candidates.append('wasm');reasons['wasm']=('wasm_magic',)
-    elif raw[:4] in (b'\xcf\xfa\xed\xfe',b'\xce\xfa\xed\xfe',b'\xca\xfe\xba\xbe'):
-      # class shares CAFE BABE: distinguish Mach fat by plausible nfat_arch; absent is JVM class.
-      p='macho' if raw[:4]!=b'\xca\xfe\xba\xbe' or (len(raw)>8 and int.from_bytes(raw[4:8],'big')<128) else 'jvm'; candidates.append(p);reasons[p]=('magic',)
+    elif raw[:4] in (b'\xcf\xfa\xed\xfe', b'\xce\xfa\xed\fe'):
+      candidates.append('macho'); reasons['macho']=('macho_thin_magic',)
+    elif raw[:4] == b'\xca\xfe\xba\xbe':
+      # JVM is CAFEBABE + u2 minor + u2 major (45..100). A fat Mach-O starts
+      # with CAFEBABE + nfat_arch + architecture records instead.
+      jvm_major = int.from_bytes(raw[6:8], 'big') if len(raw) >= 8 else -1
+      p = 'jvm' if 45 <= jvm_major <= 100 else 'macho'
+      candidates.append(p); reasons[p]=('jvm_class_header' if p=='jvm' else 'macho_fat_magic',)
     elif raw.startswith(b'dex\n'):candidates.append('android-apk');reasons['android-apk']=('dex_magic',)
     elif raw.startswith(b':'):candidates.append('firmware');reasons['firmware']=('intel_hex',)
     elif raw.startswith(b'PK\x03\x04'):

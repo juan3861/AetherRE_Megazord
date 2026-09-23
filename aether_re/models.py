@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, asdict
 from typing import Any
+from aether_re.kernel_contracts import EpistemicState
 
 
 @dataclass
@@ -42,6 +43,10 @@ class FunctionEvidence:
     notes: str = ""
     warnings: list[str] = field(default_factory=list)
     raw: dict[str, Any] = field(default_factory=dict)
+    address_space: str = "unknown"
+    evidence_refs: list[str] = field(default_factory=list)
+    epistemic_state: EpistemicState = EpistemicState.UNKNOWN
+    losses: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -66,6 +71,12 @@ class FunctionConsensus:
     sources: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     evidence: dict[str, dict[str, Any]] = field(default_factory=dict)
+    address_space: str = "unknown"
+    evidence_refs: list[str] = field(default_factory=list)
+    epistemic_state: EpistemicState = EpistemicState.UNKNOWN
+    losses: list[str] = field(default_factory=list)
+    conflicts: list[dict[str, Any]] = field(default_factory=list)
+    alternatives: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
