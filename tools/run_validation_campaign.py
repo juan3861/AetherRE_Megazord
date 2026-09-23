@@ -20,24 +20,32 @@ MANDATORY = (
 
 def mandatory_cases(root: Path) -> list[CampaignCase]:
     py = sys.executable
-    cases = [CampaignCase(f"contract-{name}", name,
-                          (py, "-c", f"print('CASE_OK:{name}')"), 0,
-                          (f"CASE_OK:{name}",), 30) for name in MANDATORY if name != "disk_full"]
-    # A logical ENOSPC contract is deterministic, but cannot stand in for physical disk exhaustion.
-    cases.append(CampaignCase("physical-enospc-capability", "disk_full", (py, "-c",
-        "print('CAPABILITY_UNAVAILABLE:physical_enospc_not_exercised')"), 0,
-        ("CAPABILITY_UNAVAILABLE",), 30))
+    # Unbound classes are explicit debt, never synthetic passes. The integrated suites
+    # below provide assertion-bearing coverage for the classes they actually exercise.
+    cases = [CampaignCase(f"not-exercised-{name}", name,
+                          (py, "-c", f"print('CAPABILITY_UNAVAILABLE:{name}_not_bound')"), 0,
+                          ("CAPABILITY_UNAVAILABLE", name), 30, capability_optional=True)
+             for name in MANDATORY]
     cases.extend([
         CampaignCase("f02-local-fault-suite", "tamper",
                      (py, str(root / "tools" / "f02_fault_campaign.py"),
                       "--out", str(root / "output" / "f02_local_fault_campaign.json")),
-                     0, ("status=complete_for_injected_local_profile",), 180),
+                     0, ("status=complete_for_injected_local_profile",), 180,
+                     evidence_files=("output/f02_local_fault_campaign.json",),
+                     evidence_schema="f02-local-fault-campaign.v1",
+                     evidence_status="complete_for_injected_local_profile", minimum_evidence_cases=8),
         CampaignCase("f11-adversarial-suite", "prompt_injection",
                      (py, str(root / "tools" / "f11_adversarial_campaign.py")),
-                     0, ('"status": "complete"',), 180),
+                     0, ('"status": "complete"',), 180,
+                     evidence_files=("output/f11_adversarial_campaign_20260918.json",),
+                     evidence_schema="f11-adversarial-campaign.v1", evidence_status="complete",
+                     minimum_evidence_cases=9),
         CampaignCase("f11-cli-adversarial-suite", "cli_encoding",
                      (py, str(root / "tools" / "f11_adversarial_cli_campaign.py")),
-                     0, ('"status": "complete"',), 180),
+                     0, ('"status": "complete"',), 180,
+                     evidence_files=("output/f11_adversarial_cli_campaign_20260918.json",),
+                     evidence_schema="f11-adversarial-cli-campaign.v1", evidence_status="complete",
+                     minimum_evidence_cases=2),
     ])
     return cases
 

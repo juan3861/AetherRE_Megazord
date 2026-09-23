@@ -9,6 +9,7 @@ from pathlib import Path
 import re
 import subprocess
 import tempfile
+import threading
 import time
 from typing import Any, Sequence
 
@@ -31,6 +32,11 @@ class CampaignCase:
     expected_exit: int
     expected_codes: tuple[str, ...]
     timeout_s: int
+    capability_optional: bool = False
+    evidence_files: tuple[str, ...] = ()
+    evidence_schema: str | None = None
+    evidence_status: str | None = None
+    minimum_evidence_cases: int = 0
 
 
 def _inside(path: Path, root: Path) -> bool:
@@ -101,8 +107,46 @@ def _atomic_json(path: Path, value: dict[str, Any]) -> None:
         raise
 
 
+def _capture(pipe: Any, *, cap: int, state: dict[str, Any], key: str,
+             exceeded: threading.Event) -> None:
+    digest = hashlib.sha256(); kept = bytearray(); total = 0
+    while True:
+        chunk = pipe.read(4096)
+        if not chunk: break
+        digest.update(chunk); total += len(chunk)
+        if len(kept) < cap: kept.extend(chunk[:cap - len(kept)])
+        if total > cap:
+            exceeded.set()
+            pipe.close()
+            break
+    state[key] = {"data": bytes(kept), "bytes": total, "sha256": digest.hexdigest()}
+
+
+def _evidence(case: CampaignCase, root: Path) -> tuple[list[dict[str, str]], list[str]]:
+    hashes: list[dict[str, str]] = []; errors: list[str] = []
+    for raw in case.evidence_files:
+        path = (root / raw).resolve()
+        if not _inside(path, root) or not path.is_file():
+            errors.append(f"evidence_missing:{raw}"); continue
+        data = path.read_bytes()
+        hashes.append({"path": path.relative_to(root).as_posix(), "sha256": hashlib.sha256(data).hexdigest()})
+        try: document = json.loads(data)
+        except (ValueError, UnicodeDecodeError):
+            errors.append(f"evidence_invalid_json:{raw}"); continue
+        if case.evidence_schema and document.get("schema") != case.evidence_schema:
+            errors.append(f"evidence_schema_mismatch:{raw}")
+        if case.evidence_status and document.get("status") != case.evidence_status:
+            errors.append(f"evidence_status_mismatch:{raw}")
+        if case.minimum_evidence_cases:
+            count = len(document.get("cases", [])) if isinstance(document.get("cases"), list) else document.get("campaign", {}).get("cases", 0)
+            if not isinstance(count, int) or count < case.minimum_evidence_cases:
+                errors.append(f"evidence_denominator_too_small:{raw}")
+    return hashes, errors
+
+
 def run_validation_campaign(cases: Sequence[CampaignCase], *, root: Path,
-                            output: Path, max_cases: int = 500) -> dict[str, Any]:
+                            output: Path, max_cases: int = 500,
+                            max_output_bytes: int = 1_048_576) -> dict[str, Any]:
     """Execute commands without a shell and fail closed on every mismatch."""
     root = Path(root).resolve()
     output = Path(output).resolve()
@@ -111,6 +155,8 @@ def run_validation_campaign(cases: Sequence[CampaignCase], *, root: Path,
     if not _inside(output, root):
         raise ValueError("output_outside_root")
     _validate(cases, max_cases=max_cases)
+    if not isinstance(max_output_bytes, int) or not 1024 <= max_output_bytes <= 64 * 1024 * 1024:
+        raise ValueError("max_output_bytes_out_of_range")
     rows: list[dict[str, Any]] = []
     for case in cases:
         started = time.monotonic()
@@ -121,28 +167,37 @@ def run_validation_campaign(cases: Sequence[CampaignCase], *, root: Path,
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 shell=False, creationflags=flags, env=env,
                                 start_new_session=(os.name != "nt"))
-        timed_out = False
-        try:
-            stdout, stderr = proc.communicate(timeout=case.timeout_s)
-        except subprocess.TimeoutExpired:
-            timed_out = True
-            _kill_tree(proc)
-            stdout, stderr = proc.communicate()
+        timed_out = False; exceeded = threading.Event(); captured: dict[str, Any] = {}
+        threads = [threading.Thread(target=_capture, args=(proc.stdout,), kwargs={"cap": max_output_bytes, "state": captured, "key": "stdout", "exceeded": exceeded}),
+                   threading.Thread(target=_capture, args=(proc.stderr,), kwargs={"cap": max_output_bytes, "state": captured, "key": "stderr", "exceeded": exceeded})]
+        for thread in threads: thread.start()
+        deadline = time.monotonic() + case.timeout_s
+        while proc.poll() is None:
+            if exceeded.is_set(): _kill_tree(proc); break
+            if time.monotonic() >= deadline: timed_out = True; _kill_tree(proc); break
+            time.sleep(0.01)
+        proc.wait()
+        for thread in threads: thread.join(timeout=5)
+        stdout_info = captured.get("stdout", {"data": b"", "bytes": 0, "sha256": hashlib.sha256(b"").hexdigest()})
+        stderr_info = captured.get("stderr", {"data": b"", "bytes": 0, "sha256": hashlib.sha256(b"").hexdigest()})
+        stdout, stderr = stdout_info["data"], stderr_info["data"]
         combined = (stdout + b"\n" + stderr).decode("utf-8", errors="replace")
         matched = [code for code in case.expected_codes if code in combined]
         unavailable = "CAPABILITY_UNAVAILABLE" in combined
-        passed = not timed_out and proc.returncode == case.expected_exit and len(matched) == len(case.expected_codes)
-        state = "partial" if unavailable and not timed_out else ("passed" if passed else "failed")
+        evidence_hashes, evidence_errors = _evidence(case, root)
+        passed = not timed_out and not exceeded.is_set() and proc.returncode == case.expected_exit and len(matched) == len(case.expected_codes) and not evidence_errors
+        state = "partial" if unavailable and case.capability_optional and passed else ("passed" if passed and not unavailable else "failed")
+        outcome = "timeout" if timed_out else ("output_limit_exceeded" if exceeded.is_set() else ("capability_unavailable" if state == "partial" else ("matched" if passed else "expectation_mismatch")))
         rows.append({
             "case_id": case.case_id, "category": case.category, "status": state,
-            "outcome_code": "timeout" if timed_out else ("capability_unavailable" if unavailable else ("matched" if passed else "expectation_mismatch")),
+            "outcome_code": outcome,
             "expected_exit": case.expected_exit, "exit_code": proc.returncode,
             "expected_codes": list(case.expected_codes), "matched_codes": matched,
             "duration_ms": int((time.monotonic() - started) * 1000),
-            "stdout_sha256": hashlib.sha256(stdout).hexdigest(),
-            "stderr_sha256": hashlib.sha256(stderr).hexdigest(),
+            "stdout_sha256": stdout_info["sha256"], "stdout_bytes": stdout_info["bytes"],
+            "stderr_sha256": stderr_info["sha256"], "stderr_bytes": stderr_info["bytes"],
             "stdout_tail": _tail(stdout), "stderr_tail": _tail(stderr),
-            "evidence_hashes": [],
+            "evidence_hashes": evidence_hashes, "evidence_errors": evidence_errors,
         })
     failed = sum(row["status"] == "failed" for row in rows)
     partial = sum(row["status"] == "partial" for row in rows)

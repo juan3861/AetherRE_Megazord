@@ -56,10 +56,54 @@ def test_timeout_kills_case_and_uses_machine_code(tmp_path):
 def test_unavailable_physical_case_makes_campaign_partial(tmp_path):
     report = run_validation_campaign([
         _case("physical-enospc", category="disk_full", script="print('CAPABILITY_UNAVAILABLE')",
-              expected_codes=("CAPABILITY_UNAVAILABLE",))
+              expected_codes=("CAPABILITY_UNAVAILABLE",)).__class__(
+                  "physical-enospc", "disk_full",
+                  (sys.executable, "-c", "print('CAPABILITY_UNAVAILABLE')"),
+                  0, ("CAPABILITY_UNAVAILABLE",), 5, capability_optional=True)
     ], root=tmp_path, output=tmp_path / "r.json")
     assert report["status"] == "partial"
     assert report["summary"]["partial"] == 1
+
+
+def test_capability_marker_without_contract_or_with_wrong_exit_fails(tmp_path):
+    cases = [
+        _case("undeclared", script="print('CAPABILITY_UNAVAILABLE')",
+              expected_codes=("CAPABILITY_UNAVAILABLE",)),
+        CampaignCase("wrong-exit", "disk_full",
+                     (sys.executable, "-c", "print('CAPABILITY_UNAVAILABLE');raise SystemExit(9)"),
+                     0, ("CAPABILITY_UNAVAILABLE",), 5, capability_optional=True),
+    ]
+    report = run_validation_campaign(cases, root=tmp_path, output=tmp_path / "r.json")
+    assert report["status"] == "failed"
+    assert report["summary"]["failed"] == 2
+
+
+def test_oversized_output_is_killed_and_bounded(tmp_path):
+    report = run_validation_campaign([
+        _case("bomb", category="oversized_output",
+              script="import sys; sys.stdout.write('x'*2000000)", expected_codes=("never",))
+    ], root=tmp_path, output=tmp_path / "r.json", max_output_bytes=8192)
+    row = report["cases"][0]
+    assert row["status"] == "failed"
+    assert row["outcome_code"] == "output_limit_exceeded"
+    assert row["stdout_bytes"] <= 16384
+
+
+def test_json_artifact_is_schema_bound_and_hashed(tmp_path):
+    artifact = tmp_path / "proof.json"
+    script = "import json;json.dump({'schema':'proof.v1','status':'complete','cases':[1]},open('proof.json','w'));print('DONE')"
+    case = CampaignCase("proof", "tamper", (sys.executable, "-c", script), 0,
+                        ("DONE",), 5, evidence_files=("proof.json",),
+                        evidence_schema="proof.v1", evidence_status="complete",
+                        minimum_evidence_cases=1)
+    report = run_validation_campaign([case], root=tmp_path, output=tmp_path / "r.json")
+    assert report["status"] == "passed"
+    assert report["cases"][0]["evidence_hashes"][0]["sha256"]
+
+    artifact.write_text('{"schema":"wrong","status":"complete","cases":[1]}')
+    bad = CampaignCase("bad", "tamper", (sys.executable, "-c", "print('DONE')"), 0,
+                       ("DONE",), 5, evidence_files=("proof.json",), evidence_schema="proof.v1")
+    assert run_validation_campaign([bad], root=tmp_path, output=tmp_path / "bad.json")["status"] == "failed"
 
 
 @pytest.mark.parametrize("cases, max_cases", [
@@ -109,3 +153,4 @@ def test_mandatory_matrix_binds_existing_f02_and_f11_campaigns():
     assert any("f02_fault_campaign.py" in command for command in commands)
     assert any("f11_adversarial_campaign.py" in command for command in commands)
     assert any("f11_adversarial_cli_campaign.py" in command for command in commands)
+    assert not any("CASE_OK:" in command for command in commands)
