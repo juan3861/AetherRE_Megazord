@@ -98,3 +98,8 @@ class AnalysisReport:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+    case_id: str = ""
+    intake_manifest: str = ""
+    root_artifact_id: str = ""
+    profile_decision: dict[str, Any] = field(default_factory=dict)
+    evidence_journal: str = ""
