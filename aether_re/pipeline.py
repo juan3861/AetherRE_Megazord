@@ -128,7 +128,7 @@ def run_profile_workers(intake: Any, decision: Any, policy: CasePolicy) -> tuple
         state = EpistemicState.EXACT if candidate.strength >= 90 else EpistemicState.UNKNOWN
         observations.append(CaseObservation(
             "profile-signature", candidate.profile_id, state,
-            tuple(candidate.evidence) if state is not EpistemicState.UNKNOWN else (),
+            tuple(candidate.evidence),
             candidate.strength / 100.0,
         ))
     # This explicit UNKNOWN prevents profile detection from being promoted into

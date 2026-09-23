@@ -56,6 +56,21 @@ def test_pipeline_has_no_optional_lab_policy_import() -> None:
     assert "from aether_re.lab_policy import" not in source.read_text(encoding="utf-8")
 
 
+def test_weak_firmware_candidate_preserves_routing_evidence(tmp_path: Path) -> None:
+    target = tmp_path / "firmware.bin"
+    target.write_bytes(bytes(range(256)) * 16)
+
+    report = run_universal_case(target, tmp_path / "out", CasePolicy.static_only())
+
+    candidate = next(item for item in report.observations if item.kind == "profile-signature")
+    assert candidate.epistemic_state == EpistemicState.UNKNOWN
+    assert candidate.evidence_refs == ("bounded-entropy:high",)
+    node = next(item for item in report.graph["nodes"] if item["kind"] == "profile-signature")
+    assert node["epistemic_state"] == "UNKNOWN"
+    assert node["evidence_refs"] == ["bounded-entropy:high"]
+    assert all(item["kind"] != "profile-signature" for item in report.graph["abstentions"])
+
+
 def test_dynamic_request_without_vm_proof_is_refused_before_execution(tmp_path: Path) -> None:
     target = tmp_path / "sample.wasm"
     target.write_bytes(b"\x00asm\x01\x00\x00\x00")
