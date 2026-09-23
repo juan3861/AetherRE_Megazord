@@ -12,6 +12,7 @@ from typing import Any, Mapping
 
 
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+AUTHORIZED_OPERATIONS = frozenset({"static-analysis", "dynamic-execution"})
 
 
 class ContractError(ValueError):
@@ -65,7 +66,7 @@ def _safe_relative_object_path(value: Any) -> bool:
     """Accept only portable relative object-store paths on every host OS."""
     if not _nonempty_string(value) or "\\" in value or value.startswith("/"):
         return False
-    if ":" in value or any(ord(character) < 32 for character in value):
+    if ":" in value or any(ord(character) < 32 or 0x7F <= ord(character) <= 0x9F for character in value):
         return False
     return all(part not in {"", ".", ".."} for part in value.split("/"))
 
@@ -85,11 +86,13 @@ class AuthorizationPolicy:
     def __post_init__(self) -> None:
         if self.schema != "authorization-policy.v1":
             raise ContractError("authorization_schema_invalid")
-        if self.basis not in {"owner", "license", "written-permission", "public-authorized"}:
+        if not isinstance(self.basis, str) or self.basis not in {"owner", "license", "written-permission", "public-authorized"}:
             raise ContractError("authorization_basis_invalid")
         if not _nonempty_string(self.principal):
             raise ContractError("authorization_principal_invalid")
         scope = _string_tuple(self.scope, error="authorization_scope_invalid", allow_empty=False)
+        if not set(scope).issubset(AUTHORIZED_OPERATIONS):
+            raise ContractError("authorization_scope_invalid")
         if not isinstance(self.allow_static, bool) or not isinstance(self.allow_dynamic, bool):
             raise ContractError("authorization_scope_invalid")
         if self.case_owner is not None and not _nonempty_string(self.case_owner):
@@ -113,7 +116,7 @@ class AuthorizationPolicy:
                 raise ContractError("authorization_schema_invalid")
             basis = value.get("basis")
             principal = value.get("principal")
-            if basis not in {"owner", "license", "written-permission", "public-authorized"}:
+            if not isinstance(basis, str) or basis not in {"owner", "license", "written-permission", "public-authorized"}:
                 raise ContractError("authorization_basis_invalid")
             if not _nonempty_string(principal):
                 raise ContractError("authorization_principal_invalid")
@@ -214,7 +217,7 @@ class ArtifactRef:
     def __post_init__(self) -> None:
         if self.schema != "artifact-ref.v1":
             raise ContractError("artifact_schema_invalid")
-        if not SHA256_RE.fullmatch(self.sha256) or self.artifact_id != f"sha256:{self.sha256}":
+        if not isinstance(self.sha256, str) or not SHA256_RE.fullmatch(self.sha256) or self.artifact_id != f"sha256:{self.sha256}":
             raise ContractError("artifact_hash_invalid")
         if isinstance(self.size, bool) or not isinstance(self.size, int) or self.size < 0:
             raise ContractError("artifact_size_invalid")
@@ -222,7 +225,7 @@ class ArtifactRef:
             raise ContractError("artifact_metadata_invalid")
         if not _safe_relative_object_path(self.object_path):
             raise ContractError("artifact_path_invalid")
-        if not SHA256_RE.fullmatch(self.authorization_sha256):
+        if not isinstance(self.authorization_sha256, str) or not SHA256_RE.fullmatch(self.authorization_sha256):
             raise ContractError("authorization_hash_invalid")
 
     @classmethod
@@ -274,7 +277,7 @@ class DerivationRecord:
         if not isinstance(self.epistemic_state, EpistemicState):
             raise ContractError("epistemic_state_invalid")
         if self.schema == "derivation-record.v1":
-            if self.product is None or self.product.artifact_id != self.artifact_id:
+            if not isinstance(self.product, ArtifactRef) or self.product.artifact_id != self.artifact_id:
                 raise ContractError("derivation_schema_invalid")
             if not _nonempty_string(self.method):
                 raise ContractError("derivation_method_invalid")

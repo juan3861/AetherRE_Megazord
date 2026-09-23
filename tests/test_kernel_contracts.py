@@ -127,3 +127,63 @@ def test_artifact_rejects_windows_absolute_or_unsafe_paths(object_path: str) -> 
     artifact["object_path"] = object_path
     with pytest.raises(ContractError, match="artifact_path_invalid"):
         ArtifactRef.from_dict(artifact)
+
+
+def test_authorization_rejects_unknown_operations_from_direct_and_mapping_inputs() -> None:
+    with pytest.raises(ContractError, match="authorization_scope_invalid"):
+        AuthorizationPolicy.from_dict({
+            "schema": "authorization-policy.v1", "basis": "owner",
+            "principal": "owner", "scope": ["root-shell"],
+        })
+    with pytest.raises(ContractError, match="authorization_scope_invalid"):
+        AuthorizationPolicy(
+            schema="authorization-policy.v1", basis="owner", principal="owner", scope=("root-shell",),
+        )
+
+
+@pytest.mark.parametrize(
+    ("factory", "expected"),
+    [
+        (
+            lambda: AuthorizationPolicy(
+                schema="authorization-policy.v1", basis=[], principal="owner", scope=("static-analysis",),
+            ),
+            "authorization_basis_invalid",
+        ),
+        (
+            lambda: ArtifactRef(
+                schema="artifact-ref.v1", artifact_id="sha256:not-a-hash", sha256=123,
+                size=0, media_type="application/octet-stream", object_path="objects/item",
+                origin="input.bin", authorization_sha256="b" * 64,
+            ),
+            "artifact_hash_invalid",
+        ),
+        (
+            lambda: ArtifactRef(
+                schema="artifact-ref.v1", artifact_id="sha256:" + "a" * 64, sha256="a" * 64,
+                size=0, media_type="application/octet-stream", object_path="objects/item",
+                origin="input.bin", authorization_sha256=123,
+            ),
+            "authorization_hash_invalid",
+        ),
+        (
+            lambda: DerivationRecord(
+                schema="derivation-record.v1", derivation_id="d1", artifact_id="a1",
+                epistemic_state=EpistemicState.EXACT, confidence=None, parents=(), product="not-an-artifact",
+                producer={"name": "kernel", "version": "1"}, method="snapshot",
+            ),
+            "derivation_schema_invalid",
+        ),
+    ],
+)
+def test_public_constructors_convert_malformed_types_to_contract_errors(factory, expected: str) -> None:
+    with pytest.raises(ContractError, match=expected):
+        factory()
+
+
+@pytest.mark.parametrize("object_path", ["objects/\x7fitem", "objects/\x85item"])
+def test_artifact_rejects_del_and_c1_controls_in_paths(object_path: str) -> None:
+    artifact = _artifact()
+    artifact["object_path"] = object_path
+    with pytest.raises(ContractError, match="artifact_path_invalid"):
+        ArtifactRef.from_dict(artifact)
