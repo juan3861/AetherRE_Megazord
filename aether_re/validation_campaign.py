@@ -115,9 +115,11 @@ def run_validation_campaign(cases: Sequence[CampaignCase], *, root: Path,
     for case in cases:
         started = time.monotonic()
         flags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
+        env = os.environ.copy()
+        env["PYTHONPATH"] = str(root) + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
         proc = subprocess.Popen(case.command, cwd=root, stdin=subprocess.DEVNULL,
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                shell=False, creationflags=flags,
+                                shell=False, creationflags=flags, env=env,
                                 start_new_session=(os.name != "nt"))
         timed_out = False
         try:

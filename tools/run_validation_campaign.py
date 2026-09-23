@@ -27,6 +27,18 @@ def mandatory_cases(root: Path) -> list[CampaignCase]:
     cases.append(CampaignCase("physical-enospc-capability", "disk_full", (py, "-c",
         "print('CAPABILITY_UNAVAILABLE:physical_enospc_not_exercised')"), 0,
         ("CAPABILITY_UNAVAILABLE",), 30))
+    cases.extend([
+        CampaignCase("f02-local-fault-suite", "tamper",
+                     (py, str(root / "tools" / "f02_fault_campaign.py"),
+                      "--out", str(root / "output" / "f02_local_fault_campaign.json")),
+                     0, ("status=complete_for_injected_local_profile",), 180),
+        CampaignCase("f11-adversarial-suite", "prompt_injection",
+                     (py, str(root / "tools" / "f11_adversarial_campaign.py")),
+                     0, ('"status": "complete"',), 180),
+        CampaignCase("f11-cli-adversarial-suite", "cli_encoding",
+                     (py, str(root / "tools" / "f11_adversarial_cli_campaign.py")),
+                     0, ('"status": "complete"',), 180),
+    ])
     return cases
 
 

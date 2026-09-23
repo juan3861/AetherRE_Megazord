@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from aether_re.validation_campaign import CampaignCase, run_validation_campaign
+from tools.run_validation_campaign import mandatory_cases
 
 
 def _case(case_id="ok", *, category="timeout", script=None, expected_exit=0,
@@ -100,3 +101,11 @@ def test_cli_runs_from_checkout_without_pythonpath(tmp_path):
     )
     assert completed.returncode == 3
     assert json.loads(output.read_text(encoding="utf-8"))["status"] == "partial"
+
+
+def test_mandatory_matrix_binds_existing_f02_and_f11_campaigns():
+    root = Path(__file__).resolve().parents[1]
+    commands = [" ".join(case.command) for case in mandatory_cases(root)]
+    assert any("f02_fault_campaign.py" in command for command in commands)
+    assert any("f11_adversarial_campaign.py" in command for command in commands)
+    assert any("f11_adversarial_cli_campaign.py" in command for command in commands)
