@@ -90,6 +90,7 @@ class IntakeTransaction:
         self.request=request; self.source=Path(request.source); self.case_dir=Path(request.case_dir)
         self.journal: EvidenceJournal | None=None; self.store: EvidenceStore | None=None
         self.source_kind=""; self.entries: list[WalkEntry]=[]; self.inventory: list[dict[str,Any]]=[]; self.artifacts: list[ArtifactRef]=[]; self.root: ArtifactRef | None=None
+        self.admitted_bytes = 0
 
     @classmethod
     def create(cls, request: IntakeRequest) -> "IntakeTransaction":
@@ -131,12 +132,21 @@ class IntakeTransaction:
 
     def _publish(self,path:Path,relative:str, *, include_inventory: bool = True) -> ArtifactRef:
         self._cancel(); assert self.store is not None
+        try:
+            candidate_size = path.stat().st_size
+        except OSError as exc:
+            raise IntakeRejected("intake_source_invalid") from exc
+        if include_inventory and self.admitted_bytes + candidate_size > self.request.limits.max_total_bytes:
+            raise IntakeRejected("intake_total_bytes_exceeded")
         try: ref=self.store.publish_file(path,media_type=_media_type(path),origin=relative,authorization=self.request.authorization,max_bytes=self.request.limits.max_file_bytes)
         except PublicationError as exc: raise IntakeRejected(str(exc)) from exc
+        if ref.size != candidate_size:
+            raise IntakeRejected("source_changed_during_publication")
         self._cancel(); self.store.verify(ref); assert self.journal is not None
         self.journal.append("artifact.published",{"artifact":ref.to_dict()})
         self.artifacts.append(ref)
         if include_inventory:
+            self.admitted_bytes += ref.size
             self.inventory.append({"relative_path":relative,"artifact_id":ref.artifact_id,"sha256":ref.sha256,"size":ref.size,"media_type":ref.media_type})
         return ref
 

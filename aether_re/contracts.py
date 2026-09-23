@@ -154,6 +154,14 @@ def validate_worker_result(value: Mapping[str,Any], *, plan: WorkerPlan, max_out
         from .evidence_contract import validate_kernel_evidence
         report=validate_kernel_evidence(evidence,manifest=None)
         if report["status"]!="valid": raise ContractViolation("worker_evidence_invalid")
+        expected_artifact_id = plan.input_artifact_id
+        expected_artifact_sha256 = expected_artifact_id.removeprefix("sha256:")
+        for record in evidence:
+            if (
+                record.get("artifact_id") != expected_artifact_id
+                or record.get("artifact_sha256") != expected_artifact_sha256
+            ):
+                raise ContractViolation("worker_evidence_artifact_mismatch")
     rc=value.get("returncode")
     if rc is not None and (isinstance(rc,bool) or not isinstance(rc,int)): raise ContractViolation("worker_returncode_invalid")
     return WorkerResult("worker-result.v1",plan.worker,state,plan.plan_sha256,tuple(evidence),tuple(losses),stdout,stderr,rc)

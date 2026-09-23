@@ -52,3 +52,25 @@ These campaigns prove only their injected local profile, not physical ENOSPC, ph
 - F02 project-level phase-gate promotion is **NAO COMPROVADA**; no universal/project-complete claim is made.
 
 Continua em divida: isolate and commit only the pipeline/CLI Task 3 hunks, or first land the other owners' interleaved changes, then run the full clean suite and materialize the phase-gate evidence bundle.
+
+## Fix round 1 - 2026-09-22
+
+Status: QUITADA para os tres findings desta rodada.
+
+Correcoes:
+
+1. `validate_worker_result` agora exige que todo envelope de evidencia use exatamente o `input_artifact_id` e SHA-256 do `WorkerPlan`; divergencia falha com `worker_evidence_artifact_mismatch`.
+2. `IntakeTransaction` acumula os bytes admitidos por todo o caso. O container e os membros extraidos compartilham `max_total_bytes`; a rejeicao ocorre antes da publicacao do membro excedente.
+3. `recover_interrupted_tail` valida o prefixo sem alterar o journal vivo, grava e sincroniza a quarentena antes do commit, publica o prefixo recuperado por `os.replace` e restaura journal/head em caso de falha normal no commit do head. Testes injetam falha no replace e no commit do head.
+
+Prova focada, com `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1`:
+
+```text
+python -m pytest tests/test_worker_contracts_v2.py tests/test_contracts.py tests/test_evidence_journal.py tests/test_intake.py tests/test_archive_intake.py tests/test_evidence_store.py -q
+15 passed in 1.82s
+
+python -m pytest tests/test_kernel_contracts.py tests/test_evidence_store.py tests/test_evidence_journal.py tests/test_archive_intake.py tests/test_intake.py tests/test_profile_router.py tests/test_worker_contracts_v2.py tests/test_kernel_evidence_contract.py tests/test_pipeline_kernel.py tests/test_intake_cli.py tests/test_kernel_chaos.py tests/test_kernel_replay.py -q
+40 passed in 6.11s
+```
+
+A divida intercalada de pipeline/CLI registrada acima permanece inalterada e fora deste commit.

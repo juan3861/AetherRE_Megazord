@@ -110,9 +110,13 @@ class EvidenceJournal:
                 raise JournalCorruption("journal_head_mismatch")
             return JournalVerification("pass", 0, _HASH)
         raw = self.path.read_bytes()
+        verification = self._scan_raw(raw, allow_truncated_tail=allow_truncated_tail)
+        if check_head and self.head_path.exists():
+            self._check_head(verification.entries, verification.head_hash)
+        return verification
+
+    def _scan_raw(self, raw: bytes, *, allow_truncated_tail: bool) -> JournalVerification:
         if not raw:
-            if self.head_path.exists():
-                self._check_head(0, _HASH)
             return JournalVerification("pass", 0, _HASH)
         lines = raw.splitlines(keepends=True)
         if not raw.endswith(b"\n"):
@@ -147,8 +151,6 @@ class EvidenceJournal:
             if value["entry_hash"] != expected:
                 raise JournalCorruption("entry_hash_mismatch")
             previous=value["entry_hash"]; count=number
-        if check_head and self.head_path.exists():
-            self._check_head(count, previous)
         return JournalVerification("pass", count, previous)
 
     def _check_head(self, entries: int, head_hash: str) -> None:
@@ -168,13 +170,7 @@ class EvidenceJournal:
             last=raw.rfind(b"\n")
             complete=raw[:last+1] if last >= 0 else b""
             tail=raw[last+1:] if last >= 0 else raw
-            original=raw
-            try:
-                self.path.write_bytes(complete)
-                checked=self._scan(allow_truncated_tail=False, check_head=False)
-            except BaseException:
-                self.path.write_bytes(original)
-                raise
+            checked=self._scan_raw(complete, allow_truncated_tail=False)
             digest=hashlib.sha256(tail).hexdigest()
             quarantine=self.case_dir / f"journal.tail.{digest}.quarantine"
             try:
@@ -182,7 +178,41 @@ class EvidenceJournal:
                     handle.write(tail); handle.flush(); os.fsync(handle.fileno())
             except FileExistsError:
                 if quarantine.read_bytes()!=tail:
-                    self.path.write_bytes(original); raise JournalCorruption("journal_quarantine_collision")
-            with self.path.open("ab") as handle: handle.flush(); os.fsync(handle.fileno())
-            self._write_head(checked.entries, checked.head_hash)
+                    raise JournalCorruption("journal_quarantine_collision")
+
+            # Do not truncate the live journal in place.  The incomplete tail is
+            # durable in quarantine before a create-and-replace commit publishes
+            # the verified complete prefix.
+            temporary = self.case_dir / f".journal.recovery.{digest}.tmp"
+            old_head = self.head_path.read_bytes() if self.head_path.exists() else None
+            try:
+                with temporary.open("xb") as handle:
+                    handle.write(complete); handle.flush(); os.fsync(handle.fileno())
+                os.replace(temporary, self.path)
+                try:
+                    self._write_head(checked.entries, checked.head_hash)
+                except BaseException:
+                    # A normal exception after the journal replace must restore
+                    # the pre-recovery pair.  Abrupt process death still retains
+                    # the tail in the already-fsynced quarantine file.
+                    restore = self.case_dir / f".journal.rollback.{digest}.tmp"
+                    try:
+                        with restore.open("xb") as handle:
+                            handle.write(raw); handle.flush(); os.fsync(handle.fileno())
+                        os.replace(restore, self.path)
+                        if old_head is None:
+                            self.head_path.unlink(missing_ok=True)
+                        else:
+                            head_restore = self.case_dir / f".journal.head.rollback.{digest}.tmp"
+                            try:
+                                with head_restore.open("xb") as handle:
+                                    handle.write(old_head); handle.flush(); os.fsync(handle.fileno())
+                                os.replace(head_restore, self.head_path)
+                            finally:
+                                head_restore.unlink(missing_ok=True)
+                    finally:
+                        restore.unlink(missing_ok=True)
+                    raise
+            finally:
+                temporary.unlink(missing_ok=True)
             return JournalVerification("recovered_tail", checked.entries, checked.head_hash, quarantine)
