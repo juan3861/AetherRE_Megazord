@@ -35,3 +35,15 @@ def test_certification_requires_workers_measured_values_and_evidence():
 def test_hostile_adapter_output_rejected_before_publication():
     with pytest.raises(ValueError, match='adapter_payload_invalid'):
         doc('wasm', 'sha256:x', ('ev:x',), {'functions': [{'name':'f', 'confidence':'not-number'}]}, 'wasm', {'functions':'function'})
+
+
+def test_thin_macho_32_magic_is_classified(tmp_path):
+    target = tmp_path / 'thin32.bin'
+    target.write_bytes(bytes.fromhex('cefaedfe'))
+    assert select_static_profile(target).profile_id == 'macho'
+
+
+def test_adapter_rejects_supplied_edge_with_unknown_endpoint():
+    payload = {'functions': [{'name':'known'}], 'edges': [{'source':'known','target':'missing','kind':'calls'}]}
+    with pytest.raises(ValueError, match='adapter_payload_invalid'):
+        doc('wasm', 'sha256:x', ('ev:x',), payload, 'wasm', {'functions':'function'})

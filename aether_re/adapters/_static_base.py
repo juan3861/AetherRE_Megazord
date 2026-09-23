@@ -25,8 +25,9 @@ def doc(profile: str, artifact_id: str, evidence_refs: tuple[str, ...], payload:
         if not isinstance(relations, list): raise ValueError('adapter_payload_invalid')
         for rel in relations:
             if not isinstance(rel,dict): raise ValueError('adapter_payload_invalid')
-            if str(rel.get('source')) in by_name and str(rel.get('target')) in by_name:
-                edges.append(IREdge(str(rel.get('kind','references')),by_name[str(rel['source'])].identity,by_name[str(rel['target'])].identity,'adapter',evidence_refs,EpistemicState.PROBABILISTIC_INFERENCE,0.,(),dict(rel)))
+            source, target = str(rel.get('source')), str(rel.get('target'))
+            if source not in by_name or target not in by_name: raise ValueError('adapter_payload_invalid')
+            edges.append(IREdge(str(rel.get('kind','references')),by_name[source].identity,by_name[target].identity,'adapter',evidence_refs,EpistemicState.PROBABILISTIC_INFERENCE,0.,(),dict(rel)))
         result=IRDocument('ir.v1',artifact_id,profile,tuple(nodes),tuple(edges),tuple(losses))
         validate_ir(result)
         return result

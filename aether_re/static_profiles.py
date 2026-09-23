@@ -38,7 +38,7 @@ def detect_static_profiles(target:Path)->tuple[ProfileMatch,...]:
     if raw.startswith(b'\x7fELF'):candidates.append('native-elf');reasons['native-elf']=('elf_magic',)
     elif raw.startswith(b'MZ'): p='dotnet' if _is_dotnet(raw) else 'native-pe';candidates.append(p);reasons[p]=('pe_com_descriptor' if p=='dotnet' else 'pe_magic',)
     elif raw.startswith(b'\0asm'):candidates.append('wasm');reasons['wasm']=('wasm_magic',)
-    elif raw[:4] in (b'\xcf\xfa\xed\xfe', b'\xce\xfa\xed\fe'):
+    elif raw[:4] in (b'\xcf\xfa\xed\xfe', b'\xce\xfa\xed\xfe'):
       candidates.append('macho'); reasons['macho']=('macho_thin_magic',)
     elif raw[:4] == b'\xca\xfe\xba\xbe':
       # JVM is CAFEBABE + u2 minor + u2 major (45..100). A fat Mach-O starts
