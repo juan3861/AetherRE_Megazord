@@ -92,6 +92,37 @@ def hash_file_stable(path: Path) -> tuple[str, int]:
     return digest.hexdigest(), bytes_read
 
 
+def _read_file_stable_bytes(path: Path) -> bytes:
+    """Read one immutable byte snapshot or fail if the file changes/replaces."""
+    path = Path(path)
+    before = _stat_signature(path)
+    with path.open("rb") as handle:
+        opened_before = os.fstat(handle.fileno())
+        payload = handle.read()
+        opened_after = os.fstat(handle.fileno())
+    after = _stat_signature(path)
+    opened_before_signature = (
+        opened_before.st_dev,
+        opened_before.st_ino,
+        opened_before.st_size,
+        opened_before.st_mtime_ns,
+    )
+    opened_after_signature = (
+        opened_after.st_dev,
+        opened_after.st_ino,
+        opened_after.st_size,
+        opened_after.st_mtime_ns,
+    )
+    if (
+        before != opened_before_signature
+        or opened_before_signature != opened_after_signature
+        or opened_after_signature != after
+        or len(payload) != before[2]
+    ):
+        raise ValueError(f"baseline_file_changed_during_read:{path}")
+    return payload
+
+
 def sha256_file(path: Path) -> str:
     """Return a stable SHA-256 digest for one regular baseline file."""
     return hash_file_stable(path)[0]
@@ -143,10 +174,10 @@ def _junit_summary(root: ElementTree.Element) -> dict[str, int]:
     if local_name not in {"testsuite", "testsuites"}:
         raise ValueError("baseline_junit_invalid_root")
 
-    def attribute(name: str, default: int) -> int:
-        value = root.get(name)
+    def attribute(element: ElementTree.Element, name: str) -> int | None:
+        value = element.get(name)
         if value is None:
-            return default
+            return None
         try:
             parsed = int(value)
         except ValueError as error:
@@ -155,14 +186,35 @@ def _junit_summary(root: ElementTree.Element) -> dict[str, int]:
             raise ValueError(f"baseline_junit_invalid_{name}")
         return parsed
 
-    cases = list(root.iterfind(".//{*}testcase")) + list(root.iterfind(".//testcase"))
-    tests = attribute("tests", len(cases))
-    return {
-        "errors": attribute("errors", 0),
-        "failures": attribute("failures", 0),
-        "skipped": attribute("skipped", 0),
-        "tests": tests,
-    }
+    def children_named(element: ElementTree.Element, name: str) -> list[ElementTree.Element]:
+        return [child for child in element if child.tag.rsplit("}", 1)[-1] == name]
+
+    def suite_value(suite: ElementTree.Element, name: str) -> int:
+        declared = attribute(suite, name)
+        if declared:
+            return declared
+        child_suites = children_named(suite, "testsuite")
+        if child_suites:
+            return sum(suite_value(child, name) for child in child_suites)
+        cases = children_named(suite, "testcase")
+        if name == "tests":
+            return len(cases)
+        outcome = {"errors": "error", "failures": "failure", "skipped": "skipped"}[name]
+        return sum(bool(children_named(case, outcome)) for case in cases)
+
+    result: dict[str, int] = {}
+    for name in ("errors", "failures", "skipped", "tests"):
+        declared = attribute(root, name)
+        if declared:
+            result[name] = declared
+            continue
+        if local_name == "testsuite":
+            result[name] = suite_value(root, name)
+        else:
+            result[name] = sum(
+                suite_value(suite, name) for suite in children_named(root, "testsuite")
+            )
+    return result
 
 
 def _capture_junit(junit_path: Path | None) -> dict[str, Any]:
@@ -172,9 +224,11 @@ def _capture_junit(junit_path: Path | None) -> dict[str, Any]:
     path = Path(junit_path).resolve()
     if path.is_symlink() or not path.is_file():
         raise ValueError("baseline_junit_must_be_regular_file")
-    digest, size = hash_file_stable(path)
+    payload = _read_file_stable_bytes(path)
+    digest = hashlib.sha256(payload).hexdigest()
+    size = len(payload)
     try:
-        root = ElementTree.fromstring(path.read_bytes())
+        root = ElementTree.fromstring(payload)
     except ElementTree.ParseError as error:
         raise ValueError("baseline_junit_invalid_xml") from error
     return {

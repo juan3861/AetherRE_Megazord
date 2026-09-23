@@ -71,3 +71,22 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1
 Python 3.13 pytest tests/test_program_baseline.py tests/test_project_snapshot.py -q
 18 passed in 2.63s
 ```
+
+## Correção de proveniência Git/JUnit — rodada 2
+
+- A agregação de `<testsuites>` agora respeita totais positivos declarados
+  na raiz e, para atributos ausentes ou zerados, soma recursivamente as suites
+  filhas. A travessia usa o nome local da tag uma única vez, sem duplicar
+  `testcase` namespaced.
+- SHA-256, tamanho e resumo JUnit agora derivam do mesmo snapshot imutável de
+  bytes. A leitura compara identidade, tamanho e mtime antes/depois tanto no
+  caminho quanto no descritor aberto e falha fechado se houver mutação.
+- Regressões cobrem `<testsuites>` namespaced com failures/errors/skipped reais
+  e mutação do arquivo entre captura e parse, provando que o parse continua
+  vinculado aos mesmos bytes usados no hash.
+
+```text
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1
+Python 3.13 pytest tests/test_program_baseline.py tests/test_project_snapshot.py -q
+20 passed in 7.44s
+```

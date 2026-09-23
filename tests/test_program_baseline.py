@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 from jsonschema import Draft202012Validator
 
+import tools.f00_program_baseline as baseline_module
 from tools.f00_program_baseline import capture_program_baseline, hash_file_stable
 
 
@@ -107,3 +108,63 @@ def test_baseline_fails_closed_when_file_changes_during_hash(
     monkeypatch.setattr(Path, "stat", changing_stat)
     with pytest.raises(ValueError, match="baseline_file_changed_during_hash"):
         hash_file_stable(payload)
+
+
+def test_junit_testsuites_aggregates_child_suites_without_namespace_duplicates(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "RE"
+    root.mkdir()
+    (root / "main.py").write_text("pass\n", encoding="utf-8")
+    junit = tmp_path / "suite.xml"
+    junit.write_text(
+        """<testsuites xmlns="urn:junit" tests="0" failures="0" errors="0" skipped="0">
+        <testsuite name="one" tests="2" failures="1" errors="0" skipped="0">
+          <testcase name="ok"/><testcase name="bad"><failure/></testcase>
+        </testsuite>
+        <testsuite name="two" tests="2" failures="0" errors="1" skipped="1">
+          <testcase name="error"><error/></testcase><testcase name="skip"><skipped/></testcase>
+        </testsuite>
+        </testsuites>""",
+        encoding="utf-8",
+    )
+
+    report = capture_program_baseline(root, tmp_path / "baseline.json", junit)
+
+    assert report["junit"]["summary"] == {
+        "errors": 1,
+        "failures": 1,
+        "skipped": 1,
+        "tests": 4,
+    }
+
+
+def test_junit_provenance_uses_one_snapshot_when_file_mutates_before_parse(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "RE"
+    root.mkdir()
+    (root / "main.py").write_text("pass\n", encoding="utf-8")
+    junit = tmp_path / "suite.xml"
+    junit.write_text('<testsuite tests="1"><testcase name="ok"/></testsuite>', encoding="utf-8")
+    original = junit.read_bytes()
+    actual_fromstring = baseline_module.ElementTree.fromstring
+
+    def mutate_then_parse(payload: bytes):
+        junit.write_text(
+            '<testsuite tests="1"><testcase name="bad"><failure/></testcase></testsuite>',
+            encoding="utf-8",
+        )
+        return actual_fromstring(payload)
+
+    monkeypatch.setattr(baseline_module.ElementTree, "fromstring", mutate_then_parse)
+    report = capture_program_baseline(root, tmp_path / "baseline.json", junit)
+
+    assert report["junit"]["sha256"] == hashlib.sha256(original).hexdigest()
+    assert report["junit"]["size"] == len(original)
+    assert report["junit"]["summary"] == {
+        "errors": 0,
+        "failures": 0,
+        "skipped": 0,
+        "tests": 1,
+    }
