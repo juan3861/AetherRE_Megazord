@@ -47,6 +47,34 @@ def test_release_reads_phase_gate_report_and_verifies_source_hash(tmp_path: Path
     assert report["sources"][0]["sha256"]
 
 
+def test_phase_gate_parent_failure_cannot_be_promoted_by_complete_rows(tmp_path: Path):
+    phases = [
+        {
+            "phase_id": f"F{i:02d}",
+            "status": "QUITADA",
+            "evidence": [{"verified": True}],
+            "errors": [],
+        }
+        for i in range(13)
+    ]
+    source = tmp_path / "phase-parent-failed.json"
+    source.write_text(
+        json.dumps({
+            "schema": "phase-gate-report.v1",
+            "status": "partial",
+            "gate_passed": False,
+            "phases": phases,
+            "errors": [],
+        }),
+        encoding="utf-8",
+    )
+    report = evaluate_universal_release(tmp_path, [source])
+    assert report["gate_passed"] is False
+    assert report["status"] == "PARCIALMENTE_QUITADA"
+    assert report["remaining_debt"] == [f"F{i:02d}" for i in range(13)]
+    assert {"source_gate_not_passed", "source_status_not_complete"} <= set(report["integrity_errors"])
+
+
 def test_release_rejects_evidence_outside_root_and_malformed_json(tmp_path: Path):
     outside = tmp_path.parent / "outside-release.json"
     outside.write_text(json.dumps({"gates": _complete_rows()}), encoding="utf-8")

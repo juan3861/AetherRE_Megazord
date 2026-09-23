@@ -94,6 +94,10 @@ def evaluate_universal_release_from_rows(
         if count > 1:
             errors.append({"code": "duplicate_gate", "gate": gate, "count": count})
 
+    # A document-level validator failure invalidates the evidence set even if
+    # every copied row happens to look complete.  Do not allow row projection
+    # to erase a contradictory parent report.
+    blocked_by_integrity = bool(errors)
     gates: list[dict[str, Any]] = []
     debt: list[str] = []
     for gate in REQUIRED_GATES:
@@ -107,6 +111,8 @@ def evaluate_universal_release_from_rows(
             result = {**row, "reason": "evidence_invalid"}
         else:
             result = {**row, "reason": None}
+        if blocked_by_integrity and result["reason"] is None:
+            result["reason"] = "source_integrity_error"
         if result["reason"] is not None:
             debt.append(gate)
         gates.append(result)
@@ -187,6 +193,19 @@ def evaluate_universal_release(root: Path, evidence: Sequence[Path]) -> dict[str
         if extracted is None:
             errors.append({"code": "evidence_schema_unsupported", "path": relative})
             continue
+        # phase-gate-report.v1 has a parent verdict that must survive the
+        # conversion to universal-release rows.  A partial/failed parent,
+        # or any parent error, is not repaired by complete-looking children.
+        if isinstance(document.get("phases"), list):
+            if document.get("gate_passed") is not True:
+                errors.append({"code": "source_gate_not_passed", "path": relative})
+            if document.get("status") != "complete":
+                errors.append({"code": "source_status_not_complete", "path": relative})
+            parent_errors = document.get("errors")
+            if not isinstance(parent_errors, list):
+                errors.append({"code": "source_errors_invalid", "path": relative})
+            elif parent_errors:
+                errors.append({"code": "source_document_errors", "path": relative, "count": len(parent_errors)})
         rows.extend(extracted)
         sources.append({"path": relative, "sha256": _sha256(resolved), "rows": len(extracted)})
     sources.sort(key=lambda item: item["path"])
