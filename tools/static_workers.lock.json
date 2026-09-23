@@ -1,0 +1,1 @@
+{"schema":"static-workers-lock.v1","workers":[],"policy":{"network":"denied","target_execution":false,"shell":false}}
