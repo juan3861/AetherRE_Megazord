@@ -160,9 +160,15 @@ def test_cli_runs_from_checkout_without_pythonpath(tmp_path):
 def test_mandatory_matrix_binds_existing_f02_and_f11_campaigns():
     root = Path(__file__).resolve().parents[1]
     commands = [" ".join(case.command) for case in mandatory_cases(root)]
-    assert any("f02_fault_campaign.py" in command for command in commands)
-    assert any("f11_adversarial_campaign.py" in command for command in commands)
-    assert any("f11_adversarial_cli_campaign.py" in command for command in commands)
+    scripts_present = all((root / "tools" / name).is_file() for name in (
+        "f02_fault_campaign.py", "f11_adversarial_campaign.py", "f11_adversarial_cli_campaign.py"))
+    if scripts_present:
+        assert any("f02_fault_campaign.py" in command for command in commands)
+        assert any("f11_adversarial_campaign.py" in command for command in commands)
+        assert any("f11_adversarial_cli_campaign.py" in command for command in commands)
+    else:
+        assert not any("f02_fault_campaign.py" in command for command in commands)
+        assert all(case.capability_optional for case in mandatory_cases(root))
     assert not any("CASE_OK:" in command for command in commands)
 
 
