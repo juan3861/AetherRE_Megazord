@@ -26,6 +26,15 @@ def mandatory_cases(root: Path) -> list[CampaignCase]:
                           (py, "-c", f"print('CAPABILITY_UNAVAILABLE:{name}_not_bound')"), 0,
                           ("CAPABILITY_UNAVAILABLE", name), 30, capability_optional=True)
              for name in MANDATORY]
+    scripts = [root / "tools" / name for name in (
+        "f02_fault_campaign.py", "f11_adversarial_campaign.py", "f11_adversarial_cli_campaign.py")]
+    if not all(path.is_file() for path in scripts):
+        for label, category in (("f02-suite", "tamper"), ("f11-suite", "prompt_injection"),
+                                ("f11-cli-suite", "cli_encoding")):
+            cases.append(CampaignCase(f"not-exercised-{label}", category,
+                (py, "-c", f"print('CAPABILITY_UNAVAILABLE:{label}_script_absent')"),
+                0, ("CAPABILITY_UNAVAILABLE", label), 30, capability_optional=True))
+        return cases
     cases.extend([
         CampaignCase("f02-local-fault-suite", "tamper",
                      (py, str(root / "tools" / "f02_fault_campaign.py"),

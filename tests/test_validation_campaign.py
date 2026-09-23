@@ -106,6 +106,16 @@ def test_json_artifact_is_schema_bound_and_hashed(tmp_path):
     assert run_validation_campaign([bad], root=tmp_path, output=tmp_path / "bad.json")["status"] == "failed"
 
 
+def test_stale_preexisting_artifact_is_removed_and_cannot_satisfy_case(tmp_path):
+    (tmp_path / "proof.json").write_text('{"schema":"proof.v1","status":"complete","cases":[1]}')
+    case = CampaignCase("stale", "tamper", (sys.executable, "-c", "print('DONE')"),
+                        0, ("DONE",), 5, evidence_files=("proof.json",),
+                        evidence_schema="proof.v1", evidence_status="complete")
+    report = run_validation_campaign([case], root=tmp_path, output=tmp_path / "r.json")
+    assert report["status"] == "failed"
+    assert "evidence_missing:proof.json" in report["cases"][0]["evidence_errors"]
+
+
 @pytest.mark.parametrize("cases, max_cases", [
     ([], 500),
     ([_case("dup"), _case("dup")], 500),
@@ -154,3 +164,13 @@ def test_mandatory_matrix_binds_existing_f02_and_f11_campaigns():
     assert any("f11_adversarial_campaign.py" in command for command in commands)
     assert any("f11_adversarial_cli_campaign.py" in command for command in commands)
     assert not any("CASE_OK:" in command for command in commands)
+
+
+def test_mandatory_matrix_is_self_contained_when_optional_scripts_are_absent(tmp_path):
+    cases = mandatory_cases(tmp_path)
+    commands = [" ".join(case.command) for case in cases]
+    assert not any("f02_fault_campaign.py" in command for command in commands)
+    assert all(case.capability_optional for case in cases)
+    report = run_validation_campaign(cases, root=tmp_path, output=tmp_path / "campaign.json")
+    assert report["status"] == "partial"
+    assert report["summary"]["failed"] == 0

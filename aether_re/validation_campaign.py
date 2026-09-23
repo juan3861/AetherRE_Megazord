@@ -160,6 +160,15 @@ def run_validation_campaign(cases: Sequence[CampaignCase], *, root: Path,
     rows: list[dict[str, Any]] = []
     for case in cases:
         started = time.monotonic()
+        # Evidence is command output, never an ambient file from a prior run.
+        # Remove confined regular files/symlinks before launch; other shapes fail later.
+        for raw_evidence in case.evidence_files:
+            evidence_path = (root / raw_evidence).resolve()
+            if not _inside(evidence_path, root):
+                raise ValueError("evidence_outside_root")
+            unresolved = root / raw_evidence
+            if unresolved.is_file() or unresolved.is_symlink():
+                unresolved.unlink()
         flags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
         env = os.environ.copy()
         env["PYTHONPATH"] = str(root) + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
