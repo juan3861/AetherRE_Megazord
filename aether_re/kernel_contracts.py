@@ -61,6 +61,15 @@ def _string_tuple(value: Any, *, error: str, allow_empty: bool = True) -> tuple[
     return normalized
 
 
+def _safe_relative_object_path(value: Any) -> bool:
+    """Accept only portable relative object-store paths on every host OS."""
+    if not _nonempty_string(value) or "\\" in value or value.startswith("/"):
+        return False
+    if ":" in value or any(ord(character) < 32 for character in value):
+        return False
+    return all(part not in {"", ".", ".."} for part in value.split("/"))
+
+
 @dataclass(frozen=True)
 class AuthorizationPolicy:
     """Authorization is explicit; absence or ambiguity grants no operation."""
@@ -72,6 +81,25 @@ class AuthorizationPolicy:
     case_owner: str | None = None
     allow_static: bool = False
     allow_dynamic: bool = False
+
+    def __post_init__(self) -> None:
+        if self.schema != "authorization-policy.v1":
+            raise ContractError("authorization_schema_invalid")
+        if self.basis not in {"owner", "license", "written-permission", "public-authorized"}:
+            raise ContractError("authorization_basis_invalid")
+        if not _nonempty_string(self.principal):
+            raise ContractError("authorization_principal_invalid")
+        scope = _string_tuple(self.scope, error="authorization_scope_invalid", allow_empty=False)
+        if not isinstance(self.allow_static, bool) or not isinstance(self.allow_dynamic, bool):
+            raise ContractError("authorization_scope_invalid")
+        if self.case_owner is not None and not _nonempty_string(self.case_owner):
+            raise ContractError("authorization_principal_invalid")
+        object.__setattr__(self, "principal", self.principal.strip())
+        object.__setattr__(self, "scope", scope)
+        object.__setattr__(self, "allow_static", "static-analysis" in scope)
+        object.__setattr__(self, "allow_dynamic", "dynamic-execution" in scope)
+        if self.case_owner is not None:
+            object.__setattr__(self, "case_owner", self.case_owner.strip())
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "AuthorizationPolicy":
@@ -149,6 +177,11 @@ class IntakeLimits:
     max_compression_ratio: int = 200
     max_path_length: int = 512
 
+    def __post_init__(self) -> None:
+        for name, limit in asdict(self).items():
+            if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+                raise ContractError(f"intake_limit_invalid:{name}")
+
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "IntakeLimits":
         if not isinstance(value, Mapping):
@@ -178,6 +211,20 @@ class ArtifactRef:
     origin: str
     authorization_sha256: str
 
+    def __post_init__(self) -> None:
+        if self.schema != "artifact-ref.v1":
+            raise ContractError("artifact_schema_invalid")
+        if not SHA256_RE.fullmatch(self.sha256) or self.artifact_id != f"sha256:{self.sha256}":
+            raise ContractError("artifact_hash_invalid")
+        if isinstance(self.size, bool) or not isinstance(self.size, int) or self.size < 0:
+            raise ContractError("artifact_size_invalid")
+        if not _nonempty_string(self.media_type) or not _nonempty_string(self.origin):
+            raise ContractError("artifact_metadata_invalid")
+        if not _safe_relative_object_path(self.object_path):
+            raise ContractError("artifact_path_invalid")
+        if not SHA256_RE.fullmatch(self.authorization_sha256):
+            raise ContractError("authorization_hash_invalid")
+
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "ArtifactRef":
         required = {
@@ -194,12 +241,7 @@ class ArtifactRef:
         if not _nonempty_string(value.get("media_type")) or not _nonempty_string(value.get("origin")):
             raise ContractError("artifact_metadata_invalid")
         object_path = value.get("object_path")
-        if (
-            not _nonempty_string(object_path)
-            or "\\" in object_path
-            or object_path.startswith("/")
-            or any(part in {"", ".", ".."} for part in object_path.split("/"))
-        ):
+        if not _safe_relative_object_path(object_path):
             raise ContractError("artifact_path_invalid")
         authorization_sha256 = value.get("authorization_sha256")
         if not isinstance(authorization_sha256, str) or not SHA256_RE.fullmatch(authorization_sha256):
@@ -223,6 +265,52 @@ class DerivationRecord:
     producer: Mapping[str, str] = field(default_factory=dict)
     method: str = ""
     limitations: tuple[str, ...] = field(default_factory=tuple)
+
+    def __post_init__(self) -> None:
+        if self.schema not in {"derivation-record.v1", "derivation-record.compact.v1"}:
+            raise ContractError("derivation_schema_invalid")
+        if not _nonempty_string(self.derivation_id) or not _nonempty_string(self.artifact_id):
+            raise ContractError("derivation_identity_invalid")
+        if not isinstance(self.epistemic_state, EpistemicState):
+            raise ContractError("epistemic_state_invalid")
+        if self.schema == "derivation-record.v1":
+            if self.product is None or self.product.artifact_id != self.artifact_id:
+                raise ContractError("derivation_schema_invalid")
+            if not _nonempty_string(self.method):
+                raise ContractError("derivation_method_invalid")
+            if not isinstance(self.producer, Mapping) or set(self.producer) != {"name", "version"} or any(
+                not _nonempty_string(item) for item in self.producer.values()
+            ):
+                raise ContractError("derivation_producer_invalid")
+        elif self.product is not None or self.producer or self.method or self.limitations:
+            raise ContractError("derivation_schema_invalid")
+        parents = _string_tuple(self.parents, error="derivation_parents_invalid")
+        if self.epistemic_state not in {EpistemicState.EXACT, EpistemicState.UNKNOWN} and not parents:
+            raise ContractError("parents_required")
+        if self.epistemic_state is EpistemicState.PROBABILISTIC_INFERENCE:
+            if (
+                isinstance(self.confidence, bool)
+                or not isinstance(self.confidence, (int, float))
+                or not math.isfinite(self.confidence)
+                or not 0.0 <= self.confidence <= 1.0
+            ):
+                raise ContractError("confidence_invalid")
+            normalized_confidence: float | None = float(self.confidence)
+        else:
+            if self.confidence is not None:
+                raise ContractError("confidence_forbidden")
+            normalized_confidence = None
+        losses = _string_tuple(self.losses, error="derivation_losses_invalid")
+        limitations = _string_tuple(self.limitations, error="derivation_limitations_invalid")
+        object.__setattr__(self, "derivation_id", self.derivation_id.strip())
+        object.__setattr__(self, "artifact_id", self.artifact_id.strip())
+        object.__setattr__(self, "parents", parents)
+        object.__setattr__(self, "losses", losses)
+        object.__setattr__(self, "limitations", limitations)
+        object.__setattr__(self, "confidence", normalized_confidence)
+        object.__setattr__(self, "producer", MappingProxyType(dict(self.producer)))
+        if isinstance(self.method, str):
+            object.__setattr__(self, "method", self.method.strip())
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "DerivationRecord":

@@ -94,3 +94,36 @@ def test_contracts_reject_unknown_fields_and_duplicate_strings() -> None:
             "derivation_id": "d1", "artifact_id": "a1", "epistemic_state": "HYPOTHESIS",
             "confidence": None, "parents": ["p1", "p1"], "losses": [],
         })
+
+
+def test_public_constructors_fail_closed_for_invalid_values() -> None:
+    direct_policy = AuthorizationPolicy(
+        schema="authorization-policy.v1", basis="owner", principal="owner", scope=("static-analysis",),
+    )
+    assert direct_policy.allow_static is True
+    assert direct_policy.allow_dynamic is False
+    with pytest.raises(ContractError, match="intake_limit_invalid:max_files"):
+        IntakeLimits(max_files=0)
+    with pytest.raises(ContractError, match="authorization_scope_invalid"):
+        AuthorizationPolicy(
+            schema="authorization-policy.v1", basis="owner", principal="owner", scope=(),
+        )
+    with pytest.raises(ContractError, match="artifact_hash_invalid"):
+        ArtifactRef(
+            schema="artifact-ref.v1", artifact_id="sha256:not-a-hash", sha256="not-a-hash",
+            size=0, media_type="application/octet-stream", object_path="objects/item",
+            origin="input.bin", authorization_sha256="b" * 64,
+        )
+    with pytest.raises(ContractError, match="parents_required"):
+        DerivationRecord(
+            schema="derivation-record.compact.v1", derivation_id="d1", artifact_id="a1",
+            epistemic_state=EpistemicState.HYPOTHESIS, confidence=None, parents=(),
+        )
+
+
+@pytest.mark.parametrize("object_path", ["C:/escape", "C:relative", "//server/share/object", "objects/a:b", "objects/\x00item"])
+def test_artifact_rejects_windows_absolute_or_unsafe_paths(object_path: str) -> None:
+    artifact = _artifact()
+    artifact["object_path"] = object_path
+    with pytest.raises(ContractError, match="artifact_path_invalid"):
+        ArtifactRef.from_dict(artifact)
