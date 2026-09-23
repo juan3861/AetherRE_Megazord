@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -22,6 +23,16 @@ from aether_re.engines.consensus import (
 from aether_re.engines.decompiler import merge_decompilation_results
 from aether_re.engines.ghidra_parse import write_function_index
 from aether_re.models import AnalysisReport, FunctionConsensus, FunctionEvidence
+from aether_re.evidence import sha256_file
+from aether_re.evidence_store import EvidenceStore
+from aether_re.intake import IntakeRequest, prepare_case
+from aether_re.kernel_contracts import AuthorizationPolicy, EpistemicState, IntakeLimits
+from aether_re.profile_router import route_case
+from aether_re.ir import IRDocument, IRLocation, IRNode
+from aether_re.ir_graph import project_ir
+from aether_re.engines.reconstruct import build_reconstruction
+from aether_re.profile_certification import certify_static_profile
+from aether_re.lab_policy import LabPolicy, preflight_dynamic_lab, validate_runtime_proof
 
 
 LIMITATIONS_BASE = [
@@ -30,6 +41,182 @@ LIMITATIONS_BASE = [
     "Binários packed/cifrados exigem unpack dinâmico antes da análise estática profunda.",
     "Análise completa de caixa-preta combina estática + dinâmica + emulação + contexto humano.",
 ]
+
+
+@dataclass(frozen=True)
+class CasePolicy:
+    """Fail-closed policy for the universal orchestrator.
+
+    Dynamic execution is never inferred from authorization.  It additionally
+    requires an explicit VM policy and a materialized runtime proof.
+    """
+
+    authorization: AuthorizationPolicy
+    intake_limits: IntakeLimits = field(default_factory=IntakeLimits)
+    request_dynamic: bool = False
+    lab_policy: LabPolicy | None = None
+    runtime_proof: dict[str, Any] | None = None
+
+    @classmethod
+    def static_only(cls, principal: str = "local-owner") -> "CasePolicy":
+        return cls(AuthorizationPolicy.from_dict({
+            "schema": "authorization-policy.v1", "basis": "owner",
+            "principal": principal, "scope": ["static-analysis"],
+        }))
+
+    @classmethod
+    def dynamic(
+        cls, principal: str = "local-owner", *, lab_policy: LabPolicy | None = None,
+        runtime_proof: dict[str, Any] | None = None,
+    ) -> "CasePolicy":
+        return cls(AuthorizationPolicy.from_dict({
+            "schema": "authorization-policy.v1", "basis": "owner",
+            "principal": principal,
+            "scope": ["static-analysis", "dynamic-execution"],
+        }), request_dynamic=True, lab_policy=lab_policy, runtime_proof=runtime_proof)
+
+
+@dataclass(frozen=True)
+class CaseObservation:
+    kind: str
+    value: str
+    epistemic_state: EpistemicState
+    evidence_refs: tuple[str, ...] = ()
+    confidence: float = 0.0
+    limitations: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class CaseReport:
+    schema: str
+    case_id: str
+    target_sha256: str
+    profile: str
+    observations: tuple[CaseObservation, ...]
+    graph: dict[str, Any]
+    reconstruction: tuple[Any, ...]
+    dynamic_status: str
+    certification_status: str
+    original_source_recovered: bool = False
+    limitations: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema": self.schema, "case_id": self.case_id,
+            "target_sha256": self.target_sha256, "profile": self.profile,
+            "observations": [
+                {**asdict(item), "epistemic_state": item.epistemic_state.value}
+                for item in self.observations
+            ],
+            "graph": self.graph,
+            "reconstruction": [
+                {**asdict(item), "epistemic_state": item.epistemic_state.value}
+                for item in self.reconstruction
+            ],
+            "dynamic_status": self.dynamic_status,
+            "certification_status": self.certification_status,
+            "original_source_recovered": self.original_source_recovered,
+            "limitations": list(self.limitations),
+        }
+
+
+def run_profile_workers(intake: Any, decision: Any, policy: CasePolicy) -> tuple[CaseObservation, ...]:
+    """Normalize routing evidence; external workers require separately pinned specs."""
+    if not policy.authorization.allows("static-analysis"):
+        raise ValueError("static_analysis_not_authorized")
+    observations = []
+    for candidate in decision.candidates:
+        state = EpistemicState.EXACT if candidate.strength >= 90 else EpistemicState.UNKNOWN
+        observations.append(CaseObservation(
+            "profile-signature", candidate.profile_id, state,
+            tuple(candidate.evidence) if state is not EpistemicState.UNKNOWN else (),
+            candidate.strength / 100.0,
+        ))
+    # This explicit UNKNOWN prevents profile detection from being promoted into
+    # the impossible claim that original source was recovered.
+    observations.append(CaseObservation(
+        "original-source", "not-established", EpistemicState.UNKNOWN,
+        limitations=("static evidence cannot recover original source identity",),
+    ))
+    return tuple(observations)
+
+
+def normalize_observations(intake: Any, observations: tuple[CaseObservation, ...], profile: str) -> dict[str, Any]:
+    nodes = tuple(
+        IRNode(
+            kind=item.kind, name=item.value,
+            location=IRLocation("artifact", intake.root_artifact.artifact_id),
+            source_backend="evidence-kernel", evidence_refs=item.evidence_refs,
+            epistemic_state=item.epistemic_state, confidence=item.confidence,
+            losses=item.limitations, attributes={},
+        )
+        for item in observations if item.evidence_refs
+    )
+    document = IRDocument("ir.v1", intake.root_artifact.artifact_id, profile, nodes, (), ())
+    return {"document": document, "projection": project_ir(document)}
+
+
+def verify_reconstruction(intake: Any, graph: dict[str, Any], policy: CasePolicy) -> tuple[Any, ...]:
+    # No function consensus is invented: unsupported bodies remain UNKNOWN.
+    return build_reconstruction(graph["document"], [])
+
+
+def certify_case(
+    intake: Any, decision: Any, graph: dict[str, Any], reconstruction: tuple[Any, ...],
+    policy: CasePolicy, observations: tuple[CaseObservation, ...], dynamic_status: str,
+) -> CaseReport:
+    certificate = certify_static_profile(
+        {"schema": "profile-scope.v1", "profile_id": decision.profile_id},
+        {}, {"workers": []}, {}, {"regressions": []},
+    )
+    certified = certificate["status"] == "QUITADA" and decision.epistemic_state is not EpistemicState.UNKNOWN
+    return CaseReport(
+        "universal-case-report.v1", intake.case_id, intake.root_artifact.sha256,
+        decision.profile_id, observations, graph["projection"], reconstruction,
+        dynamic_status, "certified" if certified else "abstained", False,
+        tuple(decision.limitations) + (
+            "profile certification denominator is not materialized for this case",
+            "dynamic execution is disabled unless VM policy and runtime proof both verify",
+        ),
+    )
+
+
+def _dynamic_gate(policy: CasePolicy, target_sha256: str) -> str:
+    if not policy.request_dynamic:
+        return "not_requested"
+    if not policy.authorization.allows("dynamic-execution"):
+        raise ValueError("dynamic_not_authorized")
+    if policy.lab_policy is None or policy.runtime_proof is None:
+        raise ValueError("dynamic_vm_proof_required")
+    preflight = preflight_dynamic_lab(policy.lab_policy, require_runtime_proof=True)
+    proof = validate_runtime_proof(policy.runtime_proof, policy=policy.lab_policy)
+    if preflight["status"] != "ready" or proof["status"] != "verified":
+        raise ValueError("dynamic_vm_proof_invalid")
+    if policy.runtime_proof.get("target_sha256") != target_sha256:
+        raise ValueError("dynamic_target_mismatch")
+    # There is no trusted VM executor in this repository.  Passing the gate is
+    # not permission to fall back to host execution.
+    return "eligible_no_executor"
+
+
+def run_universal_case(target: Path, out_dir: Path, policy: CasePolicy) -> CaseReport:
+    target, out_dir = Path(target).resolve(), Path(out_dir).resolve()
+    if not isinstance(policy, CasePolicy):
+        raise TypeError("case_policy_required")
+    dynamic_status = _dynamic_gate(policy, sha256_file(target))
+    intake = prepare_case(IntakeRequest(target, out_dir / "intake", policy.authorization, policy.intake_limits))
+    store = EvidenceStore(intake.manifest_path.parent)
+    decision = route_case(intake, store)
+    observations = run_profile_workers(intake, decision, policy)
+    graph = normalize_observations(intake, observations, decision.profile_id)
+    reconstruction = verify_reconstruction(intake, graph, policy)
+    report = certify_case(intake, decision, graph, reconstruction, policy, observations, dynamic_status)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    report_path = out_dir / "case_report.json"
+    if report_path.exists():
+        raise FileExistsError("case_report_already_exists")
+    report_path.write_text(json.dumps(report.to_dict(), indent=2, ensure_ascii=False), encoding="utf-8")
+    return report
 
 
 def _adapter_status(name: str, result: dict[str, Any]) -> dict[str, Any]:

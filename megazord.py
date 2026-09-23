@@ -20,7 +20,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from aether_re import __version__, __codename__
-from aether_re.pipeline import adapters_status, run_megazord
+from aether_re.pipeline import CasePolicy, adapters_status, run_megazord, run_universal_case
 
 
 def cmd_status(_: argparse.Namespace) -> int:
@@ -97,12 +97,24 @@ def cmd_selftest(_: argparse.Namespace) -> int:
     return cmd_analyze(args)
 
 
+def cmd_universal(args: argparse.Namespace) -> int:
+    """Run the default static-only universal pipeline."""
+    report = run_universal_case(Path(args.target), Path(args.out), CasePolicy.static_only())
+    print(json.dumps(report.to_dict(), ensure_ascii=False, indent=2))
+    return 0
+
+
 def main() -> int:
     p = argparse.ArgumentParser(
         prog="megazord",
         description="AetherRE Megazord — engenharia reversa / forense de binários",
     )
     sub = p.add_subparsers(dest="cmd", required=True)
+
+    universal = sub.add_parser("universal", help="Pipeline universal fail-closed (estático por padrão)")
+    universal.add_argument("target", help="Artefato alvo autorizado")
+    universal.add_argument("--out", required=True, help="Diretório novo de saída")
+    universal.set_defaults(func=cmd_universal)
 
     s = sub.add_parser("status", help="Estado dos motores e adapters")
     s.set_defaults(func=cmd_status)
