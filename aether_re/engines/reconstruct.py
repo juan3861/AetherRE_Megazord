@@ -300,3 +300,23 @@ def run_reconstruct(
         "confidence": conf,
         "findings": findings,
     }
+
+# Canonical, cited reconstruction API. Legacy run_reconstruct remains compatible.
+from dataclasses import dataclass
+from aether_re.ir import IRDocument
+from aether_re.kernel_contracts import EpistemicState
+from aether_re.models import FunctionConsensus
+@dataclass(frozen=True)
+class ReconstructionUnit:
+ identity:str; name:str; address_space:str; address:str; body:str; epistemic_state:EpistemicState; confidence:float; evidence_refs:tuple[str,...]; losses:tuple[str,...]; alternatives:tuple[dict[str,Any],...]
+def build_reconstruction(document:IRDocument,functions:list[FunctionConsensus])->tuple[ReconstructionUnit,...]:
+ by_key={(x.address_space,x.address):x for x in functions}; units=[]
+ for node in document.nodes:
+  if node.kind not in {'function','method','dex_method','jvm_method'}:continue
+  found=by_key.get((node.location.space,node.location.value));refs=tuple(sorted(set(node.evidence_refs+(tuple(found.evidence_refs) if found else ()))))
+  state=found.epistemic_state if found else EpistemicState.UNKNOWN; losses=tuple(sorted(set(node.losses+(tuple(found.losses) if found else ()))))
+  body=(found.pseudocode if found and found.pseudocode and found.evidence_refs else '/* body unavailable: evidence does not establish a reconstructable body */')
+  units.append(ReconstructionUnit(node.identity,found.name if found else node.name,node.location.space,node.location.value,body,state,found.confidence if found else 0.,refs,losses,tuple(found.alternatives) if found else ()))
+ return tuple(units)
+def render_reconstruction(units:tuple[ReconstructionUnit,...],language:str)->str:
+ return '\n\n'.join(f'/* reconstruction, not original source; state: {x.epistemic_state.value}; evidence: {", ".join(x.evidence_refs)}; losses: {", ".join(x.losses) or "none"} */\n{x.body}' for x in units)
