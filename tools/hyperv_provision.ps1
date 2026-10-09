@@ -1,9 +1,14 @@
 [CmdletBinding()]
 param(
     # Recuperacao explicita de um parcial de conversao ORFAO e comprovadamente
-    # invalido (sem manifesto de proveniencia e sem estrutura VHDX completa).
+    # invalido (sem manifesto de proveniencia e sem assinatura/cabecalho VHDX).
     # Sem este switch o script falha fechado com status existing_vhdx_unbound.
-    [switch]$AllowDiscardInvalidDestination
+    [switch]$AllowDiscardInvalidDestination,
+    # Vinculacao explicita de um destino ORFAO que passa na checagem de
+    # assinatura E e aceito pelo parser autoritativo do Hyper-V. Registra
+    # adopted_orphan_destination=true na proveniencia. Evita reconverter 30 GB
+    # quando a execucao anterior falhou apenas antes de gravar o manifesto.
+    [switch]$AllowOrphanDestinationBinding
 )
 
 # RE_Megazord authorized lab bootstrap. This script only provisions an OFF VM;
@@ -125,13 +130,15 @@ function Test-UnsafeVhdStorageAttributes {
 
 function Test-VhdxFileStructurallyValid {
     <#
-    Verifica condicoes NECESSARIAS de um VHDX materializado.
+    Verifica condicoes NECESSARIAS (nao suficientes) de um arquivo VHDX:
+    assinatura 'vhdxfile' e cabecalhos 'head' em 0x10000 e 0x20000.
 
-    Nao substitui o parser autoritativo do Hyper-V (Get-VHD), que roda adiante no
-    fluxo. Existe porque uma conversao interrompida pode deixar assinatura e
-    cabecalhos validos com o rodape (ultimo 1 MiB) inteiramente zerado - foi a
-    falha real observada no relatorio hyperv-provision-20261001T081834Z. Um VHDX
-    nesse estado nao pode ser reaproveitado como pai de geracao 2.
+    ATENCAO (corrigido em 2026-10-09): uma versao anterior desta funcao tambem
+    exigia que o ultimo 1 MiB nao fosse todo zero. Isso era um FALSO POSITIVO:
+    o VHDX real deste host tem esse trecho zerado e mesmo assim e aceito por
+    Get-VHD e serve de pai para New-VHD -Differencing (comprovado). A validacao
+    AUTORITATIVA e o parser do Hyper-V ($GetVhdAction / Get-VHD), executado
+    adiante no fluxo; esta funcao apenas descarta lixo obvio.
     #>
     param([Parameter(Mandatory = $true)][string]$Path)
 
@@ -151,23 +158,7 @@ function Test-VhdxFileStructurallyValid {
             if ($stream.Read($header, 0, 4) -ne 4) { return $false }
             if ([Text.Encoding]::ASCII.GetString($header) -ne 'head') { return $false }
         }
-
-        # O ultimo 1 MiB carrega copias de cabecalho/region table; se estiver
-        # inteiramente zerado a conversao nao terminou.
-        $footerLength = [int][Math]::Min([Int64]1MB, $stream.Length)
-        $footer = New-Object byte[] $footerLength
-        $stream.Position = $stream.Length - $footerLength
-        $total = 0
-        while ($total -lt $footerLength) {
-            $read = $stream.Read($footer, $total, $footerLength - $total)
-            if ($read -le 0) { break }
-            $total += $read
-        }
-        if ($total -ne $footerLength) { return $false }
-        foreach ($value in $footer) {
-            if ($value -ne 0) { return $true }
-        }
-        return $false
+        return $true
     }
     catch { return $false }
     finally { if ($null -ne $stream) { $stream.Dispose() } }
@@ -431,7 +422,8 @@ function Resolve-Gen2CompatibleParent {
         [scriptblock]$GetVhdAction = { param($Path) Get-VHD -Path $Path -ComputerName localhost -ErrorAction Stop },
         [scriptblock]$GetItemAction = { param($Path) Get-Item -LiteralPath $Path -Force -ErrorAction Stop },
         [scriptblock]$GetHashAction = { param($Path) (Get-FileHash -LiteralPath $Path -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant() },
-        [switch]$AllowDiscardInvalidDestination
+        [switch]$AllowDiscardInvalidDestination,
+        [switch]$AllowOrphanDestinationBinding
     )
 
     $format = [string]$SourceVhd.VhdFormat
@@ -503,6 +495,7 @@ function Resolve-Gen2CompatibleParent {
     }
 
     $reuse = $false
+    $adopt = $false
     $destinationExists = Test-Path -LiteralPath $destination -PathType Leaf
     $manifestExists = Test-Path -LiteralPath $manifestPath -PathType Leaf
     if ($destinationExists) {
@@ -511,28 +504,49 @@ function Resolve-Gen2CompatibleParent {
         $Result.existing_vhdx_structurally_valid = $existingStructurallyValid
         if (-not $manifestExists) {
             if ($existingStructurallyValid) {
+                if (-not $AllowOrphanDestinationBinding) {
+                    $Result.status = 'existing_vhdx_unbound'
+                    throw "Existing converted VHDX has no provenance manifest; refusing to reuse or overwrite without -AllowOrphanDestinationBinding: $destination"
+                }
+                $Result.status = 'binding_orphan_destination'
+                try {
+                    $orphanFacts = & $GetVhdAction $destination
+                }
+                catch {
+                    $Result.status = 'orphan_destination_unreadable'
+                    throw "Existing converted VHDX cannot be read by the Hyper-V parser; refusing to bind it: $destination"
+                }
+                if ([string]$orphanFacts.VhdFormat -ne 'VHDX' -or
+                    [string]$orphanFacts.VhdType -ne 'Fixed' -or
+                    [Int64]$orphanFacts.Size -ne [Int64]$SourceVhd.Size) {
+                    $Result.status = 'orphan_destination_contract_invalid'
+                    throw "Existing converted VHDX does not satisfy the expected Fixed VHDX contract; refusing to bind it: $destination"
+                }
+                $Result.adopted_orphan_destination = $true
+                $Result.adopted_orphan_note = 'destination pre-existed without a provenance manifest; bound after authoritative Hyper-V validation'
+                $adopt = $true
+            }
+            elseif (-not $AllowDiscardInvalidDestination) {
                 $Result.status = 'existing_vhdx_unbound'
-                throw "Existing converted VHDX has no provenance manifest; refusing to reuse or overwrite: $destination"
+                throw "Existing converted VHDX has no provenance manifest and fails the VHDX signature/header check; refusing to reuse or overwrite without -AllowDiscardInvalidDestination: $destination"
             }
-            if (-not $AllowDiscardInvalidDestination) {
-                $Result.status = 'existing_vhdx_unbound'
-                throw "Existing converted VHDX has no provenance manifest and is structurally incomplete; refusing to reuse or overwrite without -AllowDiscardInvalidDestination: $destination"
+            else {
+                $partial = & $GetItemAction $destination
+                $Result.discarded_invalid_destination = [ordered]@{
+                    path = $destination
+                    length_bytes = [Int64]$partial.Length
+                    sha256 = [string](& $GetHashAction $destination)
+                    reason = 'structurally_invalid_vhdx'
+                    discarded_at_utc = [DateTime]::UtcNow.ToString('o')
+                }
+                Remove-Item -LiteralPath $destination -Force -ErrorAction Stop
+                $Result.status = 'discarded_invalid_partial'
+                $destinationExists = $false
             }
-            $partial = & $GetItemAction $destination
-            $Result.discarded_invalid_destination = [ordered]@{
-                path = $destination
-                length_bytes = [Int64]$partial.Length
-                sha256 = [string](& $GetHashAction $destination)
-                reason = 'structurally_invalid_vhdx'
-                discarded_at_utc = [DateTime]::UtcNow.ToString('o')
-            }
-            Remove-Item -LiteralPath $destination -Force -ErrorAction Stop
-            $Result.status = 'discarded_invalid_partial'
-            $destinationExists = $false
         }
         elseif (-not $existingStructurallyValid) {
             $Result.status = 'existing_vhdx_corrupt'
-            throw "Existing converted VHDX is structurally incomplete (missing footer or region table); refusing to reuse or overwrite: $destination"
+            throw "Existing converted VHDX fails the VHDX signature/header check; refusing to reuse or overwrite: $destination"
         }
         else {
             $manifest = Get-Content -LiteralPath $manifestPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
@@ -551,7 +565,7 @@ function Resolve-Gen2CompatibleParent {
         throw "Conversion provenance manifest exists without its VHDX; refusing to overwrite evidence: $manifestPath"
     }
 
-    if (-not $reuse) {
+    if (-not $reuse -and -not $adopt) {
         $Result.status = 'conversion_started'
         try {
             & $ConvertAction $SourcePath $destination
@@ -595,7 +609,7 @@ function Resolve-Gen2CompatibleParent {
 
     if (-not (Test-VhdxFileStructurallyValid -Path $destination)) {
         $Result.status = 'destination_structurally_invalid'
-        throw 'Converted Generation 2 VHDX is structurally incomplete (missing footer or region table); refusing to use it.'
+        throw 'Converted Generation 2 VHDX fails the VHDX signature/header check; refusing to use it.'
     }
 
     $destinationAttributes = [IO.FileAttributes]$destinationItem.Attributes
@@ -644,9 +658,14 @@ function Resolve-Gen2CompatibleParent {
             virtual_size_bytes = [Int64]$SourceVhd.Size
             conversion = 'Convert-VHD to Fixed VHDX; source preserved and SHA-256 rechecked after conversion'
         }
+        if ($adopt) {
+            $provenance.adopted_orphan_destination = $true
+            $provenance.adopted_orphan_note = $Result.adopted_orphan_note
+            $provenance.adopted_at_utc = [DateTime]::UtcNow.ToString('o')
+        }
         Write-CreateOnlyJson -Path $manifestPath -Value $provenance
         $Result.reused = $false
-        $Result.status = 'created_validated_vhdx'
+        $Result.status = if ($adopt) { 'adopted_validated_vhdx' } else { 'created_validated_vhdx' }
     }
     $Result.manifest_sha256 = [string](& $GetHashAction $manifestPath)
     $Result.selected_parent_path = $destination
@@ -772,6 +791,7 @@ try {
     $report.preflight.required_free_bytes = $gen2RequiredFree
     $report.stage = 'convert_parent_for_generation2'
     $report.allow_discard_invalid_destination = [bool]$AllowDiscardInvalidDestination
+    $report.allow_orphan_destination_binding = [bool]$AllowOrphanDestinationBinding
     $selectedGen2Parent = Resolve-Gen2CompatibleParent `
         -SourcePath $selectedParentVhd `
         -SourceVhd $selectedParentFacts `
@@ -779,7 +799,8 @@ try {
         -AvailableFreeBytes ([Int64]$driveInfo.AvailableFreeSpace) `
         -RequiredFreeBytes $gen2RequiredFree `
         -Result $report.generation2_parent_conversion `
-        -AllowDiscardInvalidDestination:$AllowDiscardInvalidDestination
+        -AllowDiscardInvalidDestination:$AllowDiscardInvalidDestination `
+        -AllowOrphanDestinationBinding:$AllowOrphanDestinationBinding
     $selectedParentFacts = Get-VHD -Path $selectedGen2Parent -ComputerName localhost -ErrorAction Stop
     $selectedParentFormat = [string]$selectedParentFacts.VhdFormat
     $diffExtension = Get-VhdExtensionForFormat -Format $selectedParentFormat
