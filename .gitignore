@@ -18,6 +18,9 @@ tools/*
 !tools/f00_program_baseline.py
 !tools/custody_snapshot.py
 !tools/run_tests.py
+!tools/phase_test_map.py
+!tools/build_phase_declaration.py
+!tools/verify_ubuntu_source.py
 # Task 1: only generated baseline evidence and SDD task reports stay local.
 output/f00_program_baseline.json
 .superpowers/sdd/**/task-*-report.md

@@ -1,0 +1,1466 @@
+{
+  "counts": {
+    "F00": 35,
+    "F01": 20,
+    "F02": 26,
+    "F03": 7,
+    "F04": 8,
+    "F05": 23,
+    "F06": 5,
+    "F07": 5,
+    "F08": 8,
+    "F09": 2,
+    "F10": 5,
+    "F11": 5,
+    "F12": 12
+  },
+  "files": {
+    "test_adapter_wasm.py": {
+      "fallback": false,
+      "modules": [
+        "wasm"
+      ],
+      "phases": [
+        "F05"
+      ]
+    },
+    "test_adversarial_boundaries.py": {
+      "fallback": false,
+      "modules": [
+        "assistant",
+        "claims"
+      ],
+      "phases": [
+        "F11"
+      ]
+    },
+    "test_android_adapter.py": {
+      "fallback": false,
+      "modules": [
+        "android"
+      ],
+      "phases": [
+        "F05"
+      ]
+    },
+    "test_angr_adapter_cleanup.py": {
+      "fallback": false,
+      "modules": [
+        "angr"
+      ],
+      "phases": [
+        "F05"
+      ]
+    },
+    "test_angr_calls.py": {
+      "fallback": false,
+      "modules": [
+        "angr"
+      ],
+      "phases": [
+        "F05"
+      ]
+    },
+    "test_archive_intake.py": {
+      "fallback": false,
+      "modules": [
+        "archive_intake",
+        "kernel_contracts"
+      ],
+      "phases": [
+        "F00",
+        "F02"
+      ]
+    },
+    "test_assistant.py": {
+      "fallback": false,
+      "modules": [
+        "assistant"
+      ],
+      "phases": [
+        "F11"
+      ]
+    },
+    "test_authorized_local_corpus.py": {
+      "fallback": false,
+      "modules": [
+        "corpus"
+      ],
+      "phases": [
+        "F03"
+      ]
+    },
+    "test_behavioral_runner.py": {
+      "fallback": false,
+      "modules": [
+        "behavioral_runner"
+      ],
+      "phases": [
+        "F06"
+      ]
+    },
+    "test_benchmark.py": {
+      "fallback": false,
+      "modules": [
+        "benchmark"
+      ],
+      "phases": [
+        "F10"
+      ]
+    },
+    "test_blind_release.py": {
+      "fallback": true,
+      "modules": [],
+      "phases": [
+        "F00"
+      ]
+    },
+    "test_build_audit.py": {
+      "fallback": false,
+      "modules": [
+        "build_audit"
+      ],
+      "phases": [
+        "F04"
+      ]
+    },
+    "test_build_link.py": {
+      "fallback": false,
+      "modules": [
+        "build_link"
+      ],
+      "phases": [
+        "F06"
+      ]
+    },
+    "test_c_source.py": {
+      "fallback": false,
+      "modules": [
+        "c_source"
+      ],
+      "phases": [
+        "F04"
+      ]
+    },
+    "test_cache.py": {
+      "fallback": false,
+      "modules": [
+        "cache"
+      ],
+      "phases": [
+        "F02"
+      ]
+    },
+    "test_campaign_run_cli.py": {
+      "fallback": true,
+      "modules": [],
+      "phases": [
+        "F00"
+      ]
+    },
+    "test_certification_declaration_bypass.py": {
+      "fallback": false,
+      "modules": [
+        "profile_certification"
+      ],
+      "phases": [
+        "F12"
+      ]
+    },
+    "test_checkpoint.py": {
+      "fallback": false,
+      "modules": [
+        "checkpoint"
+      ],
+      "phases": [
+        "F02"
+      ]
+    },
+    "test_claims.py": {
+      "fallback": false,
+      "modules": [
+        "claims"
+      ],
+      "phases": [
+        "F11"
+      ]
+    },
+    "test_cli_encoding.py": {
+      "fallback": true,
+      "modules": [],
+      "phases": [
+        "F00"
+      ]
+    },
+    "test_cli_selftest.py": {
+      "fallback": true,
+      "modules": [],
+      "phases": [
+        "F00"
+      ]
+    },
+    "test_complex_corpus.py": {
+      "fallback": false,
+      "modules": [
+        "corpus",
+        "corpus_eval"
+      ],
+      "phases": [
+        "F03"
+      ]
+    },
+    "test_consensus_calibrated.py": {
+      "fallback": false,
+      "modules": [
+        "consensus",
+        "models"
+      ],
+      "phases": [
+        "F01",
+        "F10"
+      ]
+    },
+    "test_contracts.py": {
+      "fallback": false,
+      "modules": [
+        "contracts"
+      ],
+      "phases": [
+        "F02"
+      ]
+    },
+    "test_core_lock.py": {
+      "fallback": true,
+      "modules": [],
+      "phases": [
+        "F00"
+      ]
+    },
+    "test_corpus.py": {
+      "fallback": true,
+      "modules": [],
+      "phases": [
+        "F00"
+      ]
+    },
+    "test_corpus_build.py": {
+      "fallback": false,
+      "modules": [
+        "corpus"
+      ],
+      "phases": [
+        "F03"
+      ]
+    },
+    "test_corpus_eval.py": {
+      "fallback": false,
+      "modules": [
+        "corpus_eval",
+        "pdb_dia"
+      ],
+      "phases": [
+        "F03",
+        "F05"
+      ]
+    },
+    "test_corpus_registry_cli.py": {
+      "fallback": true,
+      "modules": [],
+      "phases": [
+        "F00"
+      ]
+    },
+    "test_corpus_registry_material.py": {
+      "fallback": false,
+      "modules": [
+        "corpus_registry"
+      ],
+      "phases": [
+        "F03"
+      ]
+    },
+    "test_correlation.py": {
+      "fallback": false,
+      "modules": [
+        "correlation"
+      ],
+      "phases": [
+        "F06"
+      ]
+    },
+    "test_custody.py": {
+      "fallback": false,
+      "modules": [
+        "custody"
+      ],
+      "phases": [
+        "F00"
+      ]
+    },
+    "test_custody_release.py": {
+      "fallback": false,
+      "modules": [
+        "custody_release"
+      ],
+      "phases": [
+        "F00"
+      ]
+    },
+    "test_decompiler_partial.py": {
+      "fallback": false,
+      "modules": [
+        "decompiler"
+      ],
+      "phases": [
+        "F05"
+      ]
+    },
+    "test_dependency_audit.py": {
+      "fallback": false,
+      "modules": [
+        "dependency_audit",
+        "source"
+      ],
+      "phases": [
+        "F04",
+        "F07"
+      ]
+    },
+    "test_differential.py": {
+      "fallback": false,
+      "modules": [
+        "differential"
+      ],
+      "phases": [
+        "F06"
+      ]
+    },
+    "test_doctor.py": {
+      "fallback": false,
+      "modules": [
+        "doctor"
+      ],
+      "phases": [
+        "F00"
+      ]
+    },
+    "test_documentation.py": {
+      "fallback": false,
+      "modules": [
+        "documentation"
+      ],
+      "phases": [
+        "F12"
+      ]
+    },
+    "test_dwarf.py": {
+      "fallback": false,
+      "modules": [
+        "dwarf"
+      ],
+      "phases": [
+        "F05"
+      ]
+    },
+    "test_dynamic_effects.py": {
+      "fallback": false,
+      "modules": [
+        "dynamic_effects"
+      ],
+      "phases": [
+        "F08"
+      ]
+    },
+    "test_dynamic_lab_contracts.py": {
+      "fallback": false,
+      "modules": [
+        "dynamic_lab_contracts",
+        "kernel_contracts"
+      ],
+      "phases": [
+        "F02",
+        "F08"
+      ]
+    },
+    "test_elf_calls.py": {
+      "fallback": false,
+      "modules": [
+        "elf_calls"
+      ],
+      "phases": [
+        "F05"
+      ]
+    },
+    "test_elf_structure.py": {
+      "fallback": false,
+      "modules": [
+        "pe_elf",
+        "pipeline"
+      ],
+      "phases": [
+        "F01",
+        "F05"
+      ]
+    },
+    "test_ensemble.py": {
+      "fallback": false,
+      "modules": [
+        "comparative_report",
+        "consensus",
+        "ghidra_parse",
+        "models"
+      ],
+      "phases": [
+        "F01",
+        "F05",
+        "F10"
+      ]
+    },
+    "test_evidence.py": {
+      "fallback": false,
+      "modules": [
+        "evidence"
+      ],
+      "phases": [
+        "F02"
+      ]
+    },
+    "test_evidence_contract.py": {
+      "fallback": false,
+      "modules": [
+        "evidence_contract"
+      ],
+      "phases": [
+        "F02"
+      ]
+    },
+    "test_evidence_journal.py": {
+      "fallback": false,
+      "modules": [
+        "evidence_journal",
+        "lock"
+      ],
+      "phases": [
+        "F02"
+      ]
+    },
+    "test_evidence_store.py": {
+      "fallback": false,
+      "modules": [
+        "evidence_store",
+        "kernel_contracts"
+      ],
+      "phases": [
+        "F02"
+      ]
+    },
+    "test_evidence_verify_alias.py": {
+      "fallback": true,
+      "modules": [],
+      "phases": [
+        "F00"
+      ]
+    },
+    "test_external_attestations.py": {
+      "fallback": false,
+      "modules": [
+        "external_attestations"
+      ],
+      "phases": [
+        "F12"
+      ]
+    },
+    "test_external_juliet.py": {
+      "fallback": false,
+      "modules": [
+        "corpus",
+        "corpus_eval"
+      ],
+      "phases": [
+        "F03"
+      ]
+    },
+    "test_f08_windows_sandbox_probe.py": {
+      "fallback": true,
+      "modules": [],
+      "phases": [
+        "F00"
+      ]
+    },
+    "test_firmware_layout.py": {
+      "fallback": false,
+      "modules": [
+        "firmware_layout"
+      ],
+      "phases": [
+        "F05"
+      ]
+    },
+    "test_function_evidence.py": {
+      "fallback": false,
+      "modules": [
+        "models"
+      ],
+      "phases": [
+        "F01"
+      ]
+    },
+    "test_fuzz.py": {
+      "fallback": false,
+      "modules": [
+        "fuzz"
+      ],
+      "phases": [
+        "F09"
+      ]
+    },
+    "test_ghidra_adapter.py": {
+      "fallback": false,
+      "modules": [
+        "adapters",
+        "ghidra"
+      ],
+      "phases": [
+        "F01",
+        "F05"
+      ]
+    },
+    "test_ghidra_parser.py": {
+      "fallback": false,
+      "modules": [
+        "ghidra_parse"
+      ],
+      "phases": [
+        "F05"
+      ]
+    },
+    "test_ghidra_provenance.py": {
+      "fallback": false,
+      "modules": [
+        "ghidra_provenance"
+      ],
+      "phases": [
+        "F12"
+      ]
+    },
+    "test_graph_store.py": {
+      "fallback": false,
+      "modules": [
+        "graph_store"
+      ],
+      "phases": [
+        "F01"
+      ]
+    },
+    "test_homologation.py": {
+      "fallback": false,
+      "modules": [
+        "evidence",
+        "homologation",
+        "lock"
+      ],
+      "phases": [
+        "F02",
+        "F12"
+      ]
+    },
+    "test_hyperv_preflight.py": {
+      "fallback": false,
+      "modules": [
+        "hyperv_preflight"
+      ],
+      "phases": [
+        "F08"
+      ]
+    },
+    "test_hyperv_provision_script.py": {
+      "fallback": true,
+      "modules": [],
+      "phases": [
+        "F00"
+      ]
+    },
+    "test_identity.py": {
+      "fallback": false,
+      "modules": [
+        "pipeline"
+      ],
+      "phases": [
+        "F01"
+      ]
+    },
+    "test_ilspy_adapter.py": {
+      "fallback": false,
+      "modules": [
+        "ilspy"
+      ],
+      "phases": [
+        "F05"
+      ]
+    },
+    "test_independent_holdout.py": {
+      "fallback": false,
+      "modules": [
+        "corpus_eval"
+      ],
+      "phases": [
+        "F03"
+      ]
+    },
+    "test_intake.py": {
+      "fallback": false,
+      "modules": [
+        "intake",
+        "kernel_contracts"
+      ],
+      "phases": [
+        "F02"
+      ]
+    },
+    "test_intake_cli.py": {
+      "fallback": true,
+      "modules": [],
+      "phases": [
+        "F00"
+      ]
+    },
+    "test_ir.py": {
+      "fallback": false,
+      "modules": [
+        "ir",
+        "kernel_contracts"
+      ],
+      "phases": [
+        "F01",
+        "F02"
+      ]
+    },
+    "test_jar_worker.py": {
+      "fallback": false,
+      "modules": [
+        "jar_worker"
+      ],
+      "phases": [
+        "F05"
+      ]
+    },
+    "test_jar_workers_lock.py": {
+      "fallback": false,
+      "modules": [
+        "jar_worker"
+      ],
+      "phases": [
+        "F05"
+      ]
+    },
+    "test_juliet_multifile_corpus.py": {
+      "fallback": true,
+      "modules": [],
+      "phases": [
+        "F00"
+      ]
+    },
+    "test_jvm_adapter.py": {
+      "fallback": false,
+      "modules": [
+        "jvm"
+      ],
+      "phases": [
+        "F05"
+      ]
+    },
+    "test_kernel_chaos.py": {
+      "fallback": false,
+      "modules": [
+        "evidence_journal",
+        "evidence_store",
+        "intake",
+        "kernel_contracts"
+      ],
+      "phases": [
+        "F02"
+      ]
+    },
+    "test_kernel_contracts.py": {
+      "fallback": false,
+      "modules": [
+        "kernel_contracts"
+      ],
+      "phases": [
+        "F02"
+      ]
+    },
+    "test_kernel_evidence_contract.py": {
+      "fallback": false,
+      "modules": [
+        "evidence_contract"
+      ],
+      "phases": [
+        "F02"
+      ]
+    },
+    "test_kernel_replay.py": {
+      "fallback": false,
+      "modules": [
+        "intake",
+        "kernel_contracts"
+      ],
+      "phases": [
+        "F02"
+      ]
+    },
+    "test_lab_export_handoff.py": {
+      "fallback": true,
+      "modules": [],
+      "phases": [
+        "F00"
+      ]
+    },
+    "test_lab_policy.py": {
+      "fallback": false,
+      "modules": [
+        "lab_policy"
+      ],
+      "phases": [
+        "F08"
+      ]
+    },
+    "test_language_profiles.py": {
+      "fallback": false,
+      "modules": [
+        "language_profiles",
+        "project_audit"
+      ],
+      "phases": [
+        "F04"
+      ]
+    },
+    "test_lock.py": {
+      "fallback": false,
+      "modules": [
+        "lock"
+      ],
+      "phases": [
+        "F02"
+      ]
+    },
+    "test_metrics.py": {
+      "fallback": false,
+      "modules": [
+        "metrics"
+      ],
+      "phases": [
+        "F10"
+      ]
+    },
+    "test_native_normalize.py": {
+      "fallback": false,
+      "modules": [
+        "ir",
+        "native_normalize"
+      ],
+      "phases": [
+        "F01"
+      ]
+    },
+    "test_pe_codeview.py": {
+      "fallback": false,
+      "modules": [
+        "pe_debug"
+      ],
+      "phases": [
+        "F05"
+      ]
+    },
+    "test_pe_structure.py": {
+      "fallback": false,
+      "modules": [
+        "pe_elf"
+      ],
+      "phases": [
+        "F05"
+      ]
+    },
+    "test_phase_gates.py": {
+      "fallback": false,
+      "modules": [
+        "phase_gates"
+      ],
+      "phases": [
+        "F12"
+      ]
+    },
+    "test_pipeline_ghidra_partial.py": {
+      "fallback": false,
+      "modules": [
+        "pipeline"
+      ],
+      "phases": [
+        "F01"
+      ]
+    },
+    "test_pipeline_guards.py": {
+      "fallback": false,
+      "modules": [
+        "lock",
+        "pipeline"
+      ],
+      "phases": [
+        "F01",
+        "F02"
+      ]
+    },
+    "test_pipeline_kernel.py": {
+      "fallback": false,
+      "modules": [
+        "pipeline"
+      ],
+      "phases": [
+        "F01"
+      ]
+    },
+    "test_pipeline_macho_route.py": {
+      "fallback": false,
+      "modules": [
+        "pipeline"
+      ],
+      "phases": [
+        "F01"
+      ]
+    },
+    "test_pipeline_specialized_adapters.py": {
+      "fallback": false,
+      "modules": [
+        "pipeline"
+      ],
+      "phases": [
+        "F01"
+      ]
+    },
+    "test_process.py": {
+      "fallback": false,
+      "modules": [
+        "process"
+      ],
+      "phases": [
+        "F02"
+      ]
+    },
+    "test_process_cleanup.py": {
+      "fallback": false,
+      "modules": [
+        "process"
+      ],
+      "phases": [
+        "F02"
+      ]
+    },
+    "test_profile_certification.py": {
+      "fallback": false,
+      "modules": [
+        "profile_certification"
+      ],
+      "phases": [
+        "F12"
+      ]
+    },
+    "test_profile_certify_cli.py": {
+      "fallback": true,
+      "modules": [],
+      "phases": [
+        "F00"
+      ]
+    },
+    "test_profile_comparison.py": {
+      "fallback": false,
+      "modules": [
+        "profile_comparison"
+      ],
+      "phases": [
+        "F05"
+      ]
+    },
+    "test_profile_material_verification.py": {
+      "fallback": false,
+      "modules": [
+        "profile_certification"
+      ],
+      "phases": [
+        "F12"
+      ]
+    },
+    "test_profile_probe_cli.py": {
+      "fallback": true,
+      "modules": [],
+      "phases": [
+        "F00"
+      ]
+    },
+    "test_profile_router.py": {
+      "fallback": false,
+      "modules": [
+        "evidence_store",
+        "intake",
+        "kernel_contracts",
+        "profile_router"
+      ],
+      "phases": [
+        "F01",
+        "F02"
+      ]
+    },
+    "test_profile_scope.py": {
+      "fallback": false,
+      "modules": [
+        "claims",
+        "profile_scope"
+      ],
+      "phases": [
+        "F06",
+        "F11"
+      ]
+    },
+    "test_program_baseline.py": {
+      "fallback": true,
+      "modules": [],
+      "phases": [
+        "F00"
+      ]
+    },
+    "test_project.py": {
+      "fallback": false,
+      "modules": [
+        "angr",
+        "consensus",
+        "frida_dyn",
+        "ghidra_parse",
+        "pipeline",
+        "unicorn_emu"
+      ],
+      "phases": [
+        "F01",
+        "F05",
+        "F08",
+        "F10"
+      ]
+    },
+    "test_project_audit.py": {
+      "fallback": false,
+      "modules": [
+        "project_audit",
+        "project_inventory"
+      ],
+      "phases": [
+        "F00",
+        "F04"
+      ]
+    },
+    "test_project_dependencies.py": {
+      "fallback": false,
+      "modules": [
+        "project_dependencies"
+      ],
+      "phases": [
+        "F07"
+      ]
+    },
+    "test_project_inventory.py": {
+      "fallback": false,
+      "modules": [
+        "project_inventory"
+      ],
+      "phases": [
+        "F00"
+      ]
+    },
+    "test_project_snapshot.py": {
+      "fallback": false,
+      "modules": [
+        "evidence",
+        "project_inventory",
+        "project_snapshot"
+      ],
+      "phases": [
+        "F00",
+        "F02"
+      ]
+    },
+    "test_release_build_cli.py": {
+      "fallback": true,
+      "modules": [],
+      "phases": [
+        "F00"
+      ]
+    },
+    "test_release_builder_cli.py": {
+      "fallback": true,
+      "modules": [],
+      "phases": [
+        "F00"
+      ]
+    },
+    "test_release_certification.py": {
+      "fallback": false,
+      "modules": [
+        "release_certification"
+      ],
+      "phases": [
+        "F12"
+      ]
+    },
+    "test_release_inventory.py": {
+      "fallback": false,
+      "modules": [
+        "release_inventory"
+      ],
+      "phases": [
+        "F12"
+      ]
+    },
+    "test_release_manifest_builder.py": {
+      "fallback": false,
+      "modules": [
+        "release_builder",
+        "release_certification"
+      ],
+      "phases": [
+        "F12"
+      ]
+    },
+    "test_repro_package.py": {
+      "fallback": false,
+      "modules": [
+        "evidence",
+        "repro_package"
+      ],
+      "phases": [
+        "F00",
+        "F02"
+      ]
+    },
+    "test_review_ui.py": {
+      "fallback": false,
+      "modules": [
+        "review_ui"
+      ],
+      "phases": [
+        "F11"
+      ]
+    },
+    "test_risk_audit.py": {
+      "fallback": false,
+      "modules": [
+        "risk_audit",
+        "source"
+      ],
+      "phases": [
+        "F04",
+        "F07"
+      ]
+    },
+    "test_rizin_output_budget.py": {
+      "fallback": false,
+      "modules": [
+        "rizin"
+      ],
+      "phases": [
+        "F05"
+      ]
+    },
+    "test_safe_walk.py": {
+      "fallback": false,
+      "modules": [
+        "safe_walk",
+        "source"
+      ],
+      "phases": [
+        "F00",
+        "F04"
+      ]
+    },
+    "test_sarif.py": {
+      "fallback": false,
+      "modules": [
+        "sarif"
+      ],
+      "phases": [
+        "F07"
+      ]
+    },
+    "test_source.py": {
+      "fallback": false,
+      "modules": [
+        "source"
+      ],
+      "phases": [
+        "F04"
+      ]
+    },
+    "test_split_contract.py": {
+      "fallback": true,
+      "modules": [],
+      "phases": [
+        "F00"
+      ]
+    },
+    "test_static_profiles.py": {
+      "fallback": false,
+      "modules": [
+        "static_profiles"
+      ],
+      "phases": [
+        "F01"
+      ]
+    },
+    "test_static_worker.py": {
+      "fallback": false,
+      "modules": [
+        "static_worker"
+      ],
+      "phases": [
+        "F01"
+      ]
+    },
+    "test_symbolic.py": {
+      "fallback": false,
+      "modules": [
+        "symbolic"
+      ],
+      "phases": [
+        "F09"
+      ]
+    },
+    "test_taint_audit.py": {
+      "fallback": false,
+      "modules": [
+        "taint_audit"
+      ],
+      "phases": [
+        "F07"
+      ]
+    },
+    "test_task4_review.py": {
+      "fallback": false,
+      "modules": [
+        "_static_base",
+        "profile_certification",
+        "static_profiles",
+        "static_worker"
+      ],
+      "phases": [
+        "F01",
+        "F12"
+      ]
+    },
+    "test_test_runner.py": {
+      "fallback": false,
+      "modules": [
+        "test_runner"
+      ],
+      "phases": [
+        "F00"
+      ]
+    },
+    "test_toolchain_lock.py": {
+      "fallback": false,
+      "modules": [
+        "toolchain_lock"
+      ],
+      "phases": [
+        "F00"
+      ]
+    },
+    "test_trace.py": {
+      "fallback": false,
+      "modules": [
+        "trace"
+      ],
+      "phases": [
+        "F08"
+      ]
+    },
+    "test_trace_correlation.py": {
+      "fallback": false,
+      "modules": [
+        "trace_correlation"
+      ],
+      "phases": [
+        "F08"
+      ]
+    },
+    "test_tri_split_ci.py": {
+      "fallback": true,
+      "modules": [],
+      "phases": [
+        "F00"
+      ]
+    },
+    "test_tri_split_evaluate.py": {
+      "fallback": true,
+      "modules": [],
+      "phases": [
+        "F00"
+      ]
+    },
+    "test_tri_split_release.py": {
+      "fallback": true,
+      "modules": [],
+      "phases": [
+        "F00"
+      ]
+    },
+    "test_tri_split_unblind.py": {
+      "fallback": true,
+      "modules": [],
+      "phases": [
+        "F00"
+      ]
+    },
+    "test_universal_pipeline.py": {
+      "fallback": false,
+      "modules": [
+        "kernel_contracts",
+        "pipeline"
+      ],
+      "phases": [
+        "F01",
+        "F02"
+      ]
+    },
+    "test_universal_release.py": {
+      "fallback": true,
+      "modules": [],
+      "phases": [
+        "F00"
+      ]
+    },
+    "test_validation_campaign.py": {
+      "fallback": false,
+      "modules": [
+        "validation_campaign"
+      ],
+      "phases": [
+        "F02"
+      ]
+    },
+    "test_wasm_adapter.py": {
+      "fallback": false,
+      "modules": [
+        "wasm"
+      ],
+      "phases": [
+        "F05"
+      ]
+    },
+    "test_windows_sandbox_guest.py": {
+      "fallback": false,
+      "modules": [
+        "windows_sandbox_guest"
+      ],
+      "phases": [
+        "F08"
+      ]
+    },
+    "test_worker_contracts_v2.py": {
+      "fallback": false,
+      "modules": [
+        "contracts"
+      ],
+      "phases": [
+        "F02"
+      ]
+    }
+  },
+  "method": "fase do arquivo de teste = uniao das fases dos modulos aether_re efetivamente importados (AST); fallback F00 quando nao ha import",
+  "phases": {
+    "F00": [
+      "tests/test_archive_intake.py",
+      "tests/test_blind_release.py",
+      "tests/test_campaign_run_cli.py",
+      "tests/test_cli_encoding.py",
+      "tests/test_cli_selftest.py",
+      "tests/test_core_lock.py",
+      "tests/test_corpus.py",
+      "tests/test_corpus_registry_cli.py",
+      "tests/test_custody.py",
+      "tests/test_custody_release.py",
+      "tests/test_doctor.py",
+      "tests/test_evidence_verify_alias.py",
+      "tests/test_f08_windows_sandbox_probe.py",
+      "tests/test_hyperv_provision_script.py",
+      "tests/test_intake_cli.py",
+      "tests/test_juliet_multifile_corpus.py",
+      "tests/test_lab_export_handoff.py",
+      "tests/test_profile_certify_cli.py",
+      "tests/test_profile_probe_cli.py",
+      "tests/test_program_baseline.py",
+      "tests/test_project_audit.py",
+      "tests/test_project_inventory.py",
+      "tests/test_project_snapshot.py",
+      "tests/test_release_build_cli.py",
+      "tests/test_release_builder_cli.py",
+      "tests/test_repro_package.py",
+      "tests/test_safe_walk.py",
+      "tests/test_split_contract.py",
+      "tests/test_test_runner.py",
+      "tests/test_toolchain_lock.py",
+      "tests/test_tri_split_ci.py",
+      "tests/test_tri_split_evaluate.py",
+      "tests/test_tri_split_release.py",
+      "tests/test_tri_split_unblind.py",
+      "tests/test_universal_release.py"
+    ],
+    "F01": [
+      "tests/test_consensus_calibrated.py",
+      "tests/test_elf_structure.py",
+      "tests/test_ensemble.py",
+      "tests/test_function_evidence.py",
+      "tests/test_ghidra_adapter.py",
+      "tests/test_graph_store.py",
+      "tests/test_identity.py",
+      "tests/test_ir.py",
+      "tests/test_native_normalize.py",
+      "tests/test_pipeline_ghidra_partial.py",
+      "tests/test_pipeline_guards.py",
+      "tests/test_pipeline_kernel.py",
+      "tests/test_pipeline_macho_route.py",
+      "tests/test_pipeline_specialized_adapters.py",
+      "tests/test_profile_router.py",
+      "tests/test_project.py",
+      "tests/test_static_profiles.py",
+      "tests/test_static_worker.py",
+      "tests/test_task4_review.py",
+      "tests/test_universal_pipeline.py"
+    ],
+    "F02": [
+      "tests/test_archive_intake.py",
+      "tests/test_cache.py",
+      "tests/test_checkpoint.py",
+      "tests/test_contracts.py",
+      "tests/test_dynamic_lab_contracts.py",
+      "tests/test_evidence.py",
+      "tests/test_evidence_contract.py",
+      "tests/test_evidence_journal.py",
+      "tests/test_evidence_store.py",
+      "tests/test_homologation.py",
+      "tests/test_intake.py",
+      "tests/test_ir.py",
+      "tests/test_kernel_chaos.py",
+      "tests/test_kernel_contracts.py",
+      "tests/test_kernel_evidence_contract.py",
+      "tests/test_kernel_replay.py",
+      "tests/test_lock.py",
+      "tests/test_pipeline_guards.py",
+      "tests/test_process.py",
+      "tests/test_process_cleanup.py",
+      "tests/test_profile_router.py",
+      "tests/test_project_snapshot.py",
+      "tests/test_repro_package.py",
+      "tests/test_universal_pipeline.py",
+      "tests/test_validation_campaign.py",
+      "tests/test_worker_contracts_v2.py"
+    ],
+    "F03": [
+      "tests/test_authorized_local_corpus.py",
+      "tests/test_complex_corpus.py",
+      "tests/test_corpus_build.py",
+      "tests/test_corpus_eval.py",
+      "tests/test_corpus_registry_material.py",
+      "tests/test_external_juliet.py",
+      "tests/test_independent_holdout.py"
+    ],
+    "F04": [
+      "tests/test_build_audit.py",
+      "tests/test_c_source.py",
+      "tests/test_dependency_audit.py",
+      "tests/test_language_profiles.py",
+      "tests/test_project_audit.py",
+      "tests/test_risk_audit.py",
+      "tests/test_safe_walk.py",
+      "tests/test_source.py"
+    ],
+    "F05": [
+      "tests/test_adapter_wasm.py",
+      "tests/test_android_adapter.py",
+      "tests/test_angr_adapter_cleanup.py",
+      "tests/test_angr_calls.py",
+      "tests/test_corpus_eval.py",
+      "tests/test_decompiler_partial.py",
+      "tests/test_dwarf.py",
+      "tests/test_elf_calls.py",
+      "tests/test_elf_structure.py",
+      "tests/test_ensemble.py",
+      "tests/test_firmware_layout.py",
+      "tests/test_ghidra_adapter.py",
+      "tests/test_ghidra_parser.py",
+      "tests/test_ilspy_adapter.py",
+      "tests/test_jar_worker.py",
+      "tests/test_jar_workers_lock.py",
+      "tests/test_jvm_adapter.py",
+      "tests/test_pe_codeview.py",
+      "tests/test_pe_structure.py",
+      "tests/test_profile_comparison.py",
+      "tests/test_project.py",
+      "tests/test_rizin_output_budget.py",
+      "tests/test_wasm_adapter.py"
+    ],
+    "F06": [
+      "tests/test_behavioral_runner.py",
+      "tests/test_build_link.py",
+      "tests/test_correlation.py",
+      "tests/test_differential.py",
+      "tests/test_profile_scope.py"
+    ],
+    "F07": [
+      "tests/test_dependency_audit.py",
+      "tests/test_project_dependencies.py",
+      "tests/test_risk_audit.py",
+      "tests/test_sarif.py",
+      "tests/test_taint_audit.py"
+    ],
+    "F08": [
+      "tests/test_dynamic_effects.py",
+      "tests/test_dynamic_lab_contracts.py",
+      "tests/test_hyperv_preflight.py",
+      "tests/test_lab_policy.py",
+      "tests/test_project.py",
+      "tests/test_trace.py",
+      "tests/test_trace_correlation.py",
+      "tests/test_windows_sandbox_guest.py"
+    ],
+    "F09": [
+      "tests/test_fuzz.py",
+      "tests/test_symbolic.py"
+    ],
+    "F10": [
+      "tests/test_benchmark.py",
+      "tests/test_consensus_calibrated.py",
+      "tests/test_ensemble.py",
+      "tests/test_metrics.py",
+      "tests/test_project.py"
+    ],
+    "F11": [
+      "tests/test_adversarial_boundaries.py",
+      "tests/test_assistant.py",
+      "tests/test_claims.py",
+      "tests/test_profile_scope.py",
+      "tests/test_review_ui.py"
+    ],
+    "F12": [
+      "tests/test_certification_declaration_bypass.py",
+      "tests/test_documentation.py",
+      "tests/test_external_attestations.py",
+      "tests/test_ghidra_provenance.py",
+      "tests/test_homologation.py",
+      "tests/test_phase_gates.py",
+      "tests/test_profile_certification.py",
+      "tests/test_profile_material_verification.py",
+      "tests/test_release_certification.py",
+      "tests/test_release_inventory.py",
+      "tests/test_release_manifest_builder.py",
+      "tests/test_task4_review.py"
+    ]
+  },
+  "schema": "phase-test-map.v1",
+  "unmapped_modules": []
+}
