@@ -12,6 +12,7 @@ _SPDX = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.+-]*(?:\s+(?:OR|AND|WITH)\s+[A-Za-z0
 class StaticWorkerSpec:
     name: str; executable: Path; executable_sha256: str; expected_version: str; license_spdx: str
     timeout_s: float; memory_mb: int; cpu_s: int; max_output_bytes: int
+    version_args: tuple[str, ...] = ('--version',)
 
 @dataclass(frozen=True)
 class StaticWorkerProbe:
@@ -45,7 +46,9 @@ def probe_static_worker(spec: StaticWorkerSpec) -> StaticWorkerProbe:
         exe = spec.executable.resolve(strict=True)
         if not exe.is_file() or _hash(exe) != spec.executable_sha256:
             return StaticWorkerProbe(spec.name, False, '', '', spec.license_spdx, ('worker_executable_hash_mismatch',))
-        value = _run_bounded([str(exe), '--version'], timeout=min(spec.timeout_s, 10), memory_limit_mb=spec.memory_mb, cpu_time_limit_s=spec.cpu_s, cwd=str(exe.parent))
+        if not spec.version_args or any(not isinstance(arg,str) or not arg or _FORBIDDEN.search(arg) for arg in spec.version_args):
+            return StaticWorkerProbe(spec.name, False, '', '', spec.license_spdx, ('worker_version_args_invalid',))
+        value = _run_bounded([str(exe), *spec.version_args], timeout=min(spec.timeout_s, 10), memory_limit_mb=spec.memory_mb, cpu_time_limit_s=spec.cpu_s, cwd=str(exe.parent))
         version = str(value.get('stdout', '')).strip()
         if value.get('returncode') not in (0, None): errors.append('worker_version_failed')
         elif spec.expected_version not in version: errors.append('worker_version_mismatch')

@@ -1,0 +1,28 @@
+{
+  "case_labels": {
+    "default": false,
+    "feature_flag": "ENABLED"
+  },
+  "expected_relations": [
+    [
+      "run",
+      "fast"
+    ],
+    [
+      "run",
+      "slow"
+    ]
+  ],
+  "expected_symbols": [
+    "run",
+    "fast",
+    "slow"
+  ],
+  "family": "feature_flag",
+  "known_limits": [
+    "same-author synthetic oracle, not independent",
+    "static source expectations are not runtime truth"
+  ],
+  "language": "python",
+  "oracle_schema": "re-megazord-oracle.v1"
+}

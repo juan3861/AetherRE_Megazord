@@ -1,0 +1,24 @@
+{
+  "expected_relations": [
+    [
+      "exported_iota",
+      "add_two"
+    ],
+    [
+      "add_two",
+      "add_one"
+    ]
+  ],
+  "expected_symbols": [
+    "exported_iota",
+    "add_two",
+    "add_one"
+  ],
+  "family": "manual_iota",
+  "known_limits": [
+    "manual source oracle; no external adjudicator",
+    "static expectations do not prove runtime behavior"
+  ],
+  "language": "c",
+  "oracle_schema": "re-megazord-oracle.v1"
+}

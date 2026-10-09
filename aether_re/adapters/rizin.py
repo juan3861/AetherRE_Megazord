@@ -9,11 +9,13 @@ from pathlib import Path
 from typing import Any
 
 from aether_re.adapters.base import Adapter
+from aether_re.process import cpu_limit_from_env, memory_limit_from_env, run_bounded, timeout_from_env
 from aether_re.engines.ghidra_parse import normalize_address
 
 
 class RizinAdapter(Adapter):
     name = "rizin"
+    _MAX_OUTPUT_BYTES = 8 * 1024 * 1024
 
     def available(self) -> bool:
         return self._bin() is not None
@@ -102,8 +104,10 @@ class RizinAdapter(Adapter):
         if not exe:
             return {
                 "ok": False,
+                "available": False,
                 "executed": False,
                 "produced_evidence": False,
+                "partial": False,
                 "error": "rizin/r2 não encontrado no PATH",
             }
 
@@ -115,23 +119,37 @@ class RizinAdapter(Adapter):
             str(target),
         ]
         try:
-            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+            proc = run_bounded(cmd, timeout=timeout_from_env("AETHER_RIZIN_TIMEOUT", 180.0), memory_limit_mb=memory_limit_from_env("AETHER_RIZIN_MEMORY_MB"), cpu_time_limit_s=cpu_limit_from_env("AETHER_RIZIN_CPU_SECONDS"))
+            raw = proc["stdout"]
+            raw_bytes = raw.encode("utf-8", errors="replace")
+            output_limited = len(raw_bytes) > self._MAX_OUTPUT_BYTES
             report_path = out_dir / "rizin_raw.txt"
-            report_path.write_text(proc.stdout or "", encoding="utf-8", errors="replace")
+            # Keep forensic provenance of the condition without allowing one
+            # backend to exhaust the evidence budget or be promoted silently.
+            if output_limited:
+                retained = raw_bytes[:self._MAX_OUTPUT_BYTES]
+                report_path.write_bytes(retained + b"\n[AETHERRE: output truncated; limit exceeded]\n")
+            else:
+                report_path.write_bytes(raw_bytes)
 
-            functions = self._parse_functions(proc.stdout)
-            produced_evidence = proc.returncode == 0 and bool(functions)
+            functions = self._parse_functions(proc["stdout"])
+            produced_evidence = proc["returncode"] == 0 and not proc["timed_out"] and not proc.get("resource_exceeded", False) and not output_limited and bool(functions)
 
             return {
-                "ok": proc.returncode == 0,
+                "ok": proc["returncode"] == 0 and not proc["timed_out"] and not output_limited,
                 "executed": True,
                 "produced_evidence": produced_evidence,
-                "partial": proc.returncode != 0 or not produced_evidence,
-                "returncode": proc.returncode,
+                "partial": proc["returncode"] != 0 or proc["timed_out"] or proc.get("resource_exceeded", False) or output_limited or not produced_evidence,
+                "returncode": proc["returncode"],
+                "timed_out": proc["timed_out"],
+                "resource_exceeded": proc.get("resource_exceeded", False),
+                "resource_kind": proc.get("resource_kind"),
+                "output_limit_exceeded": output_limited,
+                "output_bytes": len(raw_bytes),
                 "functions": functions,
                 "report": str(report_path),
-                "stdout_tail": (proc.stdout or "")[-3000:],
-                "stderr_tail": (proc.stderr or "")[-1000:],
+                "stdout_tail": proc["stdout"][-3000:],
+                "stderr_tail": proc["stderr"][-1000:],
             }
         except Exception as e:
             return {

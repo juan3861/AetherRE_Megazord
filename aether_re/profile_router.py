@@ -55,17 +55,17 @@ def _collect_candidates(result: IntakeResult, store: EvidenceStore) -> list[Prof
         candidates.append(ProfileCandidate("wasm", 90, (f"offset:{wasm_offset}:embedded-wasm",)))
     magics={b"\xfe\xed\xfa\xce":"mach-o-32",b"\xce\xfa\xed\xfe":"mach-o-32-be",b"\xfe\xed\xfa\xcf":"mach-o-64",b"\xcf\xfa\xed\xfe":"mach-o-64-be",b"\xca\xfe\xba\xbe":"mach-o-fat",b"\xbe\xba\xfe\xca":"mach-o-fat"}
     for magic,label in magics.items():
-        if data.startswith(magic): candidates.append(ProfileCandidate("mach-o",100,(f"offset:0:{label}",))); break
+        if data.startswith(magic): candidates.append(ProfileCandidate("macho",100,(f"offset:0:{label}",))); break
     names={str(item.get("relative_path","")) for item in result.inventory}
     bare={name.removeprefix("archive/") for name in names}
-    if "AndroidManifest.xml" in bare and "classes.dex" in bare: candidates.append(ProfileCandidate("android",95,("member:AndroidManifest.xml","member:classes.dex")))
+    if "AndroidManifest.xml" in bare and "classes.dex" in bare: candidates.append(ProfileCandidate("android-apk",95,("member:AndroidManifest.xml","member:classes.dex")))
     if any(name.endswith(".class") for name in bare) and "META-INF/MANIFEST.MF" in bare: candidates.append(ProfileCandidate("jvm",95,("member:META-INF/MANIFEST.MF","member:*.class")))
     if result.source_kind=="archive": candidates.append(ProfileCandidate("archive",90,("container:zip-or-tar",)))
     if result.source_kind=="directory":
         suffixes=(".c",".h",".cpp",".cc",".py",".java",".js",".ts",".rs",".go",".cs")
         source_names=[name for name in names if name.lower().endswith(suffixes)]
         if source_names: candidates.append(ProfileCandidate("source-tree",90,tuple(f"member:{n}" for n in sorted(source_names)[:8])))
-    if len(data)>=4096 and _entropy(data[:65536])>7.7: candidates.append(ProfileCandidate("firmware-raw",30,("bounded-entropy:high",)))
+    if len(data)>=4096 and _entropy(data[:65536])>7.7: candidates.append(ProfileCandidate("firmware",30,("bounded-entropy:high",)))
     return candidates
 
 def _contains_incompatible_profiles(items: tuple[ProfileCandidate,...]) -> bool:
@@ -74,7 +74,7 @@ def _contains_incompatible_profiles(items: tuple[ProfileCandidate,...]) -> bool:
     return len(ids-{"archive"})>1
 
 def _decision_for(selected: ProfileCandidate, candidates: tuple[ProfileCandidate,...]) -> ProfileDecision:
-    pipelines={"native-pe":("native-static",),"native-elf":("native-static",),"dotnet":("dotnet-static",),"android":("android-static",),"wasm":("wasm-static",),"jvm":("jvm-static",),"mach-o":("mach-o-static",),"source-tree":("source-static",),"archive":("archive-static",),"firmware-raw":("opaque-static",)}
+    pipelines={"native-pe":("native-static",),"native-elf":("native-static",),"dotnet":("dotnet-static",),"android-apk":("android-static",),"wasm":("wasm-static",),"jvm":("jvm-static",),"macho":("macho-static",),"source-tree":("source-static",),"archive":("archive-static",),"firmware":("firmware-static",)}
     state=EpistemicState.EXACT if selected.strength>=90 else EpistemicState.UNKNOWN
     return ProfileDecision("profile-decision.v1",selected.profile_id,pipelines[selected.profile_id],candidates,state,() if state is EpistemicState.EXACT else ("weak signature only",))
 

@@ -1,0 +1,19 @@
+{
+  "expected_relations": [
+    [
+      "exported_kappa",
+      "normalize"
+    ]
+  ],
+  "expected_symbols": [
+    "exported_kappa",
+    "normalize"
+  ],
+  "family": "manual_kappa",
+  "known_limits": [
+    "manual source oracle; no external adjudicator",
+    "static expectations do not prove runtime behavior"
+  ],
+  "language": "c",
+  "oracle_schema": "re-megazord-oracle.v1"
+}

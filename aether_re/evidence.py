@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import stat
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -12,23 +13,65 @@ from typing import Any, Callable
 
 
 SCHEMA_VERSION = "evidence-manifest.v1"
+MAX_MANIFEST_JSON_BYTES = 16 * 1024 * 1024
+
+
+class FileSizeLimitExceeded(ValueError):
+    """Raised when a bounded evidence read exceeds its configured byte limit."""
+
+
+def read_bounded_bytes(path: Path, *, max_bytes: int) -> bytes:
+    """Read at most ``max_bytes + 1`` so oversized files fail before parsing."""
+    if isinstance(max_bytes, bool) or not isinstance(max_bytes, int) or max_bytes < 1:
+        raise ValueError("read_size_limit_invalid")
+    with Path(path).open("rb") as handle:
+        content = handle.read(max_bytes + 1)
+    if len(content) > max_bytes:
+        raise FileSizeLimitExceeded(f"file_size_limit_exceeded:{max_bytes}")
+    return content
 
 
 class SnapshotCancelled(RuntimeError):
     """The caller cancelled a bounded snapshot before publication."""
 
 
-def _has_symlink_component(path: Path, root: Path) -> bool:
-    """Reject symlinked members before hashing an artifact into a manifest."""
+def _is_link_or_reparse_point(path: Path) -> bool:
+    """Return true for links/reparse points; treat inspection errors as unsafe."""
     try:
-        current = root
-        for component in path.relative_to(root).parts:
-            current = current / component
-            if current.is_symlink():
-                return True
-    except (ValueError, OSError):
+        if path.is_symlink():
+            return True
+        is_junction = getattr(path, "is_junction", None)
+        if callable(is_junction) and is_junction():
+            return True
+        attributes = getattr(path.lstat(), "st_file_attributes", 0)
+        return bool(attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
+    except FileNotFoundError:
+        return False
+    except OSError:
         return True
-    return False
+
+
+def _has_link_or_reparse_component(path: Path) -> bool:
+    """Reject links in every existing component, including the supplied root."""
+    absolute = Path(os.path.abspath(path))
+    components = [absolute, *absolute.parents]
+    return any(_is_link_or_reparse_point(component) for component in components)
+
+
+def _has_symlink_component(path: Path, root: Path) -> bool:
+    """Compatibility helper: reject linked/reparse components below a root."""
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return True
+    return _has_link_or_reparse_component(path)
+
+
+def _is_hardlinked_regular_file(path: Path) -> bool:
+    try:
+        return path.is_file() and path.stat(follow_symlinks=False).st_nlink > 1
+    except OSError:
+        return True
 
 
 def sha256_file(path: Path) -> str:
@@ -52,13 +95,9 @@ def _sha256_bounded(path: Path, max_bytes: int) -> str:
 
 
 def _path_has_link(path: Path) -> bool:
-    current = path.absolute()
-    while True:
-        if current.is_symlink() or (hasattr(current, "is_junction") and current.is_junction()):
-            return True
-        if current.parent == current:
-            return False
-        current = current.parent
+    # Use the same strict component check as manifest construction so generic
+    # Windows reparse points cannot slip through snapshot source/destination paths.
+    return _has_link_or_reparse_component(path)
 
 
 def create_verified_snapshot(
@@ -123,9 +162,11 @@ def create_verified_snapshot(
 def build_manifest(target: Path, run_dir: Path, *, metadata: dict[str, Any] | None = None) -> dict[str, Any]:
     target = Path(target)
     run_dir = Path(run_dir)
-    if target.is_symlink() or not target.is_file():
+    if _has_link_or_reparse_component(target) or not target.is_file():
         raise ValueError("target_must_be_regular_file")
-    if run_dir.is_symlink() or not run_dir.is_dir():
+    if _is_hardlinked_regular_file(target):
+        raise ValueError("target_hardlink_not_allowed")
+    if _has_link_or_reparse_component(run_dir) or not run_dir.is_dir():
         raise ValueError("run_dir_must_be_regular_directory")
     if metadata is not None:
         try:
@@ -135,14 +176,22 @@ def build_manifest(target: Path, run_dir: Path, *, metadata: dict[str, Any] | No
     resolved_run = run_dir.resolve()
     files: list[dict[str, Any]] = []
     for path in sorted(resolved_run.rglob("*")):
-        if path.name in {"manifest.json", "run.lock"}:
-            if path.is_symlink() or _has_symlink_component(path, resolved_run):
-                raise ValueError("symlinked_control_file_not_allowed")
+        # angr's per-input LMDB spill database is mutable analysis state. It is
+        # removed during worker shutdown and is never an evidence artifact.
+        if any("_angr_rtdb" in component.name for component in (path, *path.parents)):
             continue
-        if _has_symlink_component(path, resolved_run):
-            raise ValueError("symlinked_artifact_not_allowed")
+        relative_name = path.relative_to(resolved_run).as_posix()
+        if relative_name in {"manifest.json", "run.lock"}:
+            if _has_link_or_reparse_component(path):
+                raise ValueError("symlinked_control_file_not_allowed")
+            if _is_hardlinked_regular_file(path):
+                raise ValueError("hardlinked_control_file_not_allowed")
+            continue
+        if _has_link_or_reparse_component(path):
+            raise ValueError("linked_artifact_not_allowed")
         if path.is_file():
-            relative_name = path.relative_to(resolved_run).as_posix()
+            if _is_hardlinked_regular_file(path):
+                raise ValueError("hardlinked_artifact_not_allowed")
             if relative_name in {"", "."} or relative_name.startswith("../") or "/../" in relative_name:
                 raise ValueError("artifact_path_escape")
             files.append({"path": relative_name, "sha256": sha256_file(path), "size": path.stat().st_size})

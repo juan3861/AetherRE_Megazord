@@ -1,0 +1,19 @@
+{
+  "expected_relations": [
+    [
+      "main",
+      "callback_helper"
+    ]
+  ],
+  "expected_symbols": [
+    "main",
+    "callback_helper"
+  ],
+  "family": "callback",
+  "known_limits": [
+    "synthetic fixture",
+    "source oracle does not prove binary equivalence"
+  ],
+  "language": "c",
+  "oracle_schema": "re-megazord-oracle.v1"
+}

@@ -1,0 +1,24 @@
+{
+  "case_labels": {
+    "decorator_changes_runtime_binding": true
+  },
+  "expected_relations": [
+    [
+      "entry",
+      "run"
+    ]
+  ],
+  "expected_symbols": [
+    "run",
+    "entry",
+    "audit",
+    "wrapper"
+  ],
+  "family": "decorator_wrapper",
+  "known_limits": [
+    "same-author synthetic oracle, not independent",
+    "static source expectations are not runtime truth"
+  ],
+  "language": "python",
+  "oracle_schema": "re-megazord-oracle.v1"
+}

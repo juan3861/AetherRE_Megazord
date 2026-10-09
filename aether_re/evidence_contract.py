@@ -66,7 +66,8 @@ def validate_evidence_records(
                     local.append(_error(evidence_id, "strict_field_missing", field))
             if "raw_artifact_hash" in record and not HASH_RE.fullmatch(str(record["raw_artifact_hash"])):
                 local.append(_error(evidence_id, "raw_artifact_hash_invalid"))
-            if manifest_hashes and record.get("raw_artifact_hash") not in manifest_hashes:
+            raw_artifact_hash = record.get("raw_artifact_hash")
+            if raw_artifact_hash not in (None, "") and str(raw_artifact_hash) not in manifest_hashes:
                 local.append(_error(evidence_id, "raw_artifact_not_in_manifest"))
             for field in ("assumptions", "limits", "dependencies"):
                 if field in record and not isinstance(record[field], list):

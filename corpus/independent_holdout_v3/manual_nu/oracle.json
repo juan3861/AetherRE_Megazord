@@ -1,0 +1,19 @@
+{
+  "expected_relations": [
+    [
+      "run",
+      "dispatch"
+    ]
+  ],
+  "expected_symbols": [
+    "dispatch",
+    "run"
+  ],
+  "family": "manual_nu",
+  "known_limits": [
+    "manual source oracle; no external adjudicator",
+    "static expectations do not prove runtime behavior"
+  ],
+  "language": "python",
+  "oracle_schema": "re-megazord-oracle.v1"
+}

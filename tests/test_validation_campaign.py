@@ -153,8 +153,11 @@ def test_cli_runs_from_checkout_without_pythonpath(tmp_path):
          "--root", str(root), "--output", str(output)],
         cwd=tmp_path, capture_output=True, text=True,
     )
-    assert completed.returncode == 3
-    assert json.loads(output.read_text(encoding="utf-8"))["status"] == "partial"
+    assert completed.returncode == 0
+    report = json.loads(output.read_text(encoding="utf-8"))
+    assert report["status"] == "passed"
+    assert report["summary"]["failed"] == 0
+    assert report["summary"]["partial"] == 0
 
 
 def test_mandatory_matrix_binds_existing_f02_and_f11_campaigns():

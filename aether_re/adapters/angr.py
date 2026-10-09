@@ -10,6 +10,45 @@ from aether_re.adapters.base import Adapter
 from aether_re.engines.consensus import normalize_address
 
 
+def _call_targets(cfg: Any, function: Any, address: int) -> tuple[list[str], int]:
+    """Return resolved function-call targets and unresolved callsite count.
+
+    ``transition_graph.nodes()`` contains basic-block nodes, not callee
+    functions; using it as a call list silently produced empty/incorrect
+    evidence. Prefer angr's callsite API and fall back to the CFG callgraph
+    when a version does not expose it. No target code is executed here.
+    """
+    targets: set[int] = set()
+    unresolved = 0
+    try:
+        callsites = list(function.get_call_sites())
+    except Exception:
+        raw_sites = getattr(function, "callout_sites", [])
+        callsites = list(raw_sites) if raw_sites else []
+    for site in callsites:
+        try:
+            target = function.get_call_target(site)
+        except Exception:
+            target = None
+        if hasattr(target, "addr"):
+            target = target.addr
+        if isinstance(target, int):
+            targets.add(target)
+        else:
+            unresolved += 1
+    if not targets:
+        graph = getattr(cfg, "callgraph", None)
+        if graph is None:
+            manager = getattr(cfg, "functions", None)
+            graph = getattr(manager, "callgraph", None)
+        try:
+            if graph is not None and graph.has_node(address):
+                targets.update(int(item) for item in graph.successors(address) if isinstance(item, int))
+        except Exception:
+            pass
+    return [normalize_address(item) for item in sorted(targets)], unresolved
+
+
 class AngrAdapter(Adapter):
     name = "angr"
 
@@ -25,8 +64,10 @@ class AngrAdapter(Adapter):
         if not self.available():
             return {
                 "ok": False,
+                "available": False,
                 "executed": False,
                 "produced_evidence": False,
+                "partial": False,
                 "error": "angr não instalado",
             }
 
@@ -40,6 +81,7 @@ class AngrAdapter(Adapter):
                 "error": f"deps angr: {e}",
             }
 
+        proj = None
         try:
             proj = angr.Project(str(target), auto_load_libs=False)
             cfg = proj.analyses.CFGFast(
@@ -48,14 +90,10 @@ class AngrAdapter(Adapter):
                 resolve_indirect_jumps=True,
             )
             functions = []
+            unresolved_calls = 0
             for addr, function in sorted(cfg.functions.items()):
-                calls = sorted(
-                    {
-                        normalize_address(callee)
-                        for callee in function.transition_graph.nodes()
-                        if isinstance(callee, int)
-                    }
-                )
+                calls, unresolved = _call_targets(cfg, function, addr)
+                unresolved_calls += unresolved
                 blocks = [
                     {
                         "address": normalize_address(block.addr),
@@ -73,6 +111,7 @@ class AngrAdapter(Adapter):
                         "coverage": min(1.0, len(blocks) / 3.0 + 0.2),
                         "disassembly": function.__str__(),
                         "calls": calls,
+                        "unresolved_call_sites": unresolved,
                         "notes": "CFGFast function",
                         "warnings": [],
                         "raw": {
@@ -91,6 +130,9 @@ class AngrAdapter(Adapter):
                 "functions": functions,
                 "analysis": {
                     "functions_count": len(functions),
+                    "resolved_call_targets": sum(len(item.get("calls", [])) for item in functions),
+                    "unresolved_call_sites": unresolved_calls,
+                    "call_extraction": "function_callsite_api_or_cfg_callgraph",
                     "cfg": "CFGFast",
                 },
                 "note": "CFG estática; sem execução simbólica automática do alvo.",
@@ -102,6 +144,16 @@ class AngrAdapter(Adapter):
                 "produced_evidence": False,
                 "error": f"angr CFG falhou: {e}",
             }
+
+        if proj is not None:
+            try:
+                proj.kb.rtdb.cleanup()
+                results["runtime_database"] = "closed"
+            except Exception as cleanup_error:
+                results["runtime_database"] = "cleanup_failed"
+                results["cleanup_error"] = cleanup_error.__class__.__name__
+                results["partial"] = True
+                results["ok"] = False
 
         report_path = out_dir / "angr_report.json"
         report_path.write_text(json.dumps(results, indent=2, default=str), encoding="utf-8")

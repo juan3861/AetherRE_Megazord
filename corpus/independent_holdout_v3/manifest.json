@@ -1,0 +1,94 @@
+{
+  "authorization": "owned_synthetic",
+  "count": 6,
+  "limits": [
+    "synthetic only",
+    "manual oracle not external independent adjudication",
+    "binary C holdout n=4; Python source holdout n=2",
+    "targets are never executed by build/evaluator"
+  ],
+  "projects": [
+    {
+      "authorization": "owned_synthetic",
+      "build_kind": "shared_library",
+      "build_recipe": "cc -std=c11 -O0 -g -shared -fPIC src/main.c -o build/program.so",
+      "execution": "not_run_by_bootstrap",
+      "family": "manual_theta",
+      "id": "manual_theta",
+      "language": "c",
+      "oracle": "manual_theta/oracle.json",
+      "oracle_sha256": "2cec425c3b4ade5f49cb6110ce08c82ff0ffca9d520b2e82772743d6973bce24",
+      "source": "manual_theta/src/main.c",
+      "source_sha256": "760eb56c223d4d405d065c60c3b652c3a087e900a789559e4e703d5a254d0e2e",
+      "split": "holdout"
+    },
+    {
+      "authorization": "owned_synthetic",
+      "build_kind": "shared_library",
+      "build_recipe": "cc -std=c11 -O0 -g -shared -fPIC src/main.c -o build/program.so",
+      "execution": "not_run_by_bootstrap",
+      "family": "manual_iota",
+      "id": "manual_iota",
+      "language": "c",
+      "oracle": "manual_iota/oracle.json",
+      "oracle_sha256": "6ef286afce734a70aec097963e97a8ce20ada78172cb33ff5ae130a8eef7fbbb",
+      "source": "manual_iota/src/main.c",
+      "source_sha256": "48af0b105132ecfc6e33cbb93c5a3f65bfb455d46e00023537b8f46d0305c8a3",
+      "split": "holdout"
+    },
+    {
+      "authorization": "owned_synthetic",
+      "build_kind": "shared_library",
+      "build_recipe": "cc -std=c11 -O0 -g -shared -fPIC src/main.c -o build/program.so",
+      "execution": "not_run_by_bootstrap",
+      "family": "manual_kappa",
+      "id": "manual_kappa",
+      "language": "c",
+      "oracle": "manual_kappa/oracle.json",
+      "oracle_sha256": "a21815ad012083c1551a2841e0cd215e600b42448a0fdb6401e103b65c973902",
+      "source": "manual_kappa/src/main.c",
+      "source_sha256": "1ec384467d0fa97114d7968b0d38b3e31a8e2cb3f2f09a353a9791cb24afb2b5",
+      "split": "holdout"
+    },
+    {
+      "authorization": "owned_synthetic",
+      "build_kind": "shared_library",
+      "build_recipe": "cc -std=c11 -O0 -g -shared -fPIC src/main.c -o build/program.so",
+      "execution": "not_run_by_bootstrap",
+      "family": "manual_lambda",
+      "id": "manual_lambda",
+      "language": "c",
+      "oracle": "manual_lambda/oracle.json",
+      "oracle_sha256": "5351f233e0242ce91cbf1d23f138eb2b3eaf97446dc2dc4649b260b94c460344",
+      "source": "manual_lambda/src/main.c",
+      "source_sha256": "8bb8b3ca8dfdc4441d068f22b1070921b4d15b39d7108eb6cc49d88cad36cde9",
+      "split": "holdout"
+    },
+    {
+      "authorization": "owned_synthetic",
+      "execution": "not_run_by_bootstrap",
+      "family": "manual_mu",
+      "id": "manual_mu",
+      "language": "python",
+      "oracle": "manual_mu/oracle.json",
+      "oracle_sha256": "52a8713b38bc33df1ee64684531d96bb086e46f1b2caf832ba0cbc0627672def",
+      "source": "manual_mu/src/main.py",
+      "source_sha256": "90207c9781ed9a6d6654b05ce49234f902527dd3684228429068bd2d477a356d",
+      "split": "holdout"
+    },
+    {
+      "authorization": "owned_synthetic",
+      "execution": "not_run_by_bootstrap",
+      "family": "manual_nu",
+      "id": "manual_nu",
+      "language": "python",
+      "oracle": "manual_nu/oracle.json",
+      "oracle_sha256": "7bf740403303a77ecf31b5395a919fe72a647e6800ff55a6395fba32716edd70",
+      "source": "manual_nu/src/main.py",
+      "source_sha256": "f3fb800754c2fe72e14b7c59883042677e2ee74923d5564615599771adef6391",
+      "split": "holdout"
+    }
+  ],
+  "provenance": "manual_author_holdout_v3; independent_from_bootstrap_generator; no_external_project",
+  "schema": "re-megazord-corpus.v1"
+}

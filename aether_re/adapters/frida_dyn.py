@@ -20,6 +20,10 @@ class FridaAdapter(Adapter):
         if not self.available():
             return {
                 "ok": False,
+                "available": False,
+                "executed": False,
+                "produced_evidence": False,
+                "partial": False,
                 "error": "Frida não instalado (pip install frida-tools)",
                 "hint": "Análise dinâmica requer execução controlada do alvo.",
             }

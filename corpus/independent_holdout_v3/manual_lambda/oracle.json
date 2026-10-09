@@ -1,0 +1,19 @@
+{
+  "expected_relations": [
+    [
+      "exported_lambda",
+      "choose"
+    ]
+  ],
+  "expected_symbols": [
+    "exported_lambda",
+    "choose"
+  ],
+  "family": "manual_lambda",
+  "known_limits": [
+    "manual source oracle; no external adjudicator",
+    "static expectations do not prove runtime behavior"
+  ],
+  "language": "c",
+  "oracle_schema": "re-megazord-oracle.v1"
+}

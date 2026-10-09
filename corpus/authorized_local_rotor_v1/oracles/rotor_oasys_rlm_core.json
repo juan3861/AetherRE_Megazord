@@ -1,0 +1,35 @@
+{
+  "case_labels": {
+    "external_re_adjudication": false,
+    "oracle_independent_of_aetherre_bootstrap": true,
+    "oracle_scope": "documented_package_exports_and_upstream_test_inventory",
+    "project_origin": "local_user_owned_rotor_snapshot"
+  },
+  "evidence_tests": [
+    {
+      "path": "oracle_evidence/rotor_oasys_rlm_core/test_imports.py",
+      "sha256": "abeea539916ff7d0c0707a151f1eb84f2ea7d7f3dbcc3d2434f1ced731e9a33f"
+    },
+    {
+      "path": "oracle_evidence/rotor_oasys_rlm_core/test_rlm_query.py",
+      "sha256": "82a3d03e01f0c098ec4ed88cecdbf6b31457075673110bf26f73047a14441f62"
+    }
+  ],
+  "expected_relations": [],
+  "expected_symbols": [
+    "RLM",
+    "BudgetExceededError",
+    "TimeoutExceededError",
+    "TokenLimitExceededError",
+    "ErrorThresholdExceededError",
+    "CancellationError"
+  ],
+  "family": "rotor_oasys_rlm_core",
+  "known_limits": [
+    "relations are not adjudicated in this intake",
+    "tests are copied as evidence and are not executed by this generator",
+    "no external reviewer or WORM custody"
+  ],
+  "language": "python",
+  "oracle_schema": "re-megazord-oracle.v1"
+}

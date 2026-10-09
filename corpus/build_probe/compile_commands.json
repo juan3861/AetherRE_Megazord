@@ -1,0 +1,1 @@
+[{"directory": "D:\\AetherRE_Megazord\\corpus\\build_probe", "file": "src/main.c", "command": "\"C:\\Program Files\\LLVM\\bin\\clang.exe\" -O2 -g -c src/main.c -o main.o"}]

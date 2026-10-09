@@ -1,0 +1,48 @@
+{
+  "case_labels": {
+    "external_re_adjudication": false,
+    "oracle_independent_of_aetherre_bootstrap": true,
+    "oracle_scope": "documented_package_exports_and_upstream_test_inventory",
+    "project_origin": "local_user_owned_rotor_snapshot"
+  },
+  "evidence_tests": [
+    {
+      "path": "oracle_evidence/rotor_router_canonical/test_canonical_ir.py",
+      "sha256": "5eb6317d5acb4a9bbb3ddce8907e48824c25b45f09df0610435ece7cfa0846bd"
+    },
+    {
+      "path": "oracle_evidence/rotor_router_canonical/test_canonical_ir_contract_coverage.py",
+      "sha256": "89b5772ab699606bf1d8141eb192251e4b5a88149e9a050c510c4d2c096950d0"
+    }
+  ],
+  "expected_relations": [],
+  "expected_symbols": [
+    "BackendDescriptor",
+    "BackendState",
+    "CanonicalContentBlock",
+    "CanonicalMessage",
+    "CanonicalRequest",
+    "CanonicalResponse",
+    "CostMetrics",
+    "ExecutionPlan",
+    "ExecutionResult",
+    "ExecutionState",
+    "FailureEvent",
+    "SecurityContext",
+    "TaskRequirements",
+    "ToolCall",
+    "ToolDefinition",
+    "ToolResult",
+    "TraceContext",
+    "UsageMetrics",
+    "VerifierResult"
+  ],
+  "family": "rotor_router_canonical",
+  "known_limits": [
+    "relations are not adjudicated in this intake",
+    "tests are copied as evidence and are not executed by this generator",
+    "no external reviewer or WORM custody"
+  ],
+  "language": "python",
+  "oracle_schema": "re-megazord-oracle.v1"
+}

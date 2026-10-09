@@ -1,0 +1,23 @@
+{
+  "case_labels": {
+    "claim_true": false,
+    "documentation_claim": "sends telemetry to a remote server"
+  },
+  "expected_relations": [
+    [
+      "run",
+      "sanitize"
+    ]
+  ],
+  "expected_symbols": [
+    "run",
+    "sanitize"
+  ],
+  "family": "false_documentation",
+  "known_limits": [
+    "same-author synthetic oracle, not independent",
+    "static source expectations are not runtime truth"
+  ],
+  "language": "python",
+  "oracle_schema": "re-megazord-oracle.v1"
+}

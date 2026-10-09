@@ -2,11 +2,75 @@
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 from typing import Any
 
 from aether_re.engines import reconstruct
 from aether_re.engines.ghidra_parse import parse_decompiled_file
+
+
+GHIDRA_PARTIAL_CONFIDENCE_CAP = 0.80
+
+
+def ghidra_result_is_complete(ghidra_result: dict[str, Any] | None) -> bool:
+    """Return true only for an explicitly complete Ghidra export contract."""
+    if not isinstance(ghidra_result, dict):
+        return False
+    attempted = ghidra_result.get("attempted_functions")
+    exported = ghidra_result.get("exported_functions")
+    failed = ghidra_result.get("failed_functions")
+    limit = ghidra_result.get("max_functions")
+    returncode = ghidra_result.get("returncode")
+    return (
+        ghidra_result.get("ok") is True
+        and ghidra_result.get("produced_evidence") is True
+        and ghidra_result.get("partial") is False
+        and ghidra_result.get("extraction_status") == "complete"
+        and ghidra_result.get("truncated") is False
+        and type(returncode) is int
+        and returncode == 0
+        and ghidra_result.get("timed_out") is False
+        and ghidra_result.get("resource_exceeded") is False
+        and type(attempted) is int
+        and attempted > 0
+        and type(exported) is int
+        and exported >= 0
+        and type(failed) is int
+        and failed == 0
+        and type(limit) is int
+        and limit > 0
+        and attempted == exported + failed
+        and exported <= limit
+    )
+
+
+def mark_ghidra_functions_partial(
+    functions: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Preserve partial function evidence while capping certainty and labeling loss."""
+    marked: list[dict[str, Any]] = []
+    warning = "Ghidra export is partial or lacks an explicit complete summary."
+    for function in functions:
+        if not isinstance(function, dict):
+            continue
+        item = dict(function)
+        try:
+            confidence = float(item.get("confidence", 0.0))
+        except (TypeError, ValueError):
+            confidence = 0.0
+        if not math.isfinite(confidence):
+            confidence = 0.0
+        item["confidence"] = min(max(confidence, 0.0), GHIDRA_PARTIAL_CONFIDENCE_CAP)
+        item["partial"] = True
+        warnings = item.get("warnings", [])
+        if isinstance(warnings, str):
+            warnings = [warnings]
+        elif not isinstance(warnings, list):
+            warnings = []
+        item["warnings"] = list(dict.fromkeys([*warnings, warning]))
+        marked.append(item)
+    return marked
 
 
 def _extract_ghidra_evidence(ghidra_result: dict[str, Any]) -> list[dict[str, Any]]:
@@ -31,6 +95,9 @@ def merge_decompilation_results(
     angr_result: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     ghidra_functions = _extract_ghidra_evidence(ghidra_result or {})
+    ghidra_complete = ghidra_result_is_complete(ghidra_result)
+    if ghidra_functions and not ghidra_complete:
+        ghidra_functions = mark_ghidra_functions_partial(ghidra_functions)
     rizin_functions = _extract_rizin_evidence(rizin_result or {})
     angr_functions = _extract_angr_evidence(angr_result or {})
     sketches = native_result.get("function_sketches", [])
@@ -60,9 +127,17 @@ def merge_decompilation_results(
             if getattr(sketch, "address", "") not in {"", None, "unknown", "export"}
         ],
     ]
+    best_source = (
+        "ghidra" if ghidra_functions and ghidra_complete
+        else "rizin" if rizin_functions
+        else "reconstruct"
+    )
+    partial_sources = ["ghidra"] if ghidra_functions and not ghidra_complete else []
     return {
-        "best_source": "ghidra" if ghidra_functions else ("rizin" if rizin_functions else "reconstruct"),
-        "confidence": 0.95 if ghidra_functions else 0.75 if rizin_functions else 0.4,
+        "best_source": best_source,
+        "confidence": 0.95 if best_source == "ghidra" else 0.75 if best_source == "rizin" else 0.4,
+        "partial": bool(partial_sources),
+        "partial_sources": partial_sources,
         "text": native_result.get("pseudo_source", ""),
         "functions": functions,
         "source_counts": source_counts,

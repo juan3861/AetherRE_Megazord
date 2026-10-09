@@ -1,0 +1,35 @@
+# AetherRE Megazord - Session Restore Guide
+
+## Session Information
+- Session ID: d7949791-7071-4f79-b103-55391122e723
+- Git Commit: d557080 (AetherRE Megazord v1.0.0)
+- Python Versions: 3.13 (main) / 3.11 (tests)
+
+## Quick Restore Commands
+
+### Option 1: Desktop Shortcut
+Run the .bat file on your Desktop to automatically open PowerShell in the project directory.
+
+### Option 2: Manual Restore
+```powershell
+cd D:\AetherRE_Megazord
+py -3.13 megazord.py status
+```
+
+## Last Known State
+- Branch: master
+- Files changed: 19 (+1554 / -468 lines)
+- Commit: "AetherRE Megazord v1.0.0 - Complete engineering reverse consensus platform"
+
+## Next Steps
+1. Verify git status: `git status`
+2. Check latest commit: `git log -1`
+3. Run status command to verify system health
+
+## Revision 2026-09-16 — restore real do estado do projeto
+
+O `C:\Users\juanp\Desktop\restore_session.bat` chama agora `restore_session.ps1`. O script não tenta fingir que reabre uma conversa: grava `conversation_restored=false` e captura status do Megazord, Git, checkpoints e hashes dos runs recentes em `output/session_restore_*.json`, sem executar alvo.
+
+Teste empírico: execução com `-MaxRuns 3` terminou exit 0; snapshot `output/session_restore_20260916_050935.json` lista os runs PE32, PE32+ e ELF64 com checkpoint `succeeded`/`persisted`. O id da sessão continua somente como rótulo de rastreabilidade.
+
+O snapshot também inclui agora `report_sha256` por run, mantendo o hash do alvo e o hash do relatório derivados para checagem posterior.

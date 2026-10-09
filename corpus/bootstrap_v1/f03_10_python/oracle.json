@@ -1,0 +1,19 @@
+{
+  "expected_relations": [
+    [
+      "main",
+      "sanitizer_helper"
+    ]
+  ],
+  "expected_symbols": [
+    "main",
+    "sanitizer_helper"
+  ],
+  "family": "sanitizer",
+  "known_limits": [
+    "synthetic fixture",
+    "source oracle does not prove binary equivalence"
+  ],
+  "language": "python",
+  "oracle_schema": "re-megazord-oracle.v1"
+}

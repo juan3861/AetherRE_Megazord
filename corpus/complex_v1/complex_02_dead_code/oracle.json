@@ -1,0 +1,24 @@
+{
+  "case_labels": {
+    "dead_code_candidate": "dormant",
+    "reachability_proven": false
+  },
+  "expected_relations": [
+    [
+      "run",
+      "live"
+    ]
+  ],
+  "expected_symbols": [
+    "dormant",
+    "run",
+    "live"
+  ],
+  "family": "dead_code",
+  "known_limits": [
+    "same-author synthetic oracle, not independent",
+    "static source expectations are not runtime truth"
+  ],
+  "language": "python",
+  "oracle_schema": "re-megazord-oracle.v1"
+}

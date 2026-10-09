@@ -1,0 +1,28 @@
+{
+  "case_labels": {
+    "real_send_exercised_by_test": false,
+    "test_uses_mock": true
+  },
+  "expected_relations": [
+    [
+      "run",
+      "send"
+    ],
+    [
+      "test_mock_only",
+      "run"
+    ]
+  ],
+  "expected_symbols": [
+    "run",
+    "send",
+    "test_mock_only"
+  ],
+  "family": "mock_only_test",
+  "known_limits": [
+    "same-author synthetic oracle, not independent",
+    "static source expectations are not runtime truth"
+  ],
+  "language": "python",
+  "oracle_schema": "re-megazord-oracle.v1"
+}

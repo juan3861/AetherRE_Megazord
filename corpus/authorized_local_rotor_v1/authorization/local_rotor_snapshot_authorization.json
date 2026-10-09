@@ -1,0 +1,15 @@
+{
+  "authorization_ref": "USER_OWNED_ROTOR_SNAPSHOT_RE_Megazord_20260918",
+  "inventory_status": "partial",
+  "limitations": [
+    "local user-owned authorization is not external certification",
+    "snapshot scope is partial and local hashes are not WORM",
+    "oracle independence means independent of the AetherRE bootstrap generator; no external re-adjudication"
+  ],
+  "schema": "re-megazord-local-authorization.v1",
+  "scope": "static_source_analysis_only; no target execution; selected packages only",
+  "snapshot_manifest": "snapshot_manifest.json",
+  "snapshot_manifest_sha256": "d8182c858edde4e2e3763b30adc23b1e5daa8236df81c139db49b60481e9c740",
+  "snapshot_root": "F:\\RE_Megazord_snapshots\\rotor_20260917_v2",
+  "source_root": "F:\\rotor-llm"
+}

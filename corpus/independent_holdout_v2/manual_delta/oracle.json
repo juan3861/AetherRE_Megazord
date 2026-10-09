@@ -1,0 +1,8 @@
+{
+  "expected_relations": [["entrypoint", "clamp"]],
+  "expected_symbols": ["entrypoint", "clamp"],
+  "family": "manual_delta",
+  "known_limits": ["manual independent holdout", "source oracle is not binary behavior"],
+  "language": "python",
+  "oracle_schema": "re-megazord-oracle.v1"
+}

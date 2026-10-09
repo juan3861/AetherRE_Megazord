@@ -1,0 +1,59 @@
+[
+  {
+    "arguments": [
+      "cl.exe",
+      "/nologo",
+      "/TC",
+      "/std:c11",
+      "/Od",
+      "/W3",
+      "/EHsc",
+      "/DINCLUDEMAIN",
+      "/I",
+      "support",
+      "/c",
+      "src/main.c"
+    ],
+    "directory": ".",
+    "file": "src/main.c",
+    "source_provenance": "upstream Juliet CMake/support context; command recorded, never executed by source evaluator"
+  },
+  {
+    "arguments": [
+      "cl.exe",
+      "/nologo",
+      "/TC",
+      "/std:c11",
+      "/Od",
+      "/W3",
+      "/EHsc",
+      "/DINCLUDEMAIN",
+      "/I",
+      "support",
+      "/c",
+      "support/io.c"
+    ],
+    "directory": ".",
+    "file": "support/io.c",
+    "source_provenance": "upstream Juliet CMake/support context; command recorded, never executed by source evaluator"
+  },
+  {
+    "arguments": [
+      "cl.exe",
+      "/nologo",
+      "/TC",
+      "/std:c11",
+      "/Od",
+      "/W3",
+      "/EHsc",
+      "/DINCLUDEMAIN",
+      "/I",
+      "support",
+      "/c",
+      "support/std_thread.c"
+    ],
+    "directory": ".",
+    "file": "support/std_thread.c",
+    "source_provenance": "upstream Juliet CMake/support context; command recorded, never executed by source evaluator"
+  }
+]

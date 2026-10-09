@@ -29,12 +29,18 @@ def test_reference_fixture_is_pe64():
     assert pe.OPTIONAL_HEADER.ImageBase == 0x140000000
 
 
-def test_ghidra_historical_artifact_has_200_functions():
-    path = ROOT / "output" / "notepad_20260724_234025" / "ghidra_export" / "decompiled.c"
+def test_ghidra_marker_parser_handles_200_functions(tmp_path: Path):
+    path = tmp_path / "decompiled.c"
+    source = "\n".join(
+        f"/* function_{index} @ 0x{0x1000 + index:x} */\n"
+        f"void function_{index}(void) {{ return; }}"
+        for index in range(200)
+    )
+    path.write_text(source, encoding="utf-8")
     functions = parse_decompiled_file(path)
     assert len(functions) == 200
-    assert functions[0]["address"] == "0x140001008"
-    assert functions[-1]["address"] == "0x14000646c"
+    assert functions[0]["address"] == "0x1000"
+    assert functions[-1]["address"] == "0x10c7"
 
 
 def test_consensus_matches_normalized_addresses():
@@ -82,9 +88,25 @@ def test_angr_cfg_on_reference_fixture(tmp_path: Path):
 
 def test_frida_reports_script_generation_without_trace(tmp_path: Path):
     result = FridaAdapter().analyze(REFERENCE, tmp_path)
-    assert result["executed"] is True
-    assert result["produced_evidence"] is False
-    assert result["partial"] is True
+    assert set(("ok", "available", "executed", "produced_evidence", "partial")).issubset(result)
+    if result["available"]:
+        assert result["executed"] is True
+        assert result["produced_evidence"] is False
+        assert result["partial"] is True
+    else:
+        assert result["executed"] is False
+        assert result["produced_evidence"] is False
+
+
+def test_unavailable_adapters_have_explicit_terminal_state(tmp_path: Path):
+    for adapter in (FridaAdapter(),):
+        if adapter.available():
+            continue
+        result = adapter.analyze(REFERENCE, tmp_path)
+        assert result["available"] is False
+        assert result["executed"] is False
+        assert result["produced_evidence"] is False
+        assert result["partial"] is False
 
 
 def test_unicorn_windows_mode_is_partial_without_emulation(tmp_path: Path):

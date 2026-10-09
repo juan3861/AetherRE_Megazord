@@ -1,0 +1,23 @@
+{
+  "case_labels": {
+    "dynamic_import": true,
+    "target_unknown_statically": true
+  },
+  "expected_relations": [
+    [
+      "run",
+      "fallback"
+    ]
+  ],
+  "expected_symbols": [
+    "run",
+    "fallback"
+  ],
+  "family": "dynamic_import",
+  "known_limits": [
+    "same-author synthetic oracle, not independent",
+    "static source expectations are not runtime truth"
+  ],
+  "language": "python",
+  "oracle_schema": "re-megazord-oracle.v1"
+}

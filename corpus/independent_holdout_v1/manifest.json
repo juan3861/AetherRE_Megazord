@@ -1,0 +1,30 @@
+{
+  "projects": [
+    {
+      "authorization": "owned_synthetic",
+      "execution": "not_run_by_bootstrap",
+      "family": "manual_alpha",
+      "id": "manual_alpha",
+      "language": "python",
+      "oracle": "manual_alpha/oracle.json",
+      "oracle_sha256": "a90c817fbadc1d5df9d4488f63428abf78eb3b1e46cd6b6f330d61702e64cb5f",
+      "source": "manual_alpha/src/main.py",
+      "source_sha256": "9ca37e881a03f1260361dc773226f4e05b7481cd3aca0957105dd173b0ba4ea8",
+      "split": "holdout"
+    },
+    {
+      "authorization": "owned_synthetic",
+      "execution": "not_run_by_bootstrap",
+      "family": "manual_beta",
+      "id": "manual_beta",
+      "language": "python",
+      "oracle": "manual_beta/oracle.json",
+      "oracle_sha256": "f7f1ca9f8d25e0f97733a14bef0bdb6cede63d0faf829e386d51bb2ebf720b79",
+      "source": "manual_beta/src/main.py",
+      "source_sha256": "823882448ac97d78553b6d5775a695a13d49345b4208058e2ded5c7328314e15",
+      "split": "holdout"
+    }
+  ],
+  "provenance": "manual_author_holdout; independent_from_bootstrap_generator",
+  "schema": "re-megazord-corpus.v1"
+}

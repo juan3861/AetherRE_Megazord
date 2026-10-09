@@ -1,0 +1,24 @@
+{
+  "expected_relations": [
+    [
+      "entrypoint",
+      "score"
+    ],
+    [
+      "score",
+      "normalize"
+    ]
+  ],
+  "expected_symbols": [
+    "entrypoint",
+    "score",
+    "normalize"
+  ],
+  "family": "manual_alpha",
+  "known_limits": [
+    "manual independent holdout",
+    "source oracle is not binary behavior"
+  ],
+  "language": "python",
+  "oracle_schema": "re-megazord-oracle.v1"
+}

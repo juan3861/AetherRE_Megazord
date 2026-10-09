@@ -1,0 +1,19 @@
+{
+  "expected_relations": [
+    [
+      "main",
+      "constant_helper"
+    ]
+  ],
+  "expected_symbols": [
+    "main",
+    "constant_helper"
+  ],
+  "family": "constant",
+  "known_limits": [
+    "synthetic fixture",
+    "source oracle does not prove binary equivalence"
+  ],
+  "language": "c",
+  "oracle_schema": "re-megazord-oracle.v1"
+}

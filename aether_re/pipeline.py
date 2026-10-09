@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import atexit
 import json
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -14,22 +15,47 @@ from aether_re.adapters.frida_dyn import FridaAdapter
 from aether_re.adapters.ghidra import GhidraAdapter
 from aether_re.adapters.rizin import RizinAdapter
 from aether_re.adapters.unicorn_emu import UnicornAdapter
-from aether_re.engines import disasm, pe_elf, reconstruct, strings_decode, triage
+from aether_re.adapters.wasm import WasmAdapter
+from aether_re.adapters.android import AndroidAdapter
+from aether_re.adapters.jvm import JvmAdapter
+from aether_re.adapters.ilspy import ILSpyAdapter
+from aether_re.engines import disasm, dwarf, pe_elf, reconstruct, strings_decode, triage
 from aether_re.engines.comparative_report import generate_comparative_report
 from aether_re.engines.consensus import (
     compute_overall_confidence,
     merge_function_evidence,
 )
-from aether_re.engines.decompiler import merge_decompilation_results
+from aether_re.engines.decompiler import (
+    GHIDRA_PARTIAL_CONFIDENCE_CAP,
+    ghidra_result_is_complete,
+    mark_ghidra_functions_partial,
+    merge_decompilation_results,
+)
 from aether_re.engines.ghidra_parse import write_function_index
 from aether_re.models import AnalysisReport, FunctionConsensus, FunctionEvidence
-from aether_re.evidence import sha256_file
+from aether_re.evidence import (
+    _has_link_or_reparse_component,
+    _is_hardlinked_regular_file,
+    build_manifest,
+    create_verified_snapshot,
+    sha256_file,
+    write_manifest_atomic,
+)
 from aether_re.evidence_store import EvidenceStore
 from aether_re.intake import IntakeRequest, prepare_case
 from aether_re.kernel_contracts import AuthorizationPolicy, EpistemicState, IntakeLimits
 from aether_re.profile_router import route_case
-from aether_re.ir import IRDocument, IRLocation, IRNode
+from aether_re.checkpoint import write_checkpoint
+from aether_re.cache import analysis_cache_key, verify_manifest
+from aether_re.homologation import audit_run_package
+from aether_re.lock import RunLock
+from aether_re.contracts import validate_adapter_result
+from aether_re.process import disk_budget_from_env, has_free_disk
+from aether_re.static_profiles import select_static_profile
+from aether_re.engines.native_normalize import normalize_native_structure
 from aether_re.ir_graph import project_ir
+from aether_re.ir import canonical_ir_dict
+from aether_re.ir import IRDocument, IRLocation, IRNode
 from aether_re.engines.reconstruct import build_reconstruction
 from aether_re.profile_certification import certify_static_profile
 
@@ -389,6 +415,10 @@ def adapters_status() -> list[dict[str, Any]]:
         UnicornAdapter().status(),
         AngrAdapter().status(),
         BinaryNinjaAdapter().status(),
+        WasmAdapter().status(),
+        AndroidAdapter().status(),
+        JvmAdapter().status(),
+        ILSpyAdapter().status(),
     ]
 
 
@@ -397,19 +427,91 @@ def run_megazord(
     out_dir: Path | None = None,
     use_adapters: bool = True,
     deep: bool = True,
+    profile_id: str | None = None,
 ) -> AnalysisReport:
-    target = target.resolve()
-    if not target.is_file():
-        raise FileNotFoundError(target)
+    requested_target = Path(target)
+    if _has_link_or_reparse_component(requested_target):
+        raise ValueError("target_path_contains_link_or_reparse")
+    if _is_hardlinked_regular_file(requested_target):
+        raise ValueError("target_hardlink_not_allowed")
+    if not requested_target.is_file():
+        raise FileNotFoundError(requested_target)
+    target = requested_target.resolve()
 
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    out_dir = (out_dir or Path("output") / f"{target.stem}_{stamp}").resolve()
+    requested_out_dir = Path(out_dir) if out_dir is not None else Path("output") / f"{target.stem}_{stamp}"
+    if _has_link_or_reparse_component(requested_out_dir):
+        raise ValueError("output_path_contains_link_or_reparse")
+    out_dir = requested_out_dir.resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
+    run_lock = RunLock(out_dir / "run.lock")
+    run_lock.acquire()
+    atexit.register(run_lock.release)
+    checkpoint_path = out_dir / "checkpoint.json"
+    current_stage = {"value": "initializing"}
+    finished = {"value": False}
+    failure_recorded = {"value": False}
+    initial_target_sha256 = sha256_file(target)
+    cache_key = analysis_cache_key(target, config={"deep": deep, "use_adapters": use_adapters, "profile_id": profile_id})
+    def checkpoint(stage: str, status: str = "running", **extra: Any) -> None:
+        current_stage["value"] = stage
+        write_checkpoint(
+            checkpoint_path,
+            {"schema": "analysis-checkpoint.v1", "status": status, "stage": stage, "target": str(target), "cache_key": cache_key, **extra},
+        )
 
+    def mark_failed_on_exit() -> None:
+        if not finished["value"] and not failure_recorded["value"]:
+            try:
+                checkpoint("failed", status="failed", error="analysis exited before final publication")
+            except Exception:
+                pass
+
+    atexit.register(mark_failed_on_exit)
+
+    checkpoint("intake")
+
+    minimum_free_mb = disk_budget_from_env("AETHER_MIN_FREE_MB", 128)
+    if not has_free_disk(out_dir, minimum_free_mb):
+        failure_recorded["value"] = True
+        checkpoint("failed", status="failed", error="insufficient_disk_space", minimum_free_mb=minimum_free_mb)
+        run_lock.release()
+        raise OSError(f"insufficient_disk_space:{minimum_free_mb}MiB")
+
+    # Kernel intake snapshots authorized bytes into an immutable object store.
+    policy = AuthorizationPolicy.from_dict({"schema": "authorization-policy.v1", "basis": "owner", "principal": "local-cli", "scope": ["static-analysis"]})
+    try:
+        intake = prepare_case(IntakeRequest(target, out_dir / "intake", policy, IntakeLimits(max_file_bytes=512 * 1024 * 1024)))
+        store = EvidenceStore(intake.manifest_path.parent)
+        analysis_target = store.resolve(intake.root_artifact)
+        snapshot_sha256 = intake.root_artifact.sha256
+        decision = route_case(intake, store)
+        snapshot_path = out_dir / "input.snapshot"
+        if snapshot_path.exists() or snapshot_path.is_symlink():
+            raise FileExistsError("input_snapshot_already_exists")
+        create_verified_snapshot(
+            analysis_target,
+            snapshot_path,
+            expected_sha256=snapshot_sha256,
+            max_bytes=512 * 1024 * 1024,
+        )
+    except Exception as exc:
+        failure_recorded["value"] = True
+        checkpoint("failed", status="failed", error=str(exc))
+        run_lock.release()
+        raise
+
+    selected_profile = select_static_profile(analysis_target, profile_id)
     report = AnalysisReport(target=str(target))
+    report.profile = {"profile_id": selected_profile.profile_id, "confidence": selected_profile.confidence, "reasons": list(selected_profile.reasons), "candidates": list(selected_profile.candidates)}
     report.limitations = list(LIMITATIONS_BASE)
+    report.case_id = intake.case_id
+    report.intake_manifest = str(intake.manifest_path)
+    report.root_artifact_id = intake.root_artifact.artifact_id
+    report.profile_decision = decision.to_dict()
+    report.evidence_journal = str(intake.journal_path)
 
-    triage_result = triage.run_triage(target)
+    triage_result = triage.run_triage(analysis_target)
     report.target_sha256 = triage_result["sha256"]
     report.size_bytes = triage_result["size"]
     report.entropy = triage_result["entropy"]
@@ -417,22 +519,93 @@ def run_megazord(
     report.findings.extend(triage_result["findings"])
     report.engines_used.append("triage")
     raw: bytes = triage_result["raw"]
+    checkpoint("triage", target_sha256=report.target_sha256)
 
     structure = pe_elf.run_structure(raw)
+    structure.setdefault("parse_status", "complete" if selected_profile.profile_id in {"native-pe", "native-elf"} else "invalid")
+    structure.setdefault("parse_errors", [])
+    if selected_profile.profile_id in {"native-pe", "native-elf"}:
+        normalized_ir = normalize_native_structure(f"sha256:{snapshot_sha256}", selected_profile.profile_id, structure, f"sha256:{snapshot_sha256}#structure")
+        report.ir = canonical_ir_dict(normalized_ir)
+        (out_dir / "ir.json").write_text(json.dumps(report.ir, ensure_ascii=False, sort_keys=True), encoding="utf-8")
+        (out_dir / "ir_graph.json").write_text(json.dumps(project_ir(normalized_ir), ensure_ascii=False, sort_keys=True), encoding="utf-8")
     report.imports = structure.get("imports", [])
     report.exports = structure.get("exports", [])
     report.sections = structure.get("sections", [])
+    report.segments = structure.get("segments", [])
+    report.symbols = structure.get("symbols", [])
+    report.relocations = structure.get("relocations", [])
+    report.needed_libraries = structure.get("needed_libraries", [])
     report.findings.extend(structure.get("findings", []))
     report.engines_used.append("structure")
     is_64 = bool(structure.get("is_64", True))
     file_format = structure.get("format", report.file_type)
     entry = structure.get("entry_point", "")
+    machine = int(structure.get("machine", 0) or 0)
+    architecture = {
+        0x8664: "x86_64",
+        0x14C: "x86",
+        0xAA64: "arm64",
+        0x1C0: "arm",
+        # ELF e_machine values (kept explicit instead of assuming x86).
+        3: "i386",
+        8: "mips",
+        40: "arm",
+        62: "x86_64",
+        183: "aarch64",
+        243: "riscv",
+    }.get(machine, structure.get("machine_name", "unknown"))
+    report.target_identity = {
+        "sha256": report.target_sha256,
+        "module": target.name,
+        "format": file_format,
+        "architecture": architecture,
+        "entry_point": entry,
+        "image_base": structure.get("image_base", ""),
+        "image_base_kind": structure.get("image_base_kind", "unknown"),
+        "machine": machine,
+    }
+    # Qualify every observed symbol with the artifact module and address
+    # space.  A name alone is never treated as a function equivalence proof.
+    image_base_text = str(structure.get("image_base", ""))
+    try:
+        image_base_int = int(image_base_text, 0)
+    except (TypeError, ValueError):
+        image_base_int = None
+    for symbol in report.symbols:
+        if not isinstance(symbol, dict):
+            continue
+        name = str(symbol.get("name") or "")
+        value_text = str(symbol.get("value") or "")
+        address_space = str(symbol.get("address_space") or ("preferred_rva" if str(file_format).upper().startswith("PE") else "preferred_vaddr"))
+        rva_text = str(symbol.get("rva") or "")
+        if not rva_text and value_text:
+            try:
+                value_int = int(value_text, 0)
+            except (TypeError, ValueError):
+                value_int = None
+            if value_int is not None:
+                if address_space.endswith("rva"):
+                    rva_text = hex(value_int)
+                elif image_base_int is not None and value_int >= image_base_int:
+                    rva_text = hex(value_int - image_base_int)
+        symbol["module"] = target.name
+        symbol["rva"] = rva_text
+        symbol["qualified_identity"] = f"{target.name}!{address_space}:{rva_text or value_text}:{name}"
+    checkpoint("structure", target_sha256=report.target_sha256)
+
+    if str(file_format).upper().startswith("ELF"):
+        report.dwarf = dwarf.analyze_dwarf(analysis_target)
+        report.engines_used.append("dwarf")
+        if report.dwarf.get("status") in {"partial", "invalid"}:
+            report.limitations.append("leitura DWARF parcial ou inválida; sem promoção automática de símbolos")
 
     strings_result = strings_decode.run_strings_decode(raw)
     report.strings = strings_result.get("strings", [])
     report.decoded_payloads = strings_result.get("decoded_payloads", [])
     report.findings.extend(strings_result.get("findings", []))
     report.engines_used.append("strings_decode")
+    checkpoint("strings_decode", target_sha256=report.target_sha256)
 
     if deep:
         disasm_result = disasm.run_disasm(raw, is_64=is_64, file_format=file_format)
@@ -455,38 +628,81 @@ def run_megazord(
     report.pseudo_source = reconstruct_result["pseudo_source"]
     report.findings.extend(reconstruct_result["findings"])
     report.engines_used.append("reconstruct")
+    checkpoint("reconstruct", target_sha256=report.target_sha256)
 
     adapter_results: dict[str, dict[str, Any]] = {}
     if use_adapters:
-        adapters: list[Any] = [GhidraAdapter(), RizinAdapter(), FridaAdapter(), UnicornAdapter(), AngrAdapter(), BinaryNinjaAdapter()]
+        # Do not run every parser against every artifact.  Profile routing is a
+        # security boundary: specialized workers only see formats they declare
+        # they understand, and unsupported profiles abstain rather than falling
+        # through to native reconstruction.
+        native_profiles = {'native-pe', 'native-elf'}
+        adapters: list[Any] = ([GhidraAdapter(), RizinAdapter(), FridaAdapter(), UnicornAdapter(), AngrAdapter(), BinaryNinjaAdapter()]
+                                if selected_profile.profile_id in native_profiles else [])
+        profile_workers: dict[str, list[Any]] = {
+            'wasm': [WasmAdapter()],
+            'android-apk': [AndroidAdapter()],
+            'jvm': [JvmAdapter()],
+            'dotnet': [ILSpyAdapter()],
+            # Rizin is the existing, hash-recorded static backend for Mach-O.
+            # It is explicitly routed here instead of relying on native PE/ELF
+            # fallback, preserving profile provenance in the report.
+            'macho': [RizinAdapter()],
+        }
+        adapters.extend(profile_workers.get(selected_profile.profile_id, []))
         for adapter in adapters:
             key = adapter.name
             if adapter.available():
                 try:
-                    result = adapter.analyze(target, out_dir)
+                    result = adapter.analyze(analysis_target, out_dir)
                     result["available"] = True
+                    result = validate_adapter_result(key, result)
                     adapter_results[key] = result
                     report.engines_used.append(f"adapter:{key}")
                 except Exception as exc:
-                    adapter_results[key] = {
+                    adapter_results[key] = validate_adapter_result(key, {
+                        "schema": "adapter-result.v1",
+                        "state": "failed",
                         "ok": False,
                         "available": True,
                         "executed": True,
                         "produced_evidence": False,
                         "partial": False,
                         "error": str(exc),
-                    }
+                    })
             else:
-                _record_adapter_failure(report, key, f"{key} não instalado ou indisponível")
+                adapter_results[key] = validate_adapter_result(key, {
+                    "schema": "adapter-result.v1",
+                    "state": "unavailable",
+                    "ok": False,
+                    "available": False,
+                    "executed": False,
+                    "produced_evidence": False,
+                    "partial": False,
+                    "error": f"{key} não instalado ou indisponível",
+                })
+
+        checkpoint("adapters", target_sha256=report.target_sha256)
 
     ghidra_result = adapter_results.get("ghidra", {})
     rizin_result = adapter_results.get("rizin", {})
     angr_result = adapter_results.get("angr", {})
+    binaryninja_result = adapter_results.get("binaryninja", {})
     native_evidence = _native_function_evidence(reconstruct_result)
-    successful_sources = [
-        name for name, result in adapter_results.items() if result.get("produced_evidence")
-    ]
-    if angr_result.get("produced_evidence") and angr_result.get("functions"):
+    successful_sources: list[str] = []
+    for name, result in adapter_results.items():
+        if result.get("produced_evidence") is not True:
+            continue
+        if name == "ghidra":
+            if ghidra_result_is_complete(result):
+                successful_sources.append(name)
+        elif result.get("partial") is False:
+            successful_sources.append(name)
+    if (
+        angr_result.get("produced_evidence") is True
+        and angr_result.get("partial") is False
+        and angr_result.get("functions")
+    ):
         successful_sources.append("angr")
 
     # Get base address for address normalization
@@ -502,26 +718,42 @@ def run_megazord(
         from aether_re.engines.ghidra_parse import parse_decompiled_file
 
         function_dicts = parse_decompiled_file(Path(ghidra_result["decompiled_path"]))
-        evidence_items.extend(FunctionEvidence(**item) for item in function_dicts)
+        ghidra_complete = ghidra_result_is_complete(ghidra_result)
+        if not ghidra_complete:
+            function_dicts = mark_ghidra_functions_partial(function_dicts)
+            report.limitations.append(
+                "Ghidra output is partial or lacks an explicit complete summary; "
+                "it is retained as evidence but not selected as complete pseudo-source."
+            )
+        evidence_items.extend(FunctionEvidence.from_mapping(item) for item in function_dicts)
         write_function_index(function_dicts, out_dir / "ghidra_export" / "functions.json")
     if angr_result.get("functions"):
         evidence_items.extend(
-            FunctionEvidence(**item) for item in angr_result["functions"]
+            FunctionEvidence.from_mapping(item) for item in angr_result["functions"]
         )
     if rizin_result.get("functions"):
         evidence_items.extend(
-            FunctionEvidence(**item) for item in rizin_result["functions"]
+            FunctionEvidence.from_mapping(item) for item in rizin_result["functions"]
         )
+    if binaryninja_result.get("functions"):
+        evidence_items.extend(FunctionEvidence.from_mapping(item) for item in binaryninja_result["functions"])
 
     merged_functions = merge_function_evidence(
         evidence_items,
         successful_sources=list(dict.fromkeys(successful_sources or ["native"])),
         base_addr=base_addr,
     )
+    if ghidra_result.get("decompiled_path") and not ghidra_result_is_complete(ghidra_result):
+        for function in merged_functions:
+            if function.sources == ["ghidra"]:
+                function.confidence = min(function.confidence, GHIDRA_PARTIAL_CONFIDENCE_CAP)
+                warning = "Ghidra export is partial; single-source confidence is capped at 0.80."
+                if warning not in function.warnings:
+                    function.warnings.append(warning)
     report.function_evidence = evidence_items
     report.merged_functions = merged_functions
     successful_sources = list(dict.fromkeys(successful_sources))
-    if angr_result.get("produced_evidence"):
+    if angr_result.get("produced_evidence") is True and angr_result.get("partial") is False:
         successful_sources = list(dict.fromkeys([*successful_sources, "angr"]))
     failed_sources = [
         name for name, result in adapter_results.items() if not result.get("ok", False)
@@ -532,6 +764,14 @@ def run_megazord(
         successful_sources=successful_sources,
         failed_sources=failed_sources,
     )
+    if (
+        ghidra_result.get("decompiled_path")
+        and not ghidra_result_is_complete(ghidra_result)
+        and not successful_sources
+    ):
+        report.overall_confidence = min(
+            report.overall_confidence, GHIDRA_PARTIAL_CONFIDENCE_CAP
+        )
     report.coverage = {
         "ensemble": {
             "functions": len(merged_functions),
@@ -555,10 +795,6 @@ def run_megazord(
     report.adapter_results = adapter_results
     report.adapter_results["_output_dir"] = str(out_dir)
 
-    (out_dir / "report.json").write_text(
-        json.dumps(report.to_dict(), indent=2, ensure_ascii=False, default=str),
-        encoding="utf-8",
-    )
     decompilation = merge_decompilation_results(
         ghidra_result if ghidra_result else None,
         rizin_result if rizin_result else None,
@@ -575,7 +811,10 @@ def run_megazord(
             + "\n\n/* === MEGAZORD SEMANTIC SKELETON (context) === */\n"
             + report.pseudo_source
         )
-    (out_dir / "pseudo_source.c").write_text(report.pseudo_source, encoding="utf-8")
+    # Canonicalize line endings so JSON and the materialized source are identical.
+    report.pseudo_source = report.pseudo_source.replace("\r\n", "\n").replace("\r", "\n")
+    # write_bytes avoids platform newline translation and makes the hashable artifact exact.
+    (out_dir / "pseudo_source.c").write_bytes(report.pseudo_source.encode("utf-8"))
     (out_dir / "findings.md").write_text(_render_md(report), encoding="utf-8")
     (out_dir / "strings.txt").write_text(
         "\n".join(report.strings), encoding="utf-8", errors="replace"
@@ -584,5 +823,100 @@ def run_megazord(
     # Gerar relatórios comparativos
     comparative_dir = out_dir / "comparative"
     generate_comparative_report(report, comparative_dir)
+
+    # O alvo pode ter sido trocado enquanto adapters externos executavam.
+    # Nunca publique relatório/manifesto que misture bytes diferentes.
+    final_target_sha256 = sha256_file(target)
+    if final_target_sha256 != initial_target_sha256 or report.target_sha256 != snapshot_sha256:
+        failure_recorded["value"] = True
+        checkpoint(
+            "failed",
+            status="failed",
+            target_sha256=report.target_sha256,
+            error="target_changed_during_analysis",
+            observed_target_sha256=final_target_sha256,
+        )
+        run_lock.release()
+        raise RuntimeError("target_changed_during_analysis")
+
+    # Persist only after every derived artifact and metric is final.
+    (out_dir / "report.json").write_text(
+        json.dumps(report.to_dict(), indent=2, ensure_ascii=False, default=str),
+        encoding="utf-8",
+    )
+    checkpoint("persisted", status="succeeded", target_sha256=report.target_sha256)
+    write_manifest_atomic(
+        build_manifest(
+            target,
+            out_dir,
+            metadata={"target_sha256": report.target_sha256, "engines_used": report.engines_used, "cache_key": cache_key},
+        ),
+        out_dir / "manifest.json",
+    )
+
+    # A successful producer return is not evidence of a valid package. Verify
+    # the bytes after publication and audit the whole package while this run
+    # still owns run.lock, preventing a cooperating concurrent run from changing
+    # the package during verification.
+    manifest_ok, manifest_errors = verify_manifest(
+        out_dir / "manifest.json", target, expected_cache_key=cache_key
+    )
+    if not manifest_ok:
+        failure_recorded["value"] = True
+        checkpoint(
+            "failed",
+            status="failed",
+            error="published_manifest_invalid",
+            manifest_errors=manifest_errors,
+        )
+        run_lock.release()
+        raise RuntimeError("published_manifest_invalid")
+
+    try:
+        package_audit = audit_run_package(out_dir, target=target, active_lock=run_lock)
+    except Exception as exc:
+        failure_recorded["value"] = True
+        checkpoint(
+            "failed",
+            status="failed",
+            error="published_package_audit_error",
+            audit_error=type(exc).__name__,
+        )
+        run_lock.release()
+        raise RuntimeError("published_package_audit_error") from exc
+    if package_audit.get("status") != "pass":
+        failure_recorded["value"] = True
+        checkpoint(
+            "failed",
+            status="failed",
+            error="published_package_invalid",
+            audit_issues=package_audit.get("issues", []),
+        )
+        run_lock.release()
+        raise RuntimeError("published_package_invalid")
+
+    try:
+        lock_released = run_lock.release()
+    except Exception as exc:
+        failure_recorded["value"] = True
+        checkpoint(
+            "failed",
+            status="failed",
+            target_sha256=report.target_sha256,
+            error="run_lock_release_failed",
+            release_error=type(exc).__name__,
+        )
+        raise RuntimeError("run_lock_release_failed") from exc
+    if not lock_released:
+        failure_recorded["value"] = True
+        checkpoint(
+            "failed",
+            status="failed",
+            target_sha256=report.target_sha256,
+            error="run_lock_release_failed",
+            release_error="owner_mismatch_or_lock_still_present",
+        )
+        raise RuntimeError("run_lock_release_failed")
+    finished["value"] = True
 
     return report

@@ -1,0 +1,19 @@
+{
+  "expected_relations": [
+    [
+      "main",
+      "dead_code_helper"
+    ]
+  ],
+  "expected_symbols": [
+    "main",
+    "dead_helper"
+  ],
+  "family": "dead_code",
+  "known_limits": [
+    "synthetic fixture",
+    "source oracle does not prove binary equivalence"
+  ],
+  "language": "python",
+  "oracle_schema": "re-megazord-oracle.v1"
+}

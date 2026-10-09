@@ -1,0 +1,257 @@
+{
+  "authorization_profile": "local_authorized",
+  "count": 3,
+  "limits": [
+    "3 selected Python packages from a partial local snapshot",
+    "all entries are holdout-only in this intake; no blind release control",
+    "oracle independence is only from the AetherRE bootstrap generator",
+    "no target execution, VM, external WORM, or independent reviewer"
+  ],
+  "projects": [
+    {
+      "artifacts": [
+        {
+          "path": "rotor_omniroute/omniroute/adapters/__init__.py",
+          "sha256": "32c6afcfe8762f9295aebb56e7495efee24ca430aec481109cdac16dbb1cb867"
+        },
+        {
+          "path": "rotor_omniroute/omniroute/adapters/openai_compat.py",
+          "sha256": "99a3a1a378d54e4d84313b4979b7f5715af0e3c1d0838fe54b8382310aa6a53d"
+        },
+        {
+          "path": "rotor_omniroute/omniroute/core.py",
+          "sha256": "ab8b793f80d078b3f05c9f435074219d3949ade073412bb52721d1fd34ddd02a"
+        },
+        {
+          "path": "rotor_omniroute/omniroute/credentials.py",
+          "sha256": "72dc8f3a49f3ba5b6b600c68857e234541b7ed70621b17c03dfa3ba11923e2f5"
+        },
+        {
+          "path": "rotor_omniroute/omniroute/history.py",
+          "sha256": "b11e348471ccfab370ea23cd819d388bf20a0a309eed7eaaf43608e817f86266"
+        },
+        {
+          "path": "rotor_omniroute/omniroute/observation.py",
+          "sha256": "64e88623a347afc1afa3ecea1e9a51056c3880fa3155162915cf67d2d269b4a1"
+        },
+        {
+          "path": "rotor_omniroute/omniroute/provider.py",
+          "sha256": "1d0359aecec25a96a51fa1ecafbcd0dfa2f5bde75000ed70e2768f9f97a05a10"
+        },
+        {
+          "path": "rotor_omniroute/omniroute/registry.py",
+          "sha256": "e76715b094dace99f6608c2354ce98cc9c5c1093ff2b8660ce489bed578a5894"
+        }
+      ],
+      "authorization": "local_authorized",
+      "family": "rotor_omniroute",
+      "id": "rotor_omniroute",
+      "language": "python",
+      "oracle": "oracles/rotor_omniroute.json",
+      "oracle_sha256": "bf4f0e2fbdd85cc0ee8fdcf8363910302b56a27c79b1bfe41a02817fbb863196",
+      "provenance": {
+        "authorization_artifact": "authorization/local_rotor_snapshot_authorization.json",
+        "authorization_artifact_sha256": "fe445d178b596aafc1d1bf3038c4135d2459bbd442399a11d4c454246b2f0fcc",
+        "authorization_ref": "USER_OWNED_ROTOR_SNAPSHOT_RE_Megazord_20260918",
+        "license": "user-owned-local-source; license inventory not universal",
+        "oracle_artifact": "oracles/rotor_omniroute.json",
+        "oracle_artifact_sha256": "bf4f0e2fbdd85cc0ee8fdcf8363910302b56a27c79b1bfe41a02817fbb863196",
+        "oracle_independence_scope": "independent_of_AetherRE_bootstrap_only",
+        "oracle_independent": true,
+        "oracle_method": "package __all__ exports plus source-project test inventory",
+        "origin": "F:\\rotor-llm local user-owned snapshot",
+        "snapshot_manifest": "snapshot_manifest.json",
+        "snapshot_manifest_sha256": "d8182c858edde4e2e3763b30adc23b1e5daa8236df81c139db49b60481e9c740"
+      },
+      "source": "rotor_omniroute/omniroute/__init__.py",
+      "source_sha256": "68b788912807da61e2505cec1fe0d841a757312cdbbc2623cd8123f5117db058",
+      "split": "holdout"
+    },
+    {
+      "artifacts": [
+        {
+          "path": "rotor_router_canonical/router/canonical/ir.py",
+          "sha256": "0b10038bb49eb543e8ce82e0bae8d95a159f265c179470f4437ac53643abfc53"
+        }
+      ],
+      "authorization": "local_authorized",
+      "family": "rotor_router_canonical",
+      "id": "rotor_router_canonical",
+      "language": "python",
+      "oracle": "oracles/rotor_router_canonical.json",
+      "oracle_sha256": "685fb36b31989c354be415f1d6aa99c5733c419a509c9b9b1170f33e6216c474",
+      "provenance": {
+        "authorization_artifact": "authorization/local_rotor_snapshot_authorization.json",
+        "authorization_artifact_sha256": "fe445d178b596aafc1d1bf3038c4135d2459bbd442399a11d4c454246b2f0fcc",
+        "authorization_ref": "USER_OWNED_ROTOR_SNAPSHOT_RE_Megazord_20260918",
+        "license": "user-owned-local-source; license inventory not universal",
+        "oracle_artifact": "oracles/rotor_router_canonical.json",
+        "oracle_artifact_sha256": "685fb36b31989c354be415f1d6aa99c5733c419a509c9b9b1170f33e6216c474",
+        "oracle_independence_scope": "independent_of_AetherRE_bootstrap_only",
+        "oracle_independent": true,
+        "oracle_method": "package __all__ exports plus source-project test inventory",
+        "origin": "F:\\rotor-llm local user-owned snapshot",
+        "snapshot_manifest": "snapshot_manifest.json",
+        "snapshot_manifest_sha256": "d8182c858edde4e2e3763b30adc23b1e5daa8236df81c139db49b60481e9c740"
+      },
+      "source": "rotor_router_canonical/router/canonical/__init__.py",
+      "source_sha256": "5c9028d1144e237ec87603fbaef38abafa55d18d1be886be4731f998b5aa3aa7",
+      "split": "holdout"
+    },
+    {
+      "artifacts": [
+        {
+          "path": "rotor_oasys_rlm_core/oasys_rlm/rlm/clients/__init__.py",
+          "sha256": "8c3b4320ef3acd6c1069d52b51cf973d076143b61de53b799284ba30d31a6ca6"
+        },
+        {
+          "path": "rotor_oasys_rlm_core/oasys_rlm/rlm/clients/anthropic.py",
+          "sha256": "00054055dc1f696411a3eddac6594b8ef017a357c3d918d87ff2115c927592eb"
+        },
+        {
+          "path": "rotor_oasys_rlm_core/oasys_rlm/rlm/clients/azure_openai.py",
+          "sha256": "188a586e90cd33f9f50db5e047dab35da67c0c9556db380031b98674e0c85df0"
+        },
+        {
+          "path": "rotor_oasys_rlm_core/oasys_rlm/rlm/clients/base_lm.py",
+          "sha256": "954bc84fb167f6685d53ebf7419aa99222183aebb0605e6f0c3f0c0314dbc0fc"
+        },
+        {
+          "path": "rotor_oasys_rlm_core/oasys_rlm/rlm/clients/gemini.py",
+          "sha256": "96cf714ef662ec59bfc20869315ec602eea021ab3fcaef7252171386ac744818"
+        },
+        {
+          "path": "rotor_oasys_rlm_core/oasys_rlm/rlm/clients/openai.py",
+          "sha256": "37bb01e671da3d67201e487e53ae6a36d0a2b72bf422b1aa6e8ccc437f4f4b32"
+        },
+        {
+          "path": "rotor_oasys_rlm_core/oasys_rlm/rlm/clients/portkey.py",
+          "sha256": "f0738a52a5c4ac7efa4daebb7c5f467b3f9adcbe7d5d67072565fc89651e4dfd"
+        },
+        {
+          "path": "rotor_oasys_rlm_core/oasys_rlm/rlm/core/__init__.py",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "path": "rotor_oasys_rlm_core/oasys_rlm/rlm/core/comms_utils.py",
+          "sha256": "bfbe1bea99139dea4300ff0e6f3a3d210d2590af9a99b0346a45e24023fbcce5"
+        },
+        {
+          "path": "rotor_oasys_rlm_core/oasys_rlm/rlm/core/lm_handler.py",
+          "sha256": "da26ae57d9cf920db75a13af36afef004ef2607214d288debc0b7963b8c07503"
+        },
+        {
+          "path": "rotor_oasys_rlm_core/oasys_rlm/rlm/core/rlm.py",
+          "sha256": "54b6b16d75b558b95dcfbf2d8c95bcaf0d258625febd1647bba2f4dbc7aaf834"
+        },
+        {
+          "path": "rotor_oasys_rlm_core/oasys_rlm/rlm/core/types.py",
+          "sha256": "123d47312d80d317f5bbc1e1002870683bb4592208889a1f47904ed3ce493fbf"
+        },
+        {
+          "path": "rotor_oasys_rlm_core/oasys_rlm/rlm/environments/__init__.py",
+          "sha256": "7534cf75d876a15769a5410f31ed5f5e62d94f209bb1d574572e81a3a1163786"
+        },
+        {
+          "path": "rotor_oasys_rlm_core/oasys_rlm/rlm/environments/base_env.py",
+          "sha256": "1854046bf09eafe09d005ef4ab243a6e3953b032e1cbd6d6f59fc1078bceacff"
+        },
+        {
+          "path": "rotor_oasys_rlm_core/oasys_rlm/rlm/environments/constants.py",
+          "sha256": "40131e4857a699b02d54b374e7ccf1c63c32d424d0203d5149e13a769838f9f4"
+        },
+        {
+          "path": "rotor_oasys_rlm_core/oasys_rlm/rlm/environments/daytona_repl.py",
+          "sha256": "ec94e39d1fd9a440420bba013c929a00e93cc6ce9bbd1ca3218f25281f12bea9"
+        },
+        {
+          "path": "rotor_oasys_rlm_core/oasys_rlm/rlm/environments/docker_repl.py",
+          "sha256": "dab02a81367c2f0a0a6f0379332b12295abf0e44daaa94db3d126cdd46fc4bf7"
+        },
+        {
+          "path": "rotor_oasys_rlm_core/oasys_rlm/rlm/environments/e2b_repl.py",
+          "sha256": "ae7b168793f6265198cc833303151e45ffbe3d633a05b4110f217be0759c53a1"
+        },
+        {
+          "path": "rotor_oasys_rlm_core/oasys_rlm/rlm/environments/ipython_repl.py",
+          "sha256": "3df80ae2a6dfec0df04cde455f92b74f1f1a21dd3e9ae828053249ba9a4d1797"
+        },
+        {
+          "path": "rotor_oasys_rlm_core/oasys_rlm/rlm/environments/local_repl.py",
+          "sha256": "9b867b679931bd9d57ea885d835b5b0a2e0b3396a0b2718b62fac3276282cb9a"
+        },
+        {
+          "path": "rotor_oasys_rlm_core/oasys_rlm/rlm/environments/modal_repl.py",
+          "sha256": "b5196ada65523153b6de8c9953e3b7ef6db64076cd19bc0ba0a89b5b383ab53a"
+        },
+        {
+          "path": "rotor_oasys_rlm_core/oasys_rlm/rlm/environments/prime_repl.py",
+          "sha256": "644f0314f15e3fb104bb3a82be48924212768b4a3aa906f151c0f7abfaaf3ef9"
+        },
+        {
+          "path": "rotor_oasys_rlm_core/oasys_rlm/rlm/logger/__init__.py",
+          "sha256": "b9976ec2bd77f5b0e2252afa80a7be4f992d25ac69eab832c3544a8799cc6f1f"
+        },
+        {
+          "path": "rotor_oasys_rlm_core/oasys_rlm/rlm/logger/rlm_logger.py",
+          "sha256": "ab92f346766fc2e9b0c48c92fbc8a05d1b43dbd6535beb6ea0da70c31fe2c374"
+        },
+        {
+          "path": "rotor_oasys_rlm_core/oasys_rlm/rlm/logger/verbose.py",
+          "sha256": "d7e155400d02ed5a73086a0b7d6982cb6eb7d06256d0e11cbfe24c566e06040d"
+        },
+        {
+          "path": "rotor_oasys_rlm_core/oasys_rlm/rlm/utils/__init__.py",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "path": "rotor_oasys_rlm_core/oasys_rlm/rlm/utils/exceptions.py",
+          "sha256": "1f38776b8ded958db854f8692902564b3f36b1b98a6e2f0f33e703efa18a7cde"
+        },
+        {
+          "path": "rotor_oasys_rlm_core/oasys_rlm/rlm/utils/parsing.py",
+          "sha256": "16754fdc801d8d2fbf98246e1a8f489fd3622bc77dfc4779f58445414b3ea351"
+        },
+        {
+          "path": "rotor_oasys_rlm_core/oasys_rlm/rlm/utils/prompts.py",
+          "sha256": "9f2f4e6bb0319b7c81eb4f273a72d6bde3cc90097dfa8ffbbc92b04ed2e3b47f"
+        },
+        {
+          "path": "rotor_oasys_rlm_core/oasys_rlm/rlm/utils/rlm_utils.py",
+          "sha256": "fdacd27add192703d7ad86d2d0847b98abf59e81ca3b09738f4c7ff73e605ae9"
+        },
+        {
+          "path": "rotor_oasys_rlm_core/oasys_rlm/rlm/utils/token_utils.py",
+          "sha256": "41ee6244b2dab737ed53a4143ff93a07f4e00db166eded92f16d33cfb7fb8628"
+        }
+      ],
+      "authorization": "local_authorized",
+      "family": "rotor_oasys_rlm_core",
+      "id": "rotor_oasys_rlm_core",
+      "language": "python",
+      "oracle": "oracles/rotor_oasys_rlm_core.json",
+      "oracle_sha256": "118cee0826eb287d5d2f537963ed9df3331a684f590e6bae026f8dbc663c8875",
+      "provenance": {
+        "authorization_artifact": "authorization/local_rotor_snapshot_authorization.json",
+        "authorization_artifact_sha256": "fe445d178b596aafc1d1bf3038c4135d2459bbd442399a11d4c454246b2f0fcc",
+        "authorization_ref": "USER_OWNED_ROTOR_SNAPSHOT_RE_Megazord_20260918",
+        "license": "user-owned-local-source; license inventory not universal",
+        "oracle_artifact": "oracles/rotor_oasys_rlm_core.json",
+        "oracle_artifact_sha256": "118cee0826eb287d5d2f537963ed9df3331a684f590e6bae026f8dbc663c8875",
+        "oracle_independence_scope": "independent_of_AetherRE_bootstrap_only",
+        "oracle_independent": true,
+        "oracle_method": "package __all__ exports plus source-project test inventory",
+        "origin": "F:\\rotor-llm local user-owned snapshot",
+        "snapshot_manifest": "snapshot_manifest.json",
+        "snapshot_manifest_sha256": "d8182c858edde4e2e3763b30adc23b1e5daa8236df81c139db49b60481e9c740"
+      },
+      "source": "rotor_oasys_rlm_core/oasys_rlm/rlm/__init__.py",
+      "source_sha256": "bbcf03835c623c6b00c38bdf6692d43af164f1d6a2df00c8c1044c409cf95f52",
+      "split": "holdout"
+    }
+  ],
+  "provenance": "local_user_owned_rotor_snapshot_v2; selected_packages; oracle_artifacts_separate; no_external_re_adjudication",
+  "schema": "re-megazord-corpus.v1",
+  "source_snapshot": "F:\\RE_Megazord_snapshots\\rotor_20260917_v2",
+  "source_snapshot_manifest_sha256": "d8182c858edde4e2e3763b30adc23b1e5daa8236df81c139db49b60481e9c740"
+}

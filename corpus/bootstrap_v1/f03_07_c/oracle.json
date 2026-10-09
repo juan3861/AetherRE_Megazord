@@ -1,0 +1,19 @@
+{
+  "expected_relations": [
+    [
+      "main",
+      "mock_boundary_helper"
+    ]
+  ],
+  "expected_symbols": [
+    "main",
+    "mock_boundary_helper"
+  ],
+  "family": "mock_boundary",
+  "known_limits": [
+    "synthetic fixture",
+    "source oracle does not prove binary equivalence"
+  ],
+  "language": "c",
+  "oracle_schema": "re-megazord-oracle.v1"
+}

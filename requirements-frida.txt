@@ -1,0 +1,2 @@
+# Optional CLI tooling for the F08 VM/lab profile; not part of the core install.
+frida-tools>=14.0.0

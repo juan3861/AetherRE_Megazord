@@ -1,0 +1,181 @@
+{
+  "limits": [
+    "Python uses py_compile only",
+    "C builds remain explicit/unavailable when no compiler is discovered",
+    "generated binaries are never executed"
+  ],
+  "manifest": "D:\\AetherRE_Megazord\\corpus\\bootstrap_v1\\manifest.json",
+  "results": [
+    {
+      "id": "f03_01_python",
+      "language": "python",
+      "returncode": 0,
+      "source_sha256": "43a875c0ad5e49159b0a7571ac25e35a6b0101d3e2b8843ef9ef69c5a7583e74",
+      "status": "succeeded",
+      "stderr_tail": "",
+      "timed_out": false
+    },
+    {
+      "compiler": null,
+      "id": "f03_01_c",
+      "language": "c",
+      "reason": "compiler_not_found",
+      "source_sha256": "c3f404652587c9383c4e9351b45be8b664a7121125f5e8bcb27781e4f69c73c7",
+      "status": "unavailable"
+    },
+    {
+      "id": "f03_02_python",
+      "language": "python",
+      "returncode": 0,
+      "source_sha256": "5b308c0d6fd02544702b4432e5a908d7ee79a5565585f1b105f5d3452dec8d9c",
+      "status": "succeeded",
+      "stderr_tail": "",
+      "timed_out": false
+    },
+    {
+      "compiler": null,
+      "id": "f03_02_c",
+      "language": "c",
+      "reason": "compiler_not_found",
+      "source_sha256": "3f8d31fa15b7f813b91f7ce8a7b7666dfe40e3fcb8d5a20d49af9612ed117d26",
+      "status": "unavailable"
+    },
+    {
+      "id": "f03_03_python",
+      "language": "python",
+      "returncode": 0,
+      "source_sha256": "a12533a4281f08ad2a02c8e8e88bd83697d2a60621e1c1aac531523cd3b5acb3",
+      "status": "succeeded",
+      "stderr_tail": "",
+      "timed_out": false
+    },
+    {
+      "compiler": null,
+      "id": "f03_03_c",
+      "language": "c",
+      "reason": "compiler_not_found",
+      "source_sha256": "9c6510522792f9e92fe11c151283bfd01fd7a25869dde61979767d469040190f",
+      "status": "unavailable"
+    },
+    {
+      "id": "f03_04_python",
+      "language": "python",
+      "returncode": 0,
+      "source_sha256": "d2b5efb3491a48bc169db036bd99aebf80203e3a42a0a59f2fcf3830e772af33",
+      "status": "succeeded",
+      "stderr_tail": "",
+      "timed_out": false
+    },
+    {
+      "compiler": null,
+      "id": "f03_04_c",
+      "language": "c",
+      "reason": "compiler_not_found",
+      "source_sha256": "9c06572b5692c3f1bd94128c14f9031365a25154e8150e61d95f5f671e9b1dfb",
+      "status": "unavailable"
+    },
+    {
+      "id": "f03_05_python",
+      "language": "python",
+      "returncode": 0,
+      "source_sha256": "271e09f9ef9bdf42d4823b876ef587b5d44e5a3d1dd99e8f69188729133c1ee7",
+      "status": "succeeded",
+      "stderr_tail": "",
+      "timed_out": false
+    },
+    {
+      "compiler": null,
+      "id": "f03_05_c",
+      "language": "c",
+      "reason": "compiler_not_found",
+      "source_sha256": "88427445686071426a2d7200089572f5581144992574e61f4c20e4dede660633",
+      "status": "unavailable"
+    },
+    {
+      "id": "f03_06_python",
+      "language": "python",
+      "returncode": 0,
+      "source_sha256": "b5a984a43bc077843942ec58cf68588de6f3433f7f0859198ba62ffd5fbaa3a5",
+      "status": "succeeded",
+      "stderr_tail": "",
+      "timed_out": false
+    },
+    {
+      "compiler": null,
+      "id": "f03_06_c",
+      "language": "c",
+      "reason": "compiler_not_found",
+      "source_sha256": "593c8fbce6efa73aea0a17ba7c05165e16d2d5e44fd97949bca8ff5f7c3f9a67",
+      "status": "unavailable"
+    },
+    {
+      "id": "f03_07_python",
+      "language": "python",
+      "returncode": 0,
+      "source_sha256": "cab4eae893e6c7809b173b3b150596c5882359daa06d669d41ef0cb2cdccf3a8",
+      "status": "succeeded",
+      "stderr_tail": "",
+      "timed_out": false
+    },
+    {
+      "compiler": null,
+      "id": "f03_07_c",
+      "language": "c",
+      "reason": "compiler_not_found",
+      "source_sha256": "1e7813ae5b8b89f9a938675a5125ea113255faa38ee0ba8814c712c2c833ef4a",
+      "status": "unavailable"
+    },
+    {
+      "id": "f03_08_python",
+      "language": "python",
+      "returncode": 0,
+      "source_sha256": "06802abab951fd62dd0abad5eb828b3fd3e107931c0dfcd3bfbeaac37c4abca6",
+      "status": "succeeded",
+      "stderr_tail": "",
+      "timed_out": false
+    },
+    {
+      "compiler": null,
+      "id": "f03_08_c",
+      "language": "c",
+      "reason": "compiler_not_found",
+      "source_sha256": "c46485a8d4e9643d75472fe7556dd0cb2fd5dc569622264fc34f19f58a671871",
+      "status": "unavailable"
+    },
+    {
+      "id": "f03_09_python",
+      "language": "python",
+      "returncode": 0,
+      "source_sha256": "180630196508a9ab4f62861f40cac7a5ba9b945f3c27bbd1af32cfae6cfc50be",
+      "status": "succeeded",
+      "stderr_tail": "",
+      "timed_out": false
+    },
+    {
+      "compiler": null,
+      "id": "f03_09_c",
+      "language": "c",
+      "reason": "compiler_not_found",
+      "source_sha256": "56059bca0750b1d195f7dce44bfd77e65a16b4ccb8debba6e9707086fa4ed119",
+      "status": "unavailable"
+    },
+    {
+      "id": "f03_10_python",
+      "language": "python",
+      "returncode": 0,
+      "source_sha256": "532d6376719cb783a33dca50c9555c01acd422f1f4060c3d4b0d126e22c62347",
+      "status": "succeeded",
+      "stderr_tail": "",
+      "timed_out": false
+    },
+    {
+      "compiler": null,
+      "id": "f03_10_c",
+      "language": "c",
+      "reason": "compiler_not_found",
+      "source_sha256": "ed99b73a29c79445dab976bb8f46f9594e5203f86edb4cf82f195dea0615623a",
+      "status": "unavailable"
+    }
+  ],
+  "schema": "corpus-build-validation.v1"
+}

@@ -1,0 +1,615 @@
+{
+  "authorization": "external_authorized",
+  "count": 10,
+  "limits": [
+    "10 benchmark cases, not production projects",
+    "all entries holdout-only; blind release not proven",
+    "parser consumes context statically; compile commands are provenance until explicit worker",
+    "targets are never executed by this intake or evaluator",
+    "oracle independence is from AetherRE bootstrap only; no external re-adjudication"
+  ],
+  "projects": [
+    {
+      "artifacts": [
+        {
+          "path": "juliet_cwe121_stack_based_buffer_overflow/support/io.c",
+          "sha256": "50ace91d0f9cd9f281d5d8ff3a9ca879ee2779d737030ae84e8e4be3df5b299c"
+        },
+        {
+          "path": "juliet_cwe121_stack_based_buffer_overflow/support/std_testcase.h",
+          "sha256": "a78aaf3a54a6210260ad70123c09c3c283c6edf7808b6244205e00b8f2d9b8d0"
+        },
+        {
+          "path": "juliet_cwe121_stack_based_buffer_overflow/support/std_testcase_io.h",
+          "sha256": "6459df50d22697bb61619e2effd688ebb98915db25f7eb1bdbb767f888066fb6"
+        },
+        {
+          "path": "juliet_cwe121_stack_based_buffer_overflow/support/std_thread.c",
+          "sha256": "73877517d64e002c9602fdb726c8cbbf0a15a5ba39b8cd07f2d99daf758a2f1f"
+        },
+        {
+          "path": "juliet_cwe121_stack_based_buffer_overflow/support/std_thread.h",
+          "sha256": "3a0512cfccb90e30811399876066c23077be53990f57f205749a6a591a7eee5a"
+        },
+        {
+          "path": "juliet_cwe121_stack_based_buffer_overflow/compile_commands.json",
+          "sha256": "e96f03544081d82477bca58789e7d2494231a1c0762963326cb709f21b6859cb"
+        }
+      ],
+      "authorization": "external_authorized",
+      "build_kind": "executable",
+      "build_sources": [
+        "juliet_cwe121_stack_based_buffer_overflow/src/main.c",
+        "juliet_cwe121_stack_based_buffer_overflow/support/io.c",
+        "juliet_cwe121_stack_based_buffer_overflow/support/std_thread.c"
+      ],
+      "family": "external_cwe121_stack_based_buffer_overflow",
+      "id": "juliet_cwe121_stack_based_buffer_overflow",
+      "include_dirs": [
+        "juliet_cwe121_stack_based_buffer_overflow/support"
+      ],
+      "language": "c",
+      "oracle": "oracles/juliet_cwe121_stack_based_buffer_overflow.json",
+      "oracle_sha256": "c7e5c9eab6061fa12ced32b3e9d9ed70c2f7b9a800fd1d426a3f27ca6fda29e4",
+      "provenance": {
+        "authorization_ref": "NIST SARD Juliet v1.3 public release; repository commit f88433e3443648a17671398797a04ea1f8e1a274",
+        "context_provenance": "upstream testcasesupport io.c/std_thread.c and headers copied byte-for-byte",
+        "license": "NIST public domain / CC0 1.0",
+        "oracle_artifact": "oracles/juliet_cwe121_stack_based_buffer_overflow.json",
+        "oracle_artifact_sha256": "c7e5c9eab6061fa12ced32b3e9d9ed70c2f7b9a800fd1d426a3f27ca6fda29e4",
+        "oracle_independence_scope": "independent_of_AetherRE_bootstrap_only; no_external_re_adjudication",
+        "oracle_independent": true,
+        "oracle_method": "upstream CWE label + manual symbol inventory + conservative upstream main-call inventory",
+        "origin": "NIST Juliet Test Suite C/C++ v1.3; commit-bound"
+      },
+      "source": "juliet_cwe121_stack_based_buffer_overflow/src/main.c",
+      "source_sha256": "af233bbbf5f9109c5cac4792cbf81c1c19cd81ce9b0cf9389fc45f9fe2a97d1f",
+      "split": "holdout",
+      "upstream_commit": "f88433e3443648a17671398797a04ea1f8e1a274",
+      "upstream_source": "testcases\\CWE121_Stack_Based_Buffer_Overflow\\s01\\CWE121_Stack_Based_Buffer_Overflow__char_type_overrun_memcpy_01.c"
+    },
+    {
+      "artifacts": [
+        {
+          "path": "juliet_cwe122_heap_based_buffer_overflow/support/io.c",
+          "sha256": "50ace91d0f9cd9f281d5d8ff3a9ca879ee2779d737030ae84e8e4be3df5b299c"
+        },
+        {
+          "path": "juliet_cwe122_heap_based_buffer_overflow/support/std_testcase.h",
+          "sha256": "a78aaf3a54a6210260ad70123c09c3c283c6edf7808b6244205e00b8f2d9b8d0"
+        },
+        {
+          "path": "juliet_cwe122_heap_based_buffer_overflow/support/std_testcase_io.h",
+          "sha256": "6459df50d22697bb61619e2effd688ebb98915db25f7eb1bdbb767f888066fb6"
+        },
+        {
+          "path": "juliet_cwe122_heap_based_buffer_overflow/support/std_thread.c",
+          "sha256": "73877517d64e002c9602fdb726c8cbbf0a15a5ba39b8cd07f2d99daf758a2f1f"
+        },
+        {
+          "path": "juliet_cwe122_heap_based_buffer_overflow/support/std_thread.h",
+          "sha256": "3a0512cfccb90e30811399876066c23077be53990f57f205749a6a591a7eee5a"
+        },
+        {
+          "path": "juliet_cwe122_heap_based_buffer_overflow/compile_commands.json",
+          "sha256": "e96f03544081d82477bca58789e7d2494231a1c0762963326cb709f21b6859cb"
+        }
+      ],
+      "authorization": "external_authorized",
+      "build_kind": "executable",
+      "build_sources": [
+        "juliet_cwe122_heap_based_buffer_overflow/src/main.c",
+        "juliet_cwe122_heap_based_buffer_overflow/support/io.c",
+        "juliet_cwe122_heap_based_buffer_overflow/support/std_thread.c"
+      ],
+      "family": "external_cwe122_heap_based_buffer_overflow",
+      "id": "juliet_cwe122_heap_based_buffer_overflow",
+      "include_dirs": [
+        "juliet_cwe122_heap_based_buffer_overflow/support"
+      ],
+      "language": "c",
+      "oracle": "oracles/juliet_cwe122_heap_based_buffer_overflow.json",
+      "oracle_sha256": "f01b97e5413a1211818cc6199291e9288bb4d1f3081c520c4364d60633699370",
+      "provenance": {
+        "authorization_ref": "NIST SARD Juliet v1.3 public release; repository commit f88433e3443648a17671398797a04ea1f8e1a274",
+        "context_provenance": "upstream testcasesupport io.c/std_thread.c and headers copied byte-for-byte",
+        "license": "NIST public domain / CC0 1.0",
+        "oracle_artifact": "oracles/juliet_cwe122_heap_based_buffer_overflow.json",
+        "oracle_artifact_sha256": "f01b97e5413a1211818cc6199291e9288bb4d1f3081c520c4364d60633699370",
+        "oracle_independence_scope": "independent_of_AetherRE_bootstrap_only; no_external_re_adjudication",
+        "oracle_independent": true,
+        "oracle_method": "upstream CWE label + manual symbol inventory + conservative upstream main-call inventory",
+        "origin": "NIST Juliet Test Suite C/C++ v1.3; commit-bound"
+      },
+      "source": "juliet_cwe122_heap_based_buffer_overflow/src/main.c",
+      "source_sha256": "ef8ca10e78af970e05ddba8d8b08611abd92ff4b4ae721795ce5e41736d7fa4a",
+      "split": "holdout",
+      "upstream_commit": "f88433e3443648a17671398797a04ea1f8e1a274",
+      "upstream_source": "testcases\\CWE122_Heap_Based_Buffer_Overflow\\s01\\CWE122_Heap_Based_Buffer_Overflow__char_type_overrun_memcpy_01.c"
+    },
+    {
+      "artifacts": [
+        {
+          "path": "juliet_cwe190_integer_overflow/support/io.c",
+          "sha256": "50ace91d0f9cd9f281d5d8ff3a9ca879ee2779d737030ae84e8e4be3df5b299c"
+        },
+        {
+          "path": "juliet_cwe190_integer_overflow/support/std_testcase.h",
+          "sha256": "a78aaf3a54a6210260ad70123c09c3c283c6edf7808b6244205e00b8f2d9b8d0"
+        },
+        {
+          "path": "juliet_cwe190_integer_overflow/support/std_testcase_io.h",
+          "sha256": "6459df50d22697bb61619e2effd688ebb98915db25f7eb1bdbb767f888066fb6"
+        },
+        {
+          "path": "juliet_cwe190_integer_overflow/support/std_thread.c",
+          "sha256": "73877517d64e002c9602fdb726c8cbbf0a15a5ba39b8cd07f2d99daf758a2f1f"
+        },
+        {
+          "path": "juliet_cwe190_integer_overflow/support/std_thread.h",
+          "sha256": "3a0512cfccb90e30811399876066c23077be53990f57f205749a6a591a7eee5a"
+        },
+        {
+          "path": "juliet_cwe190_integer_overflow/compile_commands.json",
+          "sha256": "e96f03544081d82477bca58789e7d2494231a1c0762963326cb709f21b6859cb"
+        }
+      ],
+      "authorization": "external_authorized",
+      "build_kind": "executable",
+      "build_sources": [
+        "juliet_cwe190_integer_overflow/src/main.c",
+        "juliet_cwe190_integer_overflow/support/io.c",
+        "juliet_cwe190_integer_overflow/support/std_thread.c"
+      ],
+      "family": "external_cwe190_integer_overflow",
+      "id": "juliet_cwe190_integer_overflow",
+      "include_dirs": [
+        "juliet_cwe190_integer_overflow/support"
+      ],
+      "language": "c",
+      "oracle": "oracles/juliet_cwe190_integer_overflow.json",
+      "oracle_sha256": "97e29bcfe8d19bb632b0c70eea324fb3360fab1e10072427efb55256f90e570c",
+      "provenance": {
+        "authorization_ref": "NIST SARD Juliet v1.3 public release; repository commit f88433e3443648a17671398797a04ea1f8e1a274",
+        "context_provenance": "upstream testcasesupport io.c/std_thread.c and headers copied byte-for-byte",
+        "license": "NIST public domain / CC0 1.0",
+        "oracle_artifact": "oracles/juliet_cwe190_integer_overflow.json",
+        "oracle_artifact_sha256": "97e29bcfe8d19bb632b0c70eea324fb3360fab1e10072427efb55256f90e570c",
+        "oracle_independence_scope": "independent_of_AetherRE_bootstrap_only; no_external_re_adjudication",
+        "oracle_independent": true,
+        "oracle_method": "upstream CWE label + manual symbol inventory + conservative upstream main-call inventory",
+        "origin": "NIST Juliet Test Suite C/C++ v1.3; commit-bound"
+      },
+      "source": "juliet_cwe190_integer_overflow/src/main.c",
+      "source_sha256": "dc765f28a2535f4854724f25f98218b71b7ce944896975f8cb800d507c1c60c1",
+      "split": "holdout",
+      "upstream_commit": "f88433e3443648a17671398797a04ea1f8e1a274",
+      "upstream_source": "testcases\\CWE190_Integer_Overflow\\s01\\CWE190_Integer_Overflow__char_fscanf_add_01.c"
+    },
+    {
+      "artifacts": [
+        {
+          "path": "juliet_cwe369_divide_by_zero/support/io.c",
+          "sha256": "50ace91d0f9cd9f281d5d8ff3a9ca879ee2779d737030ae84e8e4be3df5b299c"
+        },
+        {
+          "path": "juliet_cwe369_divide_by_zero/support/std_testcase.h",
+          "sha256": "a78aaf3a54a6210260ad70123c09c3c283c6edf7808b6244205e00b8f2d9b8d0"
+        },
+        {
+          "path": "juliet_cwe369_divide_by_zero/support/std_testcase_io.h",
+          "sha256": "6459df50d22697bb61619e2effd688ebb98915db25f7eb1bdbb767f888066fb6"
+        },
+        {
+          "path": "juliet_cwe369_divide_by_zero/support/std_thread.c",
+          "sha256": "73877517d64e002c9602fdb726c8cbbf0a15a5ba39b8cd07f2d99daf758a2f1f"
+        },
+        {
+          "path": "juliet_cwe369_divide_by_zero/support/std_thread.h",
+          "sha256": "3a0512cfccb90e30811399876066c23077be53990f57f205749a6a591a7eee5a"
+        },
+        {
+          "path": "juliet_cwe369_divide_by_zero/compile_commands.json",
+          "sha256": "e96f03544081d82477bca58789e7d2494231a1c0762963326cb709f21b6859cb"
+        }
+      ],
+      "authorization": "external_authorized",
+      "build_kind": "executable",
+      "build_sources": [
+        "juliet_cwe369_divide_by_zero/src/main.c",
+        "juliet_cwe369_divide_by_zero/support/io.c",
+        "juliet_cwe369_divide_by_zero/support/std_thread.c"
+      ],
+      "family": "external_cwe369_divide_by_zero",
+      "id": "juliet_cwe369_divide_by_zero",
+      "include_dirs": [
+        "juliet_cwe369_divide_by_zero/support"
+      ],
+      "language": "c",
+      "oracle": "oracles/juliet_cwe369_divide_by_zero.json",
+      "oracle_sha256": "849660a03d3da091060e2d15a624ee33a14d0e58909410e9e5b5382a7dbea19d",
+      "provenance": {
+        "authorization_ref": "NIST SARD Juliet v1.3 public release; repository commit f88433e3443648a17671398797a04ea1f8e1a274",
+        "context_provenance": "upstream testcasesupport io.c/std_thread.c and headers copied byte-for-byte",
+        "license": "NIST public domain / CC0 1.0",
+        "oracle_artifact": "oracles/juliet_cwe369_divide_by_zero.json",
+        "oracle_artifact_sha256": "849660a03d3da091060e2d15a624ee33a14d0e58909410e9e5b5382a7dbea19d",
+        "oracle_independence_scope": "independent_of_AetherRE_bootstrap_only; no_external_re_adjudication",
+        "oracle_independent": true,
+        "oracle_method": "upstream CWE label + manual symbol inventory + conservative upstream main-call inventory",
+        "origin": "NIST Juliet Test Suite C/C++ v1.3; commit-bound"
+      },
+      "source": "juliet_cwe369_divide_by_zero/src/main.c",
+      "source_sha256": "9f8302cc9c8d84fe6e6c20063797e1c945d85446c258cf3bb8b5e1c742aa8f29",
+      "split": "holdout",
+      "upstream_commit": "f88433e3443648a17671398797a04ea1f8e1a274",
+      "upstream_source": "testcases\\CWE369_Divide_by_Zero\\s01\\CWE369_Divide_by_Zero__float_connect_socket_01.c"
+    },
+    {
+      "artifacts": [
+        {
+          "path": "juliet_cwe401_memory_leak/support/io.c",
+          "sha256": "50ace91d0f9cd9f281d5d8ff3a9ca879ee2779d737030ae84e8e4be3df5b299c"
+        },
+        {
+          "path": "juliet_cwe401_memory_leak/support/std_testcase.h",
+          "sha256": "a78aaf3a54a6210260ad70123c09c3c283c6edf7808b6244205e00b8f2d9b8d0"
+        },
+        {
+          "path": "juliet_cwe401_memory_leak/support/std_testcase_io.h",
+          "sha256": "6459df50d22697bb61619e2effd688ebb98915db25f7eb1bdbb767f888066fb6"
+        },
+        {
+          "path": "juliet_cwe401_memory_leak/support/std_thread.c",
+          "sha256": "73877517d64e002c9602fdb726c8cbbf0a15a5ba39b8cd07f2d99daf758a2f1f"
+        },
+        {
+          "path": "juliet_cwe401_memory_leak/support/std_thread.h",
+          "sha256": "3a0512cfccb90e30811399876066c23077be53990f57f205749a6a591a7eee5a"
+        },
+        {
+          "path": "juliet_cwe401_memory_leak/compile_commands.json",
+          "sha256": "e96f03544081d82477bca58789e7d2494231a1c0762963326cb709f21b6859cb"
+        }
+      ],
+      "authorization": "external_authorized",
+      "build_kind": "executable",
+      "build_sources": [
+        "juliet_cwe401_memory_leak/src/main.c",
+        "juliet_cwe401_memory_leak/support/io.c",
+        "juliet_cwe401_memory_leak/support/std_thread.c"
+      ],
+      "family": "external_cwe401_memory_leak",
+      "id": "juliet_cwe401_memory_leak",
+      "include_dirs": [
+        "juliet_cwe401_memory_leak/support"
+      ],
+      "language": "c",
+      "oracle": "oracles/juliet_cwe401_memory_leak.json",
+      "oracle_sha256": "7f0d737a0376c67da9c9601928a85857c4e4c91c4feee1150ff00fccd55f548a",
+      "provenance": {
+        "authorization_ref": "NIST SARD Juliet v1.3 public release; repository commit f88433e3443648a17671398797a04ea1f8e1a274",
+        "context_provenance": "upstream testcasesupport io.c/std_thread.c and headers copied byte-for-byte",
+        "license": "NIST public domain / CC0 1.0",
+        "oracle_artifact": "oracles/juliet_cwe401_memory_leak.json",
+        "oracle_artifact_sha256": "7f0d737a0376c67da9c9601928a85857c4e4c91c4feee1150ff00fccd55f548a",
+        "oracle_independence_scope": "independent_of_AetherRE_bootstrap_only; no_external_re_adjudication",
+        "oracle_independent": true,
+        "oracle_method": "upstream CWE label + manual symbol inventory + conservative upstream main-call inventory",
+        "origin": "NIST Juliet Test Suite C/C++ v1.3; commit-bound"
+      },
+      "source": "juliet_cwe401_memory_leak/src/main.c",
+      "source_sha256": "7d9870716c196843fd77e84c4ce46535707753353be94a0fc7a589fba3c7cee1",
+      "split": "holdout",
+      "upstream_commit": "f88433e3443648a17671398797a04ea1f8e1a274",
+      "upstream_source": "testcases\\CWE401_Memory_Leak\\s01\\CWE401_Memory_Leak__char_calloc_01.c"
+    },
+    {
+      "artifacts": [
+        {
+          "path": "juliet_cwe415_double_free/support/io.c",
+          "sha256": "50ace91d0f9cd9f281d5d8ff3a9ca879ee2779d737030ae84e8e4be3df5b299c"
+        },
+        {
+          "path": "juliet_cwe415_double_free/support/std_testcase.h",
+          "sha256": "a78aaf3a54a6210260ad70123c09c3c283c6edf7808b6244205e00b8f2d9b8d0"
+        },
+        {
+          "path": "juliet_cwe415_double_free/support/std_testcase_io.h",
+          "sha256": "6459df50d22697bb61619e2effd688ebb98915db25f7eb1bdbb767f888066fb6"
+        },
+        {
+          "path": "juliet_cwe415_double_free/support/std_thread.c",
+          "sha256": "73877517d64e002c9602fdb726c8cbbf0a15a5ba39b8cd07f2d99daf758a2f1f"
+        },
+        {
+          "path": "juliet_cwe415_double_free/support/std_thread.h",
+          "sha256": "3a0512cfccb90e30811399876066c23077be53990f57f205749a6a591a7eee5a"
+        },
+        {
+          "path": "juliet_cwe415_double_free/compile_commands.json",
+          "sha256": "e96f03544081d82477bca58789e7d2494231a1c0762963326cb709f21b6859cb"
+        }
+      ],
+      "authorization": "external_authorized",
+      "build_kind": "executable",
+      "build_sources": [
+        "juliet_cwe415_double_free/src/main.c",
+        "juliet_cwe415_double_free/support/io.c",
+        "juliet_cwe415_double_free/support/std_thread.c"
+      ],
+      "family": "external_cwe415_double_free",
+      "id": "juliet_cwe415_double_free",
+      "include_dirs": [
+        "juliet_cwe415_double_free/support"
+      ],
+      "language": "c",
+      "oracle": "oracles/juliet_cwe415_double_free.json",
+      "oracle_sha256": "d5cd6de07c32ce2eaf0969fe2fa940c2236a31cfe2bd0a445815c505c3cf4f27",
+      "provenance": {
+        "authorization_ref": "NIST SARD Juliet v1.3 public release; repository commit f88433e3443648a17671398797a04ea1f8e1a274",
+        "context_provenance": "upstream testcasesupport io.c/std_thread.c and headers copied byte-for-byte",
+        "license": "NIST public domain / CC0 1.0",
+        "oracle_artifact": "oracles/juliet_cwe415_double_free.json",
+        "oracle_artifact_sha256": "d5cd6de07c32ce2eaf0969fe2fa940c2236a31cfe2bd0a445815c505c3cf4f27",
+        "oracle_independence_scope": "independent_of_AetherRE_bootstrap_only; no_external_re_adjudication",
+        "oracle_independent": true,
+        "oracle_method": "upstream CWE label + manual symbol inventory + conservative upstream main-call inventory",
+        "origin": "NIST Juliet Test Suite C/C++ v1.3; commit-bound"
+      },
+      "source": "juliet_cwe415_double_free/src/main.c",
+      "source_sha256": "01449e5f54ffd353aefba62efd39ba0afe2f4052be6a7dfe222823712948b97a",
+      "split": "holdout",
+      "upstream_commit": "f88433e3443648a17671398797a04ea1f8e1a274",
+      "upstream_source": "testcases\\CWE415_Double_Free\\s01\\CWE415_Double_Free__malloc_free_char_01.c"
+    },
+    {
+      "artifacts": [
+        {
+          "path": "juliet_cwe416_use_after_free/support/io.c",
+          "sha256": "50ace91d0f9cd9f281d5d8ff3a9ca879ee2779d737030ae84e8e4be3df5b299c"
+        },
+        {
+          "path": "juliet_cwe416_use_after_free/support/std_testcase.h",
+          "sha256": "a78aaf3a54a6210260ad70123c09c3c283c6edf7808b6244205e00b8f2d9b8d0"
+        },
+        {
+          "path": "juliet_cwe416_use_after_free/support/std_testcase_io.h",
+          "sha256": "6459df50d22697bb61619e2effd688ebb98915db25f7eb1bdbb767f888066fb6"
+        },
+        {
+          "path": "juliet_cwe416_use_after_free/support/std_thread.c",
+          "sha256": "73877517d64e002c9602fdb726c8cbbf0a15a5ba39b8cd07f2d99daf758a2f1f"
+        },
+        {
+          "path": "juliet_cwe416_use_after_free/support/std_thread.h",
+          "sha256": "3a0512cfccb90e30811399876066c23077be53990f57f205749a6a591a7eee5a"
+        },
+        {
+          "path": "juliet_cwe416_use_after_free/compile_commands.json",
+          "sha256": "e96f03544081d82477bca58789e7d2494231a1c0762963326cb709f21b6859cb"
+        }
+      ],
+      "authorization": "external_authorized",
+      "build_kind": "executable",
+      "build_sources": [
+        "juliet_cwe416_use_after_free/src/main.c",
+        "juliet_cwe416_use_after_free/support/io.c",
+        "juliet_cwe416_use_after_free/support/std_thread.c"
+      ],
+      "family": "external_cwe416_use_after_free",
+      "id": "juliet_cwe416_use_after_free",
+      "include_dirs": [
+        "juliet_cwe416_use_after_free/support"
+      ],
+      "language": "c",
+      "oracle": "oracles/juliet_cwe416_use_after_free.json",
+      "oracle_sha256": "dcda40e157ef08f824a53693c94b739d281cde48405d46a4474b01b3a2e3b1fc",
+      "provenance": {
+        "authorization_ref": "NIST SARD Juliet v1.3 public release; repository commit f88433e3443648a17671398797a04ea1f8e1a274",
+        "context_provenance": "upstream testcasesupport io.c/std_thread.c and headers copied byte-for-byte",
+        "license": "NIST public domain / CC0 1.0",
+        "oracle_artifact": "oracles/juliet_cwe416_use_after_free.json",
+        "oracle_artifact_sha256": "dcda40e157ef08f824a53693c94b739d281cde48405d46a4474b01b3a2e3b1fc",
+        "oracle_independence_scope": "independent_of_AetherRE_bootstrap_only; no_external_re_adjudication",
+        "oracle_independent": true,
+        "oracle_method": "upstream CWE label + manual symbol inventory + conservative upstream main-call inventory",
+        "origin": "NIST Juliet Test Suite C/C++ v1.3; commit-bound"
+      },
+      "source": "juliet_cwe416_use_after_free/src/main.c",
+      "source_sha256": "fa84a6bb9df36a8a1ab4d33a7064746d9037247f7599d3cd39659478d4b7f42e",
+      "split": "holdout",
+      "upstream_commit": "f88433e3443648a17671398797a04ea1f8e1a274",
+      "upstream_source": "testcases\\CWE416_Use_After_Free\\CWE416_Use_After_Free__malloc_free_char_01.c"
+    },
+    {
+      "artifacts": [
+        {
+          "path": "juliet_cwe457_use_of_uninitialized_variable/support/io.c",
+          "sha256": "50ace91d0f9cd9f281d5d8ff3a9ca879ee2779d737030ae84e8e4be3df5b299c"
+        },
+        {
+          "path": "juliet_cwe457_use_of_uninitialized_variable/support/std_testcase.h",
+          "sha256": "a78aaf3a54a6210260ad70123c09c3c283c6edf7808b6244205e00b8f2d9b8d0"
+        },
+        {
+          "path": "juliet_cwe457_use_of_uninitialized_variable/support/std_testcase_io.h",
+          "sha256": "6459df50d22697bb61619e2effd688ebb98915db25f7eb1bdbb767f888066fb6"
+        },
+        {
+          "path": "juliet_cwe457_use_of_uninitialized_variable/support/std_thread.c",
+          "sha256": "73877517d64e002c9602fdb726c8cbbf0a15a5ba39b8cd07f2d99daf758a2f1f"
+        },
+        {
+          "path": "juliet_cwe457_use_of_uninitialized_variable/support/std_thread.h",
+          "sha256": "3a0512cfccb90e30811399876066c23077be53990f57f205749a6a591a7eee5a"
+        },
+        {
+          "path": "juliet_cwe457_use_of_uninitialized_variable/compile_commands.json",
+          "sha256": "e96f03544081d82477bca58789e7d2494231a1c0762963326cb709f21b6859cb"
+        }
+      ],
+      "authorization": "external_authorized",
+      "build_kind": "executable",
+      "build_sources": [
+        "juliet_cwe457_use_of_uninitialized_variable/src/main.c",
+        "juliet_cwe457_use_of_uninitialized_variable/support/io.c",
+        "juliet_cwe457_use_of_uninitialized_variable/support/std_thread.c"
+      ],
+      "family": "external_cwe457_use_of_uninitialized_variable",
+      "id": "juliet_cwe457_use_of_uninitialized_variable",
+      "include_dirs": [
+        "juliet_cwe457_use_of_uninitialized_variable/support"
+      ],
+      "language": "c",
+      "oracle": "oracles/juliet_cwe457_use_of_uninitialized_variable.json",
+      "oracle_sha256": "212ac357af4a4444f8b7a3667ec38cbcaab5f290af7d523686fd88bc0fb6905a",
+      "provenance": {
+        "authorization_ref": "NIST SARD Juliet v1.3 public release; repository commit f88433e3443648a17671398797a04ea1f8e1a274",
+        "context_provenance": "upstream testcasesupport io.c/std_thread.c and headers copied byte-for-byte",
+        "license": "NIST public domain / CC0 1.0",
+        "oracle_artifact": "oracles/juliet_cwe457_use_of_uninitialized_variable.json",
+        "oracle_artifact_sha256": "212ac357af4a4444f8b7a3667ec38cbcaab5f290af7d523686fd88bc0fb6905a",
+        "oracle_independence_scope": "independent_of_AetherRE_bootstrap_only; no_external_re_adjudication",
+        "oracle_independent": true,
+        "oracle_method": "upstream CWE label + manual symbol inventory + conservative upstream main-call inventory",
+        "origin": "NIST Juliet Test Suite C/C++ v1.3; commit-bound"
+      },
+      "source": "juliet_cwe457_use_of_uninitialized_variable/src/main.c",
+      "source_sha256": "a9cffd8b42a25f52346298107b6c9102c59e79268cc56e422aa2fdf5db30f8eb",
+      "split": "holdout",
+      "upstream_commit": "f88433e3443648a17671398797a04ea1f8e1a274",
+      "upstream_source": "testcases\\CWE457_Use_of_Uninitialized_Variable\\s01\\CWE457_Use_of_Uninitialized_Variable__char_pointer_01.c"
+    },
+    {
+      "artifacts": [
+        {
+          "path": "juliet_cwe476_null_pointer_dereference/support/io.c",
+          "sha256": "50ace91d0f9cd9f281d5d8ff3a9ca879ee2779d737030ae84e8e4be3df5b299c"
+        },
+        {
+          "path": "juliet_cwe476_null_pointer_dereference/support/std_testcase.h",
+          "sha256": "a78aaf3a54a6210260ad70123c09c3c283c6edf7808b6244205e00b8f2d9b8d0"
+        },
+        {
+          "path": "juliet_cwe476_null_pointer_dereference/support/std_testcase_io.h",
+          "sha256": "6459df50d22697bb61619e2effd688ebb98915db25f7eb1bdbb767f888066fb6"
+        },
+        {
+          "path": "juliet_cwe476_null_pointer_dereference/support/std_thread.c",
+          "sha256": "73877517d64e002c9602fdb726c8cbbf0a15a5ba39b8cd07f2d99daf758a2f1f"
+        },
+        {
+          "path": "juliet_cwe476_null_pointer_dereference/support/std_thread.h",
+          "sha256": "3a0512cfccb90e30811399876066c23077be53990f57f205749a6a591a7eee5a"
+        },
+        {
+          "path": "juliet_cwe476_null_pointer_dereference/compile_commands.json",
+          "sha256": "e96f03544081d82477bca58789e7d2494231a1c0762963326cb709f21b6859cb"
+        }
+      ],
+      "authorization": "external_authorized",
+      "build_kind": "executable",
+      "build_sources": [
+        "juliet_cwe476_null_pointer_dereference/src/main.c",
+        "juliet_cwe476_null_pointer_dereference/support/io.c",
+        "juliet_cwe476_null_pointer_dereference/support/std_thread.c"
+      ],
+      "family": "external_cwe476_null_pointer_dereference",
+      "id": "juliet_cwe476_null_pointer_dereference",
+      "include_dirs": [
+        "juliet_cwe476_null_pointer_dereference/support"
+      ],
+      "language": "c",
+      "oracle": "oracles/juliet_cwe476_null_pointer_dereference.json",
+      "oracle_sha256": "36dbe53274efa5c732b2136bdd30c7f6d23718e95743ed571ac5c3efda993352",
+      "provenance": {
+        "authorization_ref": "NIST SARD Juliet v1.3 public release; repository commit f88433e3443648a17671398797a04ea1f8e1a274",
+        "context_provenance": "upstream testcasesupport io.c/std_thread.c and headers copied byte-for-byte",
+        "license": "NIST public domain / CC0 1.0",
+        "oracle_artifact": "oracles/juliet_cwe476_null_pointer_dereference.json",
+        "oracle_artifact_sha256": "36dbe53274efa5c732b2136bdd30c7f6d23718e95743ed571ac5c3efda993352",
+        "oracle_independence_scope": "independent_of_AetherRE_bootstrap_only; no_external_re_adjudication",
+        "oracle_independent": true,
+        "oracle_method": "upstream CWE label + manual symbol inventory + conservative upstream main-call inventory",
+        "origin": "NIST Juliet Test Suite C/C++ v1.3; commit-bound"
+      },
+      "source": "juliet_cwe476_null_pointer_dereference/src/main.c",
+      "source_sha256": "323ceea8fd3f59ee9da38b98a0aca49488c6776e75420b2e9b32b3893dd354e4",
+      "split": "holdout",
+      "upstream_commit": "f88433e3443648a17671398797a04ea1f8e1a274",
+      "upstream_source": "testcases\\CWE476_NULL_Pointer_Dereference\\CWE476_NULL_Pointer_Dereference__binary_if_01.c"
+    },
+    {
+      "artifacts": [
+        {
+          "path": "juliet_cwe78_os_command_injection/support/io.c",
+          "sha256": "50ace91d0f9cd9f281d5d8ff3a9ca879ee2779d737030ae84e8e4be3df5b299c"
+        },
+        {
+          "path": "juliet_cwe78_os_command_injection/support/std_testcase.h",
+          "sha256": "a78aaf3a54a6210260ad70123c09c3c283c6edf7808b6244205e00b8f2d9b8d0"
+        },
+        {
+          "path": "juliet_cwe78_os_command_injection/support/std_testcase_io.h",
+          "sha256": "6459df50d22697bb61619e2effd688ebb98915db25f7eb1bdbb767f888066fb6"
+        },
+        {
+          "path": "juliet_cwe78_os_command_injection/support/std_thread.c",
+          "sha256": "73877517d64e002c9602fdb726c8cbbf0a15a5ba39b8cd07f2d99daf758a2f1f"
+        },
+        {
+          "path": "juliet_cwe78_os_command_injection/support/std_thread.h",
+          "sha256": "3a0512cfccb90e30811399876066c23077be53990f57f205749a6a591a7eee5a"
+        },
+        {
+          "path": "juliet_cwe78_os_command_injection/compile_commands.json",
+          "sha256": "e96f03544081d82477bca58789e7d2494231a1c0762963326cb709f21b6859cb"
+        }
+      ],
+      "authorization": "external_authorized",
+      "build_kind": "executable",
+      "build_sources": [
+        "juliet_cwe78_os_command_injection/src/main.c",
+        "juliet_cwe78_os_command_injection/support/io.c",
+        "juliet_cwe78_os_command_injection/support/std_thread.c"
+      ],
+      "family": "external_cwe78_os_command_injection",
+      "id": "juliet_cwe78_os_command_injection",
+      "include_dirs": [
+        "juliet_cwe78_os_command_injection/support"
+      ],
+      "language": "c",
+      "oracle": "oracles/juliet_cwe78_os_command_injection.json",
+      "oracle_sha256": "f4b339fec35e0046aa9b2b1fbd35a72cc19befe1bbe0044d0f745a7d4d8d4bd0",
+      "provenance": {
+        "authorization_ref": "NIST SARD Juliet v1.3 public release; repository commit f88433e3443648a17671398797a04ea1f8e1a274",
+        "context_provenance": "upstream testcasesupport io.c/std_thread.c and headers copied byte-for-byte",
+        "license": "NIST public domain / CC0 1.0",
+        "oracle_artifact": "oracles/juliet_cwe78_os_command_injection.json",
+        "oracle_artifact_sha256": "f4b339fec35e0046aa9b2b1fbd35a72cc19befe1bbe0044d0f745a7d4d8d4bd0",
+        "oracle_independence_scope": "independent_of_AetherRE_bootstrap_only; no_external_re_adjudication",
+        "oracle_independent": true,
+        "oracle_method": "upstream CWE label + manual symbol inventory + conservative upstream main-call inventory",
+        "origin": "NIST Juliet Test Suite C/C++ v1.3; commit-bound"
+      },
+      "source": "juliet_cwe78_os_command_injection/src/main.c",
+      "source_sha256": "cad91ec8bcf3110fe75e8be493da0f96a35c812b9ac0ba4c1ed6de622d20ce3c",
+      "split": "holdout",
+      "upstream_commit": "f88433e3443648a17671398797a04ea1f8e1a274",
+      "upstream_source": "testcases\\CWE78_OS_Command_Injection\\s01\\CWE78_OS_Command_Injection__char_connect_socket_execl_01.c"
+    }
+  ],
+  "provenance": "external_public_juliet_v1.3; commit-bound; multi-file support context; no execution",
+  "schema": "re-megazord-corpus.v1",
+  "source_manifest": "D:\\AetherRE_Megazord\\corpus\\external_juliet_cwe_v1\\manifest.json",
+  "source_manifest_sha256": "90ec40aa4b8a48500aa38b7cc39e355c3e9f8e1ec1529b975c8a392992bef8a3",
+  "support_files": [
+    "io.c",
+    "std_testcase.h",
+    "std_testcase_io.h",
+    "std_thread.c",
+    "std_thread.h"
+  ],
+  "support_source": "D:\\AetherRE_Megazord\\output\\external_sources\\juliet-test-suite-c\\testcasesupport"
+}

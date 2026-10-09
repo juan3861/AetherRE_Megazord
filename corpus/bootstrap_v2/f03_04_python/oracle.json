@@ -1,0 +1,25 @@
+{
+  "expected_indirect_relations": [],
+  "expected_relations": [
+    [
+      "cycle_a",
+      "cycle_b"
+    ],
+    [
+      "cycle_b",
+      "cycle_a"
+    ]
+  ],
+  "expected_symbols": [
+    "main",
+    "cycle_a",
+    "cycle_b"
+  ],
+  "family": "cycle",
+  "known_limits": [
+    "synthetic fixture",
+    "source oracle does not prove binary equivalence"
+  ],
+  "language": "python",
+  "oracle_schema": "re-megazord-oracle.v1"
+}

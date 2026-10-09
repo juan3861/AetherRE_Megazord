@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, asdict
-from typing import Any
+from dataclasses import dataclass, field, asdict, fields
+from typing import Any, Mapping
 from aether_re.kernel_contracts import EpistemicState
 
 
@@ -48,6 +48,26 @@ class FunctionEvidence:
     epistemic_state: EpistemicState = EpistemicState.UNKNOWN
     losses: list[str] = field(default_factory=list)
 
+    @classmethod
+    def from_mapping(cls, item: Mapping[str, Any]) -> FunctionEvidence:
+        """Convert adapter output while preserving unknown fields as raw evidence."""
+        if not isinstance(item, Mapping):
+            raise TypeError("function_evidence_mapping_required")
+        allowed = {field.name for field in fields(cls)}
+        values = {key: value for key, value in item.items() if key in allowed}
+        extras = {key: value for key, value in item.items() if key not in allowed}
+        raw = values.get("raw", {})
+        if not isinstance(raw, Mapping):
+            raise TypeError("function_evidence_raw_mapping_required")
+        merged_raw = dict(raw)
+        if extras:
+            existing = merged_raw.get("adapter_extra_fields", {})
+            if existing and not isinstance(existing, Mapping):
+                raise TypeError("function_evidence_adapter_extra_fields_invalid")
+            merged_raw["adapter_extra_fields"] = {**dict(existing), **extras}
+        values["raw"] = merged_raw
+        return cls(**values)
+
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
@@ -86,6 +106,7 @@ class FunctionConsensus:
 class AnalysisReport:
     target: str
     target_sha256: str = ""
+    target_identity: dict[str, Any] = field(default_factory=dict)
     file_type: str = "unknown"
     size_bytes: int = 0
     entropy: float = 0.0
@@ -93,6 +114,11 @@ class AnalysisReport:
     imports: list[str] = field(default_factory=list)
     exports: list[str] = field(default_factory=list)
     sections: list[dict[str, Any]] = field(default_factory=list)
+    segments: list[dict[str, Any]] = field(default_factory=list)
+    symbols: list[dict[str, Any]] = field(default_factory=list)
+    relocations: list[dict[str, Any]] = field(default_factory=list)
+    needed_libraries: list[str] = field(default_factory=list)
+    dwarf: dict[str, Any] = field(default_factory=dict)
     strings: list[str] = field(default_factory=list)
     decoded_payloads: list[dict[str, Any]] = field(default_factory=list)
     disassembly_snippets: list[dict[str, Any]] = field(default_factory=list)
@@ -106,11 +132,13 @@ class AnalysisReport:
     coverage: dict[str, Any] = field(default_factory=dict)
     limitations: list[str] = field(default_factory=list)
     engines_used: list[str] = field(default_factory=list)
-
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
     case_id: str = ""
     intake_manifest: str = ""
     root_artifact_id: str = ""
     profile_decision: dict[str, Any] = field(default_factory=dict)
     evidence_journal: str = ""
+    ir: dict[str, Any] = field(default_factory=dict)
+    profile: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)

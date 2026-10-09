@@ -1,1 +1,42 @@
-{"schema":"static-workers-lock.v1","workers":[],"policy":{"network":"denied","target_execution":false,"shell":false}}
+{
+  "schema": "static-workers-lock.v1",
+  "workers": [
+    {
+      "name": "rizin",
+      "version": "0.9.1",
+      "official_url": "https://github.com/rizinorg/rizin/releases/tag/v0.9.1",
+      "executable": "C:\\Program Files\\Rizin\\bin\\rizin.exe",
+      "executable_sha256": "4e23543e17d41242152cd38f8bbeafd161ce50af970848794de407f86cc5cca7",
+      "license_spdx": "LGPL-3.0-only",
+      "runtime": "native-windows-x86_64",
+      "profiles": ["native-pe", "native-elf", "macho", "firmware"],
+      "version_argv": ["-v"],
+      "limits": {"cpu_s": 120, "memory_mb": 2048, "wall_s": 180, "output_bytes": 8388608}
+    },
+    {
+      "name": "wabt",
+      "version": "1.0.41",
+      "official_url": "https://github.com/WebAssembly/wabt/releases/download/1.0.41/wabt-1.0.41-windows-x64.tar.gz",
+      "executable": "E:\\AetherRE_Toolchain\\packages\\wabt-1.0.41\\bin\\wasm2wat.exe",
+      "executable_sha256": "d9390afcdba5ab3721c0ea4593f84e445066d97a5e8689f387e7901d675d319c",
+      "license_spdx": "Apache-2.0",
+      "runtime": "native-windows-x86_64",
+      "profiles": ["wasm"],
+      "version_argv": ["--version"],
+      "limits": {"cpu_s": 60, "memory_mb": 512, "wall_s": 90, "output_bytes": 8388608}
+    },
+    {
+      "name": "binaryen",
+      "version": "131",
+      "official_url": "https://github.com/WebAssembly/binaryen/releases/download/version_131/binaryen-version_131-x86_64-windows.tar.gz",
+      "executable": "E:\\AetherRE_Toolchain\\packages\\binaryen-131\\bin\\wasm-opt.exe",
+      "executable_sha256": "a3e857e565f18773e24cb3d81d00baa70cee9be24efe775e1960565fea5e65b3",
+      "license_spdx": "Apache-2.0",
+      "runtime": "native-windows-x86_64",
+      "profiles": ["wasm"],
+      "version_argv": ["--version"],
+      "limits": {"cpu_s": 60, "memory_mb": 512, "wall_s": 90, "output_bytes": 8388608}
+    }
+  ],
+  "policy": {"network": "denied", "target_execution": false, "shell": false}
+}

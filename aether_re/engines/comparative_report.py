@@ -8,7 +8,8 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
-from aether_re.models import AnalysisReport
+from aether_re.models import AnalysisReport, FunctionEvidence
+from aether_re.engines.consensus import _source_agreement
 
 
 def export_function_comparison_csv(report: AnalysisReport, path: Path) -> None:
@@ -58,8 +59,13 @@ def compute_source_agreement_matrix(report: AnalysisReport) -> dict[str, dict[st
             continue
         for i, a in enumerate(sources):
             for b in sources[i + 1:]:
-                pairs[a][b].append(func.source_agreement)
-                pairs[b][a].append(func.source_agreement)
+                left = func.evidence.get(a)
+                right = func.evidence.get(b)
+                if left is None or right is None:
+                    continue
+                pair_score = _source_agreement(FunctionEvidence(**left), FunctionEvidence(**right))
+                pairs[a][b].append(pair_score)
+                pairs[b][a].append(pair_score)
 
     matrix: dict[str, dict[str, float]] = {}
     for a, b_map in pairs.items():

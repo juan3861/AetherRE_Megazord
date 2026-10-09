@@ -1,0 +1,31 @@
+{
+  "projects": [
+    {
+      "authorization": "owned_synthetic",
+      "build_kind": "shared_library",
+      "execution": "not_run_by_bootstrap",
+      "family": "manual_gamma",
+      "id": "manual_gamma",
+      "language": "c",
+      "oracle": "manual_gamma/oracle.json",
+      "oracle_sha256": "9ed16837d41af4ccd1d3f3b57b06e42c2fae5bba85f37771be989146a6643a96",
+      "source": "manual_gamma/src/main.c",
+      "source_sha256": "2f2a9b45b149cb70ad30efb5346b5566551d01221f99eb1a5364f571b6b7b3f2",
+      "split": "holdout"
+    },
+    {
+      "authorization": "owned_synthetic",
+      "execution": "not_run_by_bootstrap",
+      "family": "manual_delta",
+      "id": "manual_delta",
+      "language": "python",
+      "oracle": "manual_delta/oracle.json",
+      "oracle_sha256": "44f2269588f7b181900ce94c23f7e257ab0f5418f04e57334cf4e46ccf284001",
+      "source": "manual_delta/src/main.py",
+      "source_sha256": "b64235d78f2be5bf8b4710efd230fb2122f5d4e3097315f7a1146e1495974a3a",
+      "split": "holdout"
+    }
+  ],
+  "provenance": "manual_author_holdout_v2; independent_from_bootstrap_generator",
+  "schema": "re-megazord-corpus.v1"
+}

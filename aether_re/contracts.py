@@ -81,6 +81,7 @@ class ContractViolation(ValueError):
     pass
 
 WORKER_STATES=frozenset({"succeeded","partial","failed","timed_out","oom","cancelled","malformed_output","unavailable","skipped"})
+CANONICAL_PROFILE_IDS=frozenset({"native-pe","native-elf","dotnet","jvm","android-apk","wasm","macho","firmware"})
 
 @runtime_checkable
 class WorkerAdapter(Protocol):
@@ -113,6 +114,42 @@ class WorkerPlan:
 @dataclass(frozen=True)
 class WorkerResult:
     schema: str; worker: str; state: str; plan_sha256: str; evidence: tuple[Mapping[str,Any],...]; losses: tuple[str,...]; stdout: str; stderr: str; returncode: int|None
+
+@dataclass(frozen=True)
+class CapabilityEnvelope:
+    schema: str; profile_id: str; formats: tuple[str,...]; architectures: tuple[str,...]; abis: tuple[str,...]; endianness: tuple[str,...]; runtimes: tuple[str,...]; protections: tuple[str,...]; modalities: tuple[str,...]; limits: Mapping[str,int]
+
+@dataclass(frozen=True)
+class LossLedger:
+    schema: str; artifact_id: str; transformation: str; preserved: tuple[str,...]; inferred: tuple[str,...]; lost: tuple[str,...]; evidence_refs: tuple[str,...]
+
+def _string_list(value: Any, code: str, *, allow_empty: bool = False) -> tuple[str,...]:
+    if not isinstance(value,list) or (not allow_empty and not value) or any(not isinstance(x,str) or not x.strip() for x in value):
+        raise ContractViolation(code)
+    items=tuple(x.strip() for x in value)
+    if len(items)!=len(set(items)): raise ContractViolation(code)
+    return items
+
+def validate_capability_envelope(value: Mapping[str,Any]) -> CapabilityEnvelope:
+    required={"schema","profile_id","formats","architectures","abis","endianness","runtimes","protections","modalities","limits"}
+    if not isinstance(value,Mapping) or set(value)!=required or value.get("schema")!="capability-envelope.v1": raise ContractViolation("capability_envelope_schema_invalid")
+    profile=value.get("profile_id")
+    if profile not in CANONICAL_PROFILE_IDS: raise ContractViolation("capability_profile_invalid")
+    limits=value.get("limits")
+    if not isinstance(limits,Mapping) or set(limits)!={"max_input_bytes","max_depth","timeout_s"} or any(isinstance(v,bool) or not isinstance(v,int) or v<1 for v in limits.values()): raise ContractViolation("capability_limits_invalid")
+    return CapabilityEnvelope("capability-envelope.v1",profile,_string_list(value.get("formats"),"capability_formats_invalid"),_string_list(value.get("architectures"),"capability_architectures_invalid"),_string_list(value.get("abis"),"capability_abis_invalid"),_string_list(value.get("endianness"),"capability_endianness_invalid"),_string_list(value.get("runtimes"),"capability_runtimes_invalid"),_string_list(value.get("protections"),"capability_protections_invalid"),_string_list(value.get("modalities"),"capability_modalities_invalid"),dict(limits))
+
+def validate_loss_ledger(value: Mapping[str,Any]) -> LossLedger:
+    required={"schema","artifact_id","transformation","preserved","inferred","lost","evidence_refs"}
+    if not isinstance(value,Mapping) or set(value)!=required or value.get("schema")!="loss-ledger.v1": raise ContractViolation("loss_ledger_schema_invalid")
+    artifact=value.get("artifact_id")
+    if not isinstance(artifact,str) or not artifact.startswith("sha256:") or not SHA256_RE.fullmatch(artifact[7:]): raise ContractViolation("loss_ledger_artifact_invalid")
+    preserved=_string_list(value.get("preserved"),"loss_ledger_properties_invalid",allow_empty=True)
+    inferred=_string_list(value.get("inferred"),"loss_ledger_properties_invalid",allow_empty=True)
+    lost=_string_list(value.get("lost"),"loss_ledger_properties_invalid",allow_empty=True)
+    if (set(preserved)&set(inferred)) or (set(preserved)&set(lost)) or (set(inferred)&set(lost)): raise ContractViolation("loss_ledger_overlap")
+    if not (preserved or inferred or lost): raise ContractViolation("loss_ledger_properties_invalid")
+    return LossLedger("loss-ledger.v1",artifact,_strict_string(value.get("transformation"),"loss_ledger_transformation_invalid"),preserved,inferred,lost,_string_list(value.get("evidence_refs"),"loss_ledger_evidence_invalid"))
 
 def validate_worker_probe(value: Mapping[str,Any]) -> WorkerProbe:
     required={"schema","worker","worker_version","executable_sha256","license","capabilities"}

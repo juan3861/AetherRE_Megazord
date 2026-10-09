@@ -2,7 +2,8 @@ from pathlib import Path
 
 from aether_re.engines.ghidra_parse import parse_decompiled_text
 from aether_re.engines.consensus import FunctionEvidence, merge_function_evidence
-from aether_re.models import FunctionConsensus
+from aether_re.models import FunctionConsensus, AnalysisReport
+from aether_re.engines.comparative_report import compute_source_agreement_matrix
 
 
 def test_parse_ghidra_functions_by_marker():
@@ -70,3 +71,15 @@ def test_unknown_address_is_not_merged():
     functions = merge_function_evidence(evidence, ["ghidra", "native"])
     assert len(functions) == 1
     assert functions[0].address == "0x1000"
+
+
+def test_comparative_matrix_uses_pair_specific_evidence():
+    evidence = [
+        FunctionEvidence(address="0x1000", name="foo", source="ghidra", calls=["bar"]),
+        FunctionEvidence(address="0x1000", name="foo", source="rizin", calls=["bar"]),
+        FunctionEvidence(address="0x1000", name="other", source="angr", calls=["unrelated"]),
+    ]
+    merged = merge_function_evidence(evidence, ["ghidra", "rizin", "angr"])
+    report = AnalysisReport(target="matrix-test", merged_functions=merged)
+    matrix = compute_source_agreement_matrix(report)
+    assert matrix["ghidra"]["rizin"] > matrix["ghidra"]["angr"]

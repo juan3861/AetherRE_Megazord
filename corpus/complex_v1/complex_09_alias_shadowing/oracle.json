@@ -1,0 +1,23 @@
+{
+  "case_labels": {
+    "homonymous_functions": 2,
+    "leaf_name_metric_loses_identity": true
+  },
+  "expected_relations": [
+    [
+      "run",
+      "handle"
+    ]
+  ],
+  "expected_symbols": [
+    "handle",
+    "run"
+  ],
+  "family": "alias_shadowing",
+  "known_limits": [
+    "same-author synthetic oracle, not independent",
+    "static source expectations are not runtime truth"
+  ],
+  "language": "python",
+  "oracle_schema": "re-megazord-oracle.v1"
+}

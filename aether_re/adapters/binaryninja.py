@@ -38,8 +38,10 @@ class BinaryNinjaAdapter(Adapter):
         if not self.available():
             return {
                 "ok": False,
+                "available": False,
                 "executed": False,
                 "produced_evidence": False,
+                "partial": False,
                 "error": "Binary Ninja não disponível (requer licença e API Python)",
                 "hint": "Instale Binary Ninja e adicione a API ao PYTHONPATH",
             }

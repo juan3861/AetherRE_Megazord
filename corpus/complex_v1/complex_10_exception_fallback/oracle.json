@@ -1,0 +1,28 @@
+{
+  "case_labels": {
+    "exception_path": true,
+    "runtime_path_not_proven": true
+  },
+  "expected_relations": [
+    [
+      "safe_run",
+      "parse"
+    ],
+    [
+      "safe_run",
+      "fallback"
+    ]
+  ],
+  "expected_symbols": [
+    "fallback",
+    "safe_run",
+    "parse"
+  ],
+  "family": "exception_fallback",
+  "known_limits": [
+    "same-author synthetic oracle, not independent",
+    "static source expectations are not runtime truth"
+  ],
+  "language": "python",
+  "oracle_schema": "re-megazord-oracle.v1"
+}

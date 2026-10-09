@@ -1,0 +1,19 @@
+{
+  "expected_relations": [
+    [
+      "main",
+      "parser_helper"
+    ]
+  ],
+  "expected_symbols": [
+    "main",
+    "parser_helper"
+  ],
+  "family": "parser",
+  "known_limits": [
+    "synthetic fixture",
+    "source oracle does not prove binary equivalence"
+  ],
+  "language": "c",
+  "oracle_schema": "re-megazord-oracle.v1"
+}

@@ -26,6 +26,10 @@ class UnicornAdapter(Adapter):
         if not self.available():
             return {
                 "ok": False,
+                "available": False,
+                "executed": False,
+                "produced_evidence": False,
+                "partial": False,
                 "error": "unicorn não instalado (pip install unicorn)",
             }
 

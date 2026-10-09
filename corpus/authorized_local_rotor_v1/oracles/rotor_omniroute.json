@@ -1,0 +1,42 @@
+{
+  "case_labels": {
+    "external_re_adjudication": false,
+    "oracle_independent_of_aetherre_bootstrap": true,
+    "oracle_scope": "documented_package_exports_and_upstream_test_inventory",
+    "project_origin": "local_user_owned_rotor_snapshot"
+  },
+  "evidence_tests": [
+    {
+      "path": "oracle_evidence/rotor_omniroute/test_omniroute.py",
+      "sha256": "c6d09cc26e9b1ee466bf9035915af8ca0833ea352f460f6028625cf03fd7772f"
+    },
+    {
+      "path": "oracle_evidence/rotor_omniroute/test_omniroute_equivalence.py",
+      "sha256": "1c58d05426142a15fa8c0d092bc4b380334223cea94324e7648ffbdd7e54afad"
+    }
+  ],
+  "expected_relations": [],
+  "expected_symbols": [
+    "OMNIROUTE_VERSION",
+    "ProviderAdapter",
+    "ProviderCapabilities",
+    "ProviderOperatingState",
+    "ProviderRequest",
+    "ProviderResponse",
+    "CredentialPolicy",
+    "OmniRoute",
+    "RuntimeObservationRecord",
+    "create_observation",
+    "RuntimeObserver",
+    "HistoricalMetrics",
+    "HistoricalAggregator"
+  ],
+  "family": "rotor_omniroute",
+  "known_limits": [
+    "relations are not adjudicated in this intake",
+    "tests are copied as evidence and are not executed by this generator",
+    "no external reviewer or WORM custody"
+  ],
+  "language": "python",
+  "oracle_schema": "re-megazord-oracle.v1"
+}
