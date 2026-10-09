@@ -1,5 +1,10 @@
 [CmdletBinding()]
-param()
+param(
+    # Recuperacao explicita de um parcial de conversao ORFAO e comprovadamente
+    # invalido (sem manifesto de proveniencia e sem estrutura VHDX completa).
+    # Sem este switch o script falha fechado com status existing_vhdx_unbound.
+    [switch]$AllowDiscardInvalidDestination
+)
 
 # RE_Megazord authorized lab bootstrap. This script only provisions an OFF VM;
 # it never starts the guest, executes a sample, enables internet access, or
@@ -116,6 +121,56 @@ function Test-UnsafeVhdStorageAttributes {
     param([Parameter(Mandatory = $true)][IO.FileAttributes]$Attributes)
     $unsafe = [IO.FileAttributes]::SparseFile -bor [IO.FileAttributes]::Compressed -bor [IO.FileAttributes]::Encrypted
     return (($Attributes -band $unsafe) -ne 0)
+}
+
+function Test-VhdxFileStructurallyValid {
+    <#
+    Verifica condicoes NECESSARIAS de um VHDX materializado.
+
+    Nao substitui o parser autoritativo do Hyper-V (Get-VHD), que roda adiante no
+    fluxo. Existe porque uma conversao interrompida pode deixar assinatura e
+    cabecalhos validos com o rodape (ultimo 1 MiB) inteiramente zerado - foi a
+    falha real observada no relatorio hyperv-provision-20261001T081834Z. Um VHDX
+    nesse estado nao pode ser reaproveitado como pai de geracao 2.
+    #>
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $false }
+    $stream = $null
+    try {
+        $stream = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+        if ($stream.Length -lt 2MB) { return $false }
+
+        $signature = New-Object byte[] 8
+        if ($stream.Read($signature, 0, 8) -ne 8) { return $false }
+        if ([Text.Encoding]::ASCII.GetString($signature) -ne 'vhdxfile') { return $false }
+
+        foreach ($offset in @(0x10000, 0x20000)) {
+            $stream.Position = $offset
+            $header = New-Object byte[] 4
+            if ($stream.Read($header, 0, 4) -ne 4) { return $false }
+            if ([Text.Encoding]::ASCII.GetString($header) -ne 'head') { return $false }
+        }
+
+        # O ultimo 1 MiB carrega copias de cabecalho/region table; se estiver
+        # inteiramente zerado a conversao nao terminou.
+        $footerLength = [int][Math]::Min([Int64]1MB, $stream.Length)
+        $footer = New-Object byte[] $footerLength
+        $stream.Position = $stream.Length - $footerLength
+        $total = 0
+        while ($total -lt $footerLength) {
+            $read = $stream.Read($footer, $total, $footerLength - $total)
+            if ($read -le 0) { break }
+            $total += $read
+        }
+        if ($total -ne $footerLength) { return $false }
+        foreach ($value in $footer) {
+            if ($value -ne 0) { return $true }
+        }
+        return $false
+    }
+    catch { return $false }
+    finally { if ($null -ne $stream) { $stream.Dispose() } }
 }
 
 function Get-VhdExtensionForFormat {
@@ -375,7 +430,8 @@ function Resolve-Gen2CompatibleParent {
         [scriptblock]$ConvertAction = { param($Source, $Destination) Convert-VHD -Path $Source -DestinationPath $Destination -VHDType Fixed -ErrorAction Stop | Out-Null },
         [scriptblock]$GetVhdAction = { param($Path) Get-VHD -Path $Path -ComputerName localhost -ErrorAction Stop },
         [scriptblock]$GetItemAction = { param($Path) Get-Item -LiteralPath $Path -Force -ErrorAction Stop },
-        [scriptblock]$GetHashAction = { param($Path) (Get-FileHash -LiteralPath $Path -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant() }
+        [scriptblock]$GetHashAction = { param($Path) (Get-FileHash -LiteralPath $Path -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant() },
+        [switch]$AllowDiscardInvalidDestination
     )
 
     $format = [string]$SourceVhd.VhdFormat
@@ -447,27 +503,55 @@ function Resolve-Gen2CompatibleParent {
     }
 
     $reuse = $false
-    if (Test-Path -LiteralPath $destination -PathType Leaf) {
+    $destinationExists = Test-Path -LiteralPath $destination -PathType Leaf
+    $manifestExists = Test-Path -LiteralPath $manifestPath -PathType Leaf
+    if ($destinationExists) {
         $Result.status = 'validating_existing_vhdx'
-        if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
-            $Result.status = 'existing_vhdx_unbound'
-            throw "Existing converted VHDX has no provenance manifest; refusing to reuse or overwrite: $destination"
+        $existingStructurallyValid = Test-VhdxFileStructurallyValid -Path $destination
+        $Result.existing_vhdx_structurally_valid = $existingStructurallyValid
+        if (-not $manifestExists) {
+            if ($existingStructurallyValid) {
+                $Result.status = 'existing_vhdx_unbound'
+                throw "Existing converted VHDX has no provenance manifest; refusing to reuse or overwrite: $destination"
+            }
+            if (-not $AllowDiscardInvalidDestination) {
+                $Result.status = 'existing_vhdx_unbound'
+                throw "Existing converted VHDX has no provenance manifest and is structurally incomplete; refusing to reuse or overwrite without -AllowDiscardInvalidDestination: $destination"
+            }
+            $partial = & $GetItemAction $destination
+            $Result.discarded_invalid_destination = [ordered]@{
+                path = $destination
+                length_bytes = [Int64]$partial.Length
+                sha256 = [string](& $GetHashAction $destination)
+                reason = 'structurally_invalid_vhdx'
+                discarded_at_utc = [DateTime]::UtcNow.ToString('o')
+            }
+            Remove-Item -LiteralPath $destination -Force -ErrorAction Stop
+            $Result.status = 'discarded_invalid_partial'
+            $destinationExists = $false
         }
-        $manifest = Get-Content -LiteralPath $manifestPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
-        if ($manifest.schema -ne 'hyperv-gen2-parent-conversion.v1' -or
-            $manifest.source_path -ne $SourcePath -or
-            $manifest.source_sha256 -ne $SourceSha256.ToLowerInvariant() -or
-            $manifest.destination_path -ne $destination) {
-            $Result.status = 'existing_vhdx_manifest_mismatch'
-            throw "Converted VHDX provenance does not match the validated source; refusing to reuse or overwrite: $destination"
+        elseif (-not $existingStructurallyValid) {
+            $Result.status = 'existing_vhdx_corrupt'
+            throw "Existing converted VHDX is structurally incomplete (missing footer or region table); refusing to reuse or overwrite: $destination"
         }
-        $reuse = $true
+        else {
+            $manifest = Get-Content -LiteralPath $manifestPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+            if ($manifest.schema -ne 'hyperv-gen2-parent-conversion.v1' -or
+                $manifest.source_path -ne $SourcePath -or
+                $manifest.source_sha256 -ne $SourceSha256.ToLowerInvariant() -or
+                $manifest.destination_path -ne $destination) {
+                $Result.status = 'existing_vhdx_manifest_mismatch'
+                throw "Converted VHDX provenance does not match the validated source; refusing to reuse or overwrite: $destination"
+            }
+            $reuse = $true
+        }
     }
-    elseif (Test-Path -LiteralPath $manifestPath) {
+    elseif ($manifestExists) {
         $Result.status = 'orphan_vhdx_manifest'
         throw "Conversion provenance manifest exists without its VHDX; refusing to overwrite evidence: $manifestPath"
     }
-    else {
+
+    if (-not $reuse) {
         $Result.status = 'conversion_started'
         try {
             & $ConvertAction $SourcePath $destination
@@ -507,6 +591,11 @@ function Resolve-Gen2CompatibleParent {
             }
         }
         throw
+    }
+
+    if (-not (Test-VhdxFileStructurallyValid -Path $destination)) {
+        $Result.status = 'destination_structurally_invalid'
+        throw 'Converted Generation 2 VHDX is structurally incomplete (missing footer or region table); refusing to use it.'
     }
 
     $destinationAttributes = [IO.FileAttributes]$destinationItem.Attributes
@@ -682,13 +771,15 @@ try {
     $report.preflight.free_bytes = [Int64]$driveInfo.AvailableFreeSpace
     $report.preflight.required_free_bytes = $gen2RequiredFree
     $report.stage = 'convert_parent_for_generation2'
+    $report.allow_discard_invalid_destination = [bool]$AllowDiscardInvalidDestination
     $selectedGen2Parent = Resolve-Gen2CompatibleParent `
         -SourcePath $selectedParentVhd `
         -SourceVhd $selectedParentFacts `
         -SourceSha256 $selectedParentSha256 `
         -AvailableFreeBytes ([Int64]$driveInfo.AvailableFreeSpace) `
         -RequiredFreeBytes $gen2RequiredFree `
-        -Result $report.generation2_parent_conversion
+        -Result $report.generation2_parent_conversion `
+        -AllowDiscardInvalidDestination:$AllowDiscardInvalidDestination
     $selectedParentFacts = Get-VHD -Path $selectedGen2Parent -ComputerName localhost -ErrorAction Stop
     $selectedParentFormat = [string]$selectedParentFacts.VhdFormat
     $diffExtension = Get-VhdExtensionForFormat -Format $selectedParentFormat

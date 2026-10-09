@@ -221,7 +221,7 @@ def test_launcher_declares_non_destructive_fixed_copy_policy():
 
 
 def test_generation2_parent_converts_vhd_to_vhdx_and_reuses_verified_copy(tmp_path):
-    result = _run_materialization_harness(tmp_path, r"""
+    result = _run_materialization_harness(tmp_path, _NEW_VHDX_BODY + r"""
 $source = Join-Path $testRoot 'source.vhd'
 [IO.File]::WriteAllBytes($source, [byte[]](1,2,3,4))
 $sourceHash = Get-TestSha256 $source
@@ -233,7 +233,7 @@ $getVhd = { param($Path)
     [pscustomobject]@{ VhdFormat='VHD'; VhdType='Fixed'; Size=[Int64]1048576; ParentPath=$null }
   }
 }
-$convert = { param($Source, $Destination) [IO.File]::WriteAllBytes($Destination, [byte[]](9,8,7,6)) }
+$convert = { param($Source, $Destination) New-TestVhdxFile -Path $Destination -WithFooter $true }
 $first = [ordered]@{}
 $selected1 = Resolve-Gen2CompatibleParent -SourcePath $source -SourceVhd $sourceVhd -SourceSha256 $sourceHash -AvailableFreeBytes 100GB -RequiredFreeBytes 80GB -Result $first -ConvertAction $convert -GetVhdAction $getVhd -GetHashAction { param($Path) Get-TestSha256 $Path }
 $second = [ordered]@{}
@@ -300,3 +300,160 @@ try {{
 """)
     assert result["state"]["status"] == f"{reparse_target}_reparse_point"
     assert "reparse" in result["message"].lower()
+
+
+_NEW_VHDX_BODY = r"""
+function New-TestVhdxFile([string]$Path, [bool]$WithFooter) {
+  $size = 4MB
+  $stream = [IO.File]::Open($Path, [IO.FileMode]::CreateNew, [IO.FileAccess]::ReadWrite, [IO.FileShare]::Read)
+  try {
+    $stream.SetLength($size)
+    $sig = [Text.Encoding]::ASCII.GetBytes('vhdxfile')
+    $stream.Position = 0
+    $stream.Write($sig, 0, $sig.Length)
+    $head = [Text.Encoding]::ASCII.GetBytes('head')
+    $stream.Position = 0x10000
+    $stream.Write($head, 0, 4)
+    $stream.Position = 0x20000
+    $stream.Write($head, 0, 4)
+    if ($WithFooter) {
+      $stream.Position = $size - 4096
+      $stream.Write([byte[]](0x72, 0x65, 0x67, 0x69), 0, 4)
+    }
+    $stream.Flush($true)
+  } finally { $stream.Dispose() }
+}
+"""
+
+
+def test_vhdx_structural_validation_detects_absent_footer(tmp_path):
+    """A truncated conversion (valid headers, zeroed footer) must not validate."""
+    result = _run_materialization_harness(tmp_path, _NEW_VHDX_BODY + r"""
+$good = Join-Path $testRoot 'good.vhdx'
+$bad = Join-Path $testRoot 'bad.vhdx'
+New-TestVhdxFile -Path $good -WithFooter $true
+New-TestVhdxFile -Path $bad -WithFooter $false
+[ordered]@{
+  good = [bool](Test-VhdxFileStructurallyValid -Path $good)
+  bad = [bool](Test-VhdxFileStructurallyValid -Path $bad)
+  absent = [bool](Test-VhdxFileStructurallyValid -Path (Join-Path $testRoot 'absent.vhdx'))
+} | ConvertTo-Json -Compress
+""")
+    assert result["good"] is True
+    assert result["bad"] is False, "VHDX with a zeroed footer/footer region must be rejected"
+    assert result["absent"] is False
+
+
+def test_generation2_reuse_refuses_structurally_invalid_existing_vhdx(tmp_path):
+    """A manifest-bound but corrupt VHDX must never be reused as a Gen2 parent."""
+    result = _run_materialization_harness(tmp_path, _NEW_VHDX_BODY + r"""
+$source = Join-Path $testRoot 'source.vhd'
+[IO.File]::WriteAllBytes($source, [byte[]](1,2,3,4))
+$destination = Join-Path $testRoot 'source.gen2.vhdx'
+New-TestVhdxFile -Path $destination -WithFooter $false
+$sourceHash = Get-TestSha256 $source
+$destinationHash = Get-TestSha256 $destination
+$manifestPath = $destination + '.provenance.json'
+$manifest = [ordered]@{
+  schema = 'hyperv-gen2-parent-conversion.v1'
+  source_path = $source
+  source_sha256 = $sourceHash
+  destination_path = $destination
+  destination_sha256 = $destinationHash
+  destination_format = 'VHDX'
+  destination_type = 'Fixed'
+  virtual_size_bytes = [Int64]1048576
+}
+[IO.File]::WriteAllText($manifestPath, ($manifest | ConvertTo-Json -Depth 5))
+$state = [ordered]@{}
+$message = ''
+try {
+  $selected = Resolve-Gen2CompatibleParent -SourcePath $source `
+    -SourceVhd ([pscustomobject]@{ VhdFormat='VHD'; VhdType='Fixed'; Size=[Int64]1048576; ParentPath=$null }) `
+    -SourceSha256 $sourceHash -AvailableFreeBytes 100GB -RequiredFreeBytes 80GB -Result $state `
+    -ConvertAction { throw 'conversion_must_not_run' } `
+    -GetVhdAction { param($Path) if ([IO.Path]::GetExtension($Path) -eq '.vhdx') { [pscustomobject]@{ VhdFormat='VHDX'; VhdType='Fixed'; Size=[Int64]1048576; ParentPath=$null } } else { [pscustomobject]@{ VhdFormat='VHD'; VhdType='Fixed'; Size=[Int64]1048576; ParentPath=$null } } } `
+    -GetItemAction { param($Path) Get-Item -LiteralPath $Path -Force } `
+    -GetHashAction { param($Path) Get-TestSha256 $Path }
+} catch { $message = $_.Exception.Message }
+[ordered]@{
+  state = $state
+  message = $message
+  destination_preserved = (Test-Path -LiteralPath $destination)
+} | ConvertTo-Json -Depth 10 -Compress
+""")
+    assert result["state"]["status"] == "existing_vhdx_corrupt"
+    assert result["destination_preserved"] is True, "a corrupt artifact must be preserved, not silently deleted"
+
+
+def test_generation2_discards_proven_invalid_partial_only_with_explicit_switch(tmp_path):
+    """Recovery from an orphan partial must be explicit, hash-recorded, and fail closed."""
+    result = _run_materialization_harness(tmp_path, _NEW_VHDX_BODY + r"""
+$source = Join-Path $testRoot 'source.vhd'
+[IO.File]::WriteAllBytes($source, [byte[]](1,2,3,4))
+$destination = Join-Path $testRoot 'source.gen2.vhdx'
+New-TestVhdxFile -Path $destination -WithFooter $false
+$sourceHash = Get-TestSha256 $source
+$partialHash = Get-TestSha256 $destination
+$getVhd = { param($Path) if ([IO.Path]::GetExtension($Path) -eq '.vhdx') { [pscustomobject]@{ VhdFormat='VHDX'; VhdType='Fixed'; Size=[Int64]1048576; ParentPath=$null } } else { [pscustomobject]@{ VhdFormat='VHD'; VhdType='Fixed'; Size=[Int64]1048576; ParentPath=$null } } }
+$convert = {
+  param($Source, $Destination)
+  $size = 4MB
+  $stream = [IO.File]::Open($Destination, [IO.FileMode]::Create, [IO.FileAccess]::ReadWrite, [IO.FileShare]::Read)
+  try {
+    $stream.SetLength($size)
+    $sig = [Text.Encoding]::ASCII.GetBytes('vhdxfile')
+    $stream.Position = 0
+    $stream.Write($sig, 0, $sig.Length)
+    $head = [Text.Encoding]::ASCII.GetBytes('head')
+    $stream.Position = 0x10000
+    $stream.Write($head, 0, 4)
+    $stream.Position = 0x20000
+    $stream.Write($head, 0, 4)
+    $stream.Position = $size - 4096
+    $stream.Write([byte[]](0x72, 0x65, 0x67, 0x69), 0, 4)
+    $stream.Flush($true)
+  } finally { $stream.Dispose() }
+}
+$strict = [ordered]@{}
+$strictMessage = ''
+try {
+  $strictSelected = Resolve-Gen2CompatibleParent -SourcePath $source `
+    -SourceVhd ([pscustomobject]@{ VhdFormat='VHD'; VhdType='Fixed'; Size=[Int64]1048576; ParentPath=$null }) `
+    -SourceSha256 $sourceHash -AvailableFreeBytes 100GB -RequiredFreeBytes 80GB -Result $strict `
+    -ConvertAction $convert -GetVhdAction $getVhd `
+    -GetItemAction { param($Path) Get-Item -LiteralPath $Path -Force } `
+    -GetHashAction { param($Path) Get-TestSha256 $Path }
+} catch { $strictMessage = $_.Exception.Message }
+$strictPreserved = Test-Path -LiteralPath $destination
+
+$recovery = [ordered]@{}
+$recoveryMessage = ''
+try {
+  $recoverySelected = Resolve-Gen2CompatibleParent -SourcePath $source `
+    -SourceVhd ([pscustomobject]@{ VhdFormat='VHD'; VhdType='Fixed'; Size=[Int64]1048576; ParentPath=$null }) `
+    -SourceSha256 $sourceHash -AvailableFreeBytes 100GB -RequiredFreeBytes 80GB -Result $recovery `
+    -AllowDiscardInvalidDestination `
+    -ConvertAction $convert -GetVhdAction $getVhd `
+    -GetItemAction { param($Path) Get-Item -LiteralPath $Path -Force } `
+    -GetHashAction { param($Path) Get-TestSha256 $Path }
+} catch { $recoveryMessage = $_.Exception.Message }
+[ordered]@{
+  strict_status = $strict.status
+  strict_message = $strictMessage
+  strict_preserved = $strictPreserved
+  recovery_status = $recovery.status
+  recovery_message = $recoveryMessage
+  discarded = $recovery.discarded_invalid_destination
+  partial_hash = $partialHash
+  manifest_exists = (Test-Path -LiteralPath ($destination + '.provenance.json'))
+} | ConvertTo-Json -Depth 10 -Compress
+""")
+    # Sem o switch: fail-closed e nada removido.
+    assert result["strict_status"] == "existing_vhdx_unbound"
+    assert result["strict_preserved"] is True
+    # Com o switch: remove o parcial PROVADO inválido, registra o hash e converte.
+    assert result["recovery_status"] == "created_validated_vhdx"
+    assert result["discarded"]["sha256"] == result["partial_hash"]
+    assert result["discarded"]["reason"] == "structurally_invalid_vhdx"
+    assert result["manifest_exists"] is True
