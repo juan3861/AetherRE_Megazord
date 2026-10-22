@@ -1,0 +1,189 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Reverse Engineering Graph (AetherRE Megazord) MCP Integration Configuration",
+  "description": "Ready-to-use Model Context Protocol (MCP) server integration blocks for AetherRE Megazord industrial binary reverse engineering and forensics.",
+  "version": "2.0.0",
+  "server_command": "E:\\AetherRE_Toolchain\\venv_core_replay_20260924_a\\Scripts\\python.exe",
+  "server_args": [
+    "D:\\AetherRE_Megazord\\megazord.py",
+    "mcp"
+  ],
+  "integrations": {
+    "antigravity": {
+      "comment": "Place inside ~/.gemini/antigravity/mcp_servers.json or workspace mcp configuration",
+      "mcpServers": {
+        "aetherre-megazord": {
+          "command": "E:\\AetherRE_Toolchain\\venv_core_replay_20260924_a\\Scripts\\python.exe",
+          "args": [
+            "D:\\AetherRE_Megazord\\megazord.py",
+            "mcp"
+          ],
+          "env": {
+            "PYTHONPATH": "D:\\AetherRE_Megazord",
+            "PYTHONIOENCODING": "utf-8",
+            "JAVA_HOME": "E:\\AetherRE_Toolchain\\jdk-21",
+            "GHIDRA_INSTALL_DIR": "E:\\AetherRE_Toolchain\\ghidra_12.1.4_PUBLIC"
+          }
+        }
+      }
+    },
+    "claude_desktop": {
+      "comment": "Place inside %APPDATA%\\Claude\\claude_desktop_config.json",
+      "mcpServers": {
+        "aetherre-megazord": {
+          "command": "E:\\AetherRE_Toolchain\\venv_core_replay_20260924_a\\Scripts\\python.exe",
+          "args": [
+            "D:\\AetherRE_Megazord\\megazord.py",
+            "mcp"
+          ],
+          "env": {
+            "PYTHONPATH": "D:\\AetherRE_Megazord",
+            "PYTHONIOENCODING": "utf-8",
+            "JAVA_HOME": "E:\\AetherRE_Toolchain\\jdk-21",
+            "GHIDRA_INSTALL_DIR": "E:\\AetherRE_Toolchain\\ghidra_12.1.4_PUBLIC"
+          }
+        }
+      }
+    },
+    "cursor": {
+      "comment": "Place inside .cursor/mcp.json or Cursor Features Settings -> MCP",
+      "mcpServers": {
+        "aetherre-megazord": {
+          "command": "E:\\AetherRE_Toolchain\\venv_core_replay_20260924_a\\Scripts\\python.exe",
+          "args": [
+            "D:\\AetherRE_Megazord\\megazord.py",
+            "mcp"
+          ],
+          "env": {
+            "PYTHONPATH": "D:\\AetherRE_Megazord",
+            "PYTHONIOENCODING": "utf-8",
+            "JAVA_HOME": "E:\\AetherRE_Toolchain\\jdk-21",
+            "GHIDRA_INSTALL_DIR": "E:\\AetherRE_Toolchain\\ghidra_12.1.4_PUBLIC"
+          }
+        }
+      }
+    },
+    "gemini_cli": {
+      "comment": "Place inside ~/.gemini/settings.json under mcp.servers",
+      "mcp": {
+        "servers": {
+          "aetherre-megazord": {
+            "command": "E:\\AetherRE_Toolchain\\venv_core_replay_20260924_a\\Scripts\\python.exe",
+            "args": [
+              "D:\\AetherRE_Megazord\\megazord.py",
+              "mcp"
+            ],
+            "env": {
+              "PYTHONPATH": "D:\\AetherRE_Megazord",
+              "PYTHONIOENCODING": "utf-8",
+              "JAVA_HOME": "E:\\AetherRE_Toolchain\\jdk-21",
+              "GHIDRA_INSTALL_DIR": "E:\\AetherRE_Toolchain\\ghidra_12.1.4_PUBLIC"
+            }
+          }
+        }
+      }
+    }
+  },
+  "tools": [
+    {
+      "name": "aether_ghidra_decompile",
+      "summary": "Industrial NSA Ghidra 12.1.4 headless decompiler with C struct type injection and High P-Code extraction."
+    },
+    {
+      "name": "aether_webcrack",
+      "summary": "Webpack/Rollup unbundling, control-flow unflattening, and string array deobfuscation via webcrack 2.16.0."
+    },
+    {
+      "name": "aether_minidump_audit",
+      "summary": "Forensic audit of Windows MiniDump (.dmp) memory dumps for modules and anomalous RWX executable pages."
+    },
+    {
+      "name": "aether_ground_truth_eval",
+      "summary": "Mathematical ground-truth fidelity evaluator comparing decompiled C against reference source code."
+    },
+    {
+      "name": "aether_status",
+      "summary": "Adapter, engine, and toolchain lock readiness status."
+    },
+    {
+      "name": "aether_triage",
+      "summary": "Rapid magic identification, SHA-256 calculation, and Shannon entropy computation."
+    },
+    {
+      "name": "aether_inspect",
+      "summary": "Full multi-engine static reverse engineering with cross-engine consensus."
+    },
+    {
+      "name": "aether_detect_capabilities",
+      "summary": "FLARE-CAPA semantic capability engine mapped to MITRE ATT&CK techniques."
+    },
+    {
+      "name": "aether_strings_forensic",
+      "summary": "Forensic categorized strings extraction (URLs, IPs, Registry keys, paths, hashes)."
+    },
+    {
+      "name": "aether_firmware_qualify",
+      "summary": "Firmware memory layout qualification and boundary overlap enforcement."
+    },
+    {
+      "name": "aether_source_analyze",
+      "summary": "AST static source code audit without importing or executing untrusted code."
+    },
+    {
+      "name": "aether_unpack",
+      "summary": "Bounded container unpacking (ASAR, ZIP, TAR, firmware, PyInstaller) with zip-slip protection."
+    },
+    {
+      "name": "aether_symbolic_explore",
+      "summary": "Bounded symbolic path reachability evaluation via angr solver."
+    },
+    {
+      "name": "aether_binary_diff",
+      "summary": "Structural binary diffing (BinDiff/Diaphora style) for 1-day patch and function mutation analysis."
+    },
+    {
+      "name": "aether_generate_yara",
+      "summary": "Forensic YARA and Sigma threat signature synthesis with automated false-positive noise reduction."
+    },
+    {
+      "name": "aether_export_graph",
+      "summary": "Universal callgraph and CFG exporter for Mermaid (Markdown/Obsidian), Graphviz DOT, and JSON Graph."
+    },
+    {
+      "name": "aether_function_simhash",
+      "summary": "Locality sensitive SimHash and Imphash computation for function similarity search."
+    },
+    {
+      "name": "aether_packer_detect",
+      "summary": "Compiler and runtime packer detection through PE section entropy heuristics."
+    },
+    {
+      "name": "aether_graph_analytics",
+      "summary": "Graph topological metrics, cyclomatic complexity, and connected components."
+    },
+    {
+      "name": "aether_cfg_dominance",
+      "summary": "Immediate dominators, natural loops, and control flow graph reducibility analysis."
+    },
+    {
+      "name": "aether_deobfuscate",
+      "summary": "Mixed Boolean-Arithmetic (MBA) simplification and opaque predicate detection via Z3."
+    },
+    {
+      "name": "aether_abi_infer",
+      "summary": "Heuristic calling convention inference and C function prototype reconstruction."
+    },
+    {
+      "name": "aether_taint_slice",
+      "summary": "Interprocedural program dependence graph (PDG) and forward/backward taint slicing."
+    },
+    {
+      "name": "aether_struct_recovery",
+      "summary": "C struct layout reconstruction from base pointer memory dereference offsets."
+    },
+    {
+      "name": "aether_check_feasibility",
+      "summary": "Z3-based branch constraint satisfaction (SAT/UNSAT) check."
+    }
+  ]
+}

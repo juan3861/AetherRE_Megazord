@@ -1,0 +1,142 @@
+{
+  "binary": "D:\\AetherRE_Megazord\\external_test_repos\\tinyexpr\\tinyexpr.dll",
+  "source": "D:\\AetherRE_Megazord\\external_test_repos\\tinyexpr\\tinyexpr.c",
+  "total_exports": 5,
+  "evaluated_exports": 5,
+  "perfect_fidelity_count_100pct": 2,
+  "high_fidelity_count_gte_70pct": 4,
+  "average_library_fidelity_score_pct": 81.4,
+  "decompilation_elapsed_seconds": 58.78,
+  "functions": [
+    {
+      "ordinal": 1,
+      "name": "te_compile",
+      "status": "PASS",
+      "score_pct": 90.0,
+      "calls_preservation_pct": 80.0,
+      "fields_preservation_pct": 100.0,
+      "loop_preserved": true,
+      "branch_preserved": true,
+      "original_calls": [
+        "list",
+        "next_token",
+        "optimize",
+        "te_compile",
+        "te_free"
+      ],
+      "decompiled_calls": [
+        "list",
+        "optimize",
+        "te_compile",
+        "te_free",
+        "thunk_FUN_1800113e0",
+        "undefined1"
+      ],
+      "preserved_calls": [
+        "list",
+        "optimize",
+        "te_compile",
+        "te_free"
+      ]
+    },
+    {
+      "ordinal": 2,
+      "name": "te_eval",
+      "status": "PARTIAL",
+      "score_pct": 42.0,
+      "calls_preservation_pct": 20.0,
+      "fields_preservation_pct": 0.0,
+      "loop_preserved": true,
+      "branch_preserved": true,
+      "original_calls": [
+        "ARITY",
+        "M",
+        "TE_FUN",
+        "TYPE_MASK",
+        "te_eval"
+      ],
+      "decompiled_calls": [
+        "pcVar8",
+        "te_eval"
+      ],
+      "preserved_calls": [
+        "te_eval"
+      ]
+    },
+    {
+      "ordinal": 3,
+      "name": "te_free",
+      "status": "PASS",
+      "score_pct": 100.0,
+      "calls_preservation_pct": 100.0,
+      "fields_preservation_pct": 100.0,
+      "loop_preserved": true,
+      "branch_preserved": true,
+      "original_calls": [
+        "free",
+        "te_free",
+        "te_free_parameters"
+      ],
+      "decompiled_calls": [
+        "free",
+        "te_free",
+        "te_free_parameters"
+      ],
+      "preserved_calls": [
+        "free",
+        "te_free",
+        "te_free_parameters"
+      ]
+    },
+    {
+      "ordinal": 4,
+      "name": "te_interp",
+      "status": "PASS",
+      "score_pct": 100.0,
+      "calls_preservation_pct": 100.0,
+      "fields_preservation_pct": 100.0,
+      "loop_preserved": true,
+      "branch_preserved": true,
+      "original_calls": [
+        "te_compile",
+        "te_eval",
+        "te_free",
+        "te_interp"
+      ],
+      "decompiled_calls": [
+        "te_compile",
+        "te_eval",
+        "te_free",
+        "te_interp",
+        "thunk_FUN_1800113e0",
+        "undefined1"
+      ],
+      "preserved_calls": [
+        "te_compile",
+        "te_eval",
+        "te_free",
+        "te_interp"
+      ]
+    },
+    {
+      "ordinal": 5,
+      "name": "te_print",
+      "status": "PASS",
+      "score_pct": 75.0,
+      "calls_preservation_pct": 50.0,
+      "fields_preservation_pct": 100.0,
+      "loop_preserved": true,
+      "branch_preserved": true,
+      "original_calls": [
+        "pn",
+        "te_print"
+      ],
+      "decompiled_calls": [
+        "te_print"
+      ],
+      "preserved_calls": [
+        "te_print"
+      ]
+    }
+  ]
+}
