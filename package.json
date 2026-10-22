@@ -1,0 +1,9 @@
+{
+  "name": "aether-re-megazord",
+  "version": "1.0.0",
+  "description": "AetherRE SOTA Reverse Engineering and Program Analysis Suite",
+  "type": "commonjs",
+  "devDependencies": {
+    "webcrack": "^2.16.0"
+  }
+}
