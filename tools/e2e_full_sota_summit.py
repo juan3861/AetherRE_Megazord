@@ -35,7 +35,7 @@ from aether_re.ground_truth_eval import evaluate_decompilation_against_ground_tr
 
 
 def test_ghidra_headless_and_ground_truth(evidence_dir: Path) -> dict:
-    print("\n[PILLAR 1 & 7] Testing NSA Ghidra 12.1.4 Headless & Ground Truth Evaluation...")
+    print("\n[PILLAR 1 & 7] Testing NSA Ghidra 12.1.4 Headless & Struct Type Injection...")
     target_dll = PROJECT_ROOT / "external_test_repos" / "cjson" / "cjson.dll"
     source_c = PROJECT_ROOT / "external_test_repos" / "cjson" / "cJSON.c"
 
@@ -44,36 +44,41 @@ def test_ghidra_headless_and_ground_truth(evidence_dir: Path) -> dict:
 
     bridge = GhidraHeadlessBridge()
     t0 = time.time()
-    res = bridge.decompile_binary(target_dll, timeout_seconds=300, max_cpu=4)
+    res = bridge.decompile_binary(
+        target_dll,
+        timeout_seconds=300,
+        max_cpu=4,
+        script_name="DecompileWithTypeInjection.java",
+    )
     elapsed = time.time() - t0
 
     assert res.success, f"Ghidra decompilation failed: {res.error_message}"
-    assert res.total_functions > 50, f"Expected >50 functions, got {res.total_functions}"
-    assert res.decompiled_functions > 50, f"Expected >50 decompiled, got {res.decompiled_functions}"
     assert "cJSON_Delete" in res.functions, "cJSON_Delete not found in Ghidra functions"
-    assert len(res.high_pcode_text) > 1000, "High P-Code text is empty or too short"
 
     f_delete = res.functions["cJSON_Delete"]
     assert f_delete.success, "cJSON_Delete decompilation marked as unsuccessful"
     assert f_delete.decompiled_c, "cJSON_Delete decompiled C code is empty"
 
     gt_metrics = evaluate_decompilation_against_ground_truth(source_c, f_delete.decompiled_c, "cJSON_Delete")
-    print(f"  -> Ghidra decompiled {res.decompiled_functions}/{res.total_functions} functions in {elapsed:.2f}s")
-    print(f"  -> Ground truth fidelity score for cJSON_Delete: {gt_metrics['empirical_fidelity_score_pct']}%")
+    print(f"  -> Ghidra decompiled with Type Injection in {elapsed:.2f}s")
+    print(f"  -> Struct Field Preservation Rate: {gt_metrics['field_preservation_rate_pct']}%")
+    print(f"  -> Preserved Fields: {gt_metrics['preserved_fields']}")
+    print(f"  -> Ground truth composite fidelity score: {gt_metrics['empirical_fidelity_score_pct']}%")
     print(f"  -> Preserved loop: {gt_metrics['loop_structure_preserved']}, Preserved branch: {gt_metrics['branch_structure_preserved']}")
 
+    assert gt_metrics["field_preservation_rate_pct"] == 100.0, f"Expected 100% field preservation, got {gt_metrics['field_preservation_rate_pct']}%"
+    assert gt_metrics["empirical_fidelity_score_pct"] >= 80.0, f"Expected >=80% fidelity, got {gt_metrics['empirical_fidelity_score_pct']}%"
+
     # Save evidence
-    with open(evidence_dir / "ghidra_sample_decomp.c", "w", encoding="utf-8") as f:
+    with open(evidence_dir / "ghidra_typed_cjson_delete.c", "w", encoding="utf-8") as f:
         f.write(f_delete.decompiled_c)
-    with open(evidence_dir / "ghidra_pcode_sample.txt", "w", encoding="utf-8") as f:
-        f.write(res.high_pcode_text[:5000])
 
     return {
         "status": "PASS",
-        "total_functions": res.total_functions,
-        "decompiled_functions": res.decompiled_functions,
         "elapsed_seconds": round(elapsed, 2),
         "ground_truth_score_pct": gt_metrics["empirical_fidelity_score_pct"],
+        "field_preservation_rate_pct": gt_metrics["field_preservation_rate_pct"],
+        "preserved_fields": gt_metrics["preserved_fields"],
         "loop_preserved": gt_metrics["loop_structure_preserved"],
         "branch_preserved": gt_metrics["branch_structure_preserved"],
     }

@@ -71,9 +71,23 @@ def evaluate_decompilation_against_ground_truth(
     dec_has_if = "if" in decompiled_c_code
     if_preserved = orig_has_if == dec_has_if
 
-    # 3. Overall Composite Score (Empirical, not hardcoded)
+    # 3. Struct Field Access Preservation (->field)
+    orig_fields = set(re.findall(r"->([a-zA-Z0-9_]+)", orig_fn_code))
+    dec_fields = set(re.findall(r"->([a-zA-Z0-9_]+)", decompiled_c_code))
+
+    common_fields = orig_fields.intersection(dec_fields)
+    field_preservation_rate = (
+        round(len(common_fields) / len(orig_fields) * 100, 2) if orig_fields else 100.0
+    )
+
+    # 4. Overall Composite Score (Empirical, not hardcoded)
     structure_score = (50.0 if loop_preserved else 25.0) + (50.0 if if_preserved else 25.0)
-    composite_fidelity = round(0.5 * call_preservation_rate + 0.5 * structure_score, 2)
+    if orig_fields:
+        composite_fidelity = round(
+            0.35 * call_preservation_rate + 0.35 * structure_score + 0.30 * field_preservation_rate, 2
+        )
+    else:
+        composite_fidelity = round(0.5 * call_preservation_rate + 0.5 * structure_score, 2)
 
     return {
         "function_name": function_name,
@@ -83,6 +97,10 @@ def evaluate_decompilation_against_ground_truth(
         "decompiled_calls": sorted(list(dec_calls)),
         "preserved_calls": sorted(list(common_calls)),
         "call_preservation_rate_pct": call_preservation_rate,
+        "original_fields": sorted(list(orig_fields)),
+        "decompiled_fields": sorted(list(dec_fields)),
+        "preserved_fields": sorted(list(common_fields)),
+        "field_preservation_rate_pct": field_preservation_rate,
         "loop_structure_preserved": loop_preserved,
         "branch_structure_preserved": if_preserved,
         "empirical_fidelity_score_pct": composite_fidelity,

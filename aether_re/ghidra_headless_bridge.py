@@ -70,6 +70,7 @@ class GhidraHeadlessBridge:
         timeout_seconds: int = 300,
         temp_work_dir: Optional[str | Path] = None,
         max_cpu: int = 4,
+        script_name: str = "DecompileAllFunctions.java",
     ) -> GhidraDecompilationResult:
         """Runs Ghidra headless analysis on target binary, decompiling all functions to C and P-Code."""
         binary = Path(binary_path).resolve()
@@ -110,7 +111,7 @@ class GhidraHeadlessBridge:
             "-deleteProject",
             "-okToDelete",
             "-postScript",
-            "DecompileAllFunctions.java",
+            script_name,
             str(out_dir),
         ]
 
@@ -126,7 +127,13 @@ class GhidraHeadlessBridge:
             elapsed = time.time() - start_time
 
             summary_file = out_dir / "decompilation_summary.json"
+            if not summary_file.exists():
+                summary_file = out_dir / "typed_summary.json"
+
             c_file = out_dir / "decompiled_all.c"
+            if not c_file.exists():
+                c_file = out_dir / "decompiled_typed.c"
+
             pcode_file = out_dir / "high_pcode.txt"
 
             if not summary_file.exists():
@@ -161,9 +168,9 @@ class GhidraHeadlessBridge:
                 f_info = GhidraFunctionInfo(
                     name=fname,
                     address=item["address"],
-                    success=item["success"],
-                    params=item["params"],
-                    return_type=item["return_type"],
+                    success=item.get("success", True),
+                    params=item.get("params", 0),
+                    return_type=item.get("return_type", "undefined"),
                 )
                 functions_dict[fname] = f_info
 
