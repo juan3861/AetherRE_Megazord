@@ -27,26 +27,34 @@ def evaluate_decompilation_against_ground_truth(
     orig_source = orig_path.read_text(encoding="utf-8", errors="ignore")
 
     # Extract function from original C source
-    idx = orig_source.find(f" {function_name}(")
-    if idx == -1:
-        idx = orig_source.find(f"*{function_name}(")
-    if idx == -1:
-        idx = orig_source.find(f"\n{function_name}(")
+    def _extract_c_function(src: str, name: str) -> str:
+        pos = src.find(f" {name}(")
+        if pos == -1: pos = src.find(f"*{name}(")
+        if pos == -1: pos = src.find(f"\n{name}(")
+        if pos == -1: return ""
+        start_brace = src.find("{", pos)
+        if start_brace == -1: return ""
+        depth = 0
+        for i in range(start_brace, len(src)):
+            if src[i] == "{":
+                depth += 1
+            elif src[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    return src[pos : i + 1]
+        return ""
 
-    orig_fn_code = ""
-    if idx != -1:
-        # Find start of body '{'
-        start_brace = orig_source.find("{", idx)
-        if start_brace != -1:
-            depth = 0
-            for i in range(start_brace, len(orig_source)):
-                if orig_source[i] == "{":
-                    depth += 1
-                elif orig_source[i] == "}":
-                    depth -= 1
-                    if depth == 0:
-                        orig_fn_code = orig_source[idx : i + 1]
-                        break
+    orig_fn_code = _extract_c_function(orig_source, function_name)
+
+    # Detect inlined static wrappers (e.g., return add_item_to_array(array, item))
+    effective_orig_code = orig_fn_code
+    if orig_fn_code and orig_fn_code.count(";") <= 3:
+        ret_match = re.search(r"return\s+([a-zA-Z0-9_]+)\s*\(", orig_fn_code)
+        if ret_match:
+            helper_name = ret_match.group(1)
+            helper_code = _extract_c_function(orig_source, helper_name)
+            if helper_code:
+                effective_orig_code = orig_fn_code + "\n" + helper_code
 
     # 1. Compare Function Calls (Callee preservation, including dereferenced pointers (*fn)(...))
     c_keywords = {"if", "while", "for", "switch", "sizeof", "return", "do", "code"}
@@ -54,7 +62,7 @@ def evaluate_decompilation_against_ground_truth(
 
     orig_calls = {
         m.group(1) or m.group(2)
-        for m in call_pattern.finditer(orig_fn_code)
+        for m in call_pattern.finditer(effective_orig_code)
     } - c_keywords
 
     dec_calls = {
@@ -68,16 +76,16 @@ def evaluate_decompilation_against_ground_truth(
     )
 
     # 2. Control flow structures
-    orig_has_loop = bool(re.search(r"\b(while|for|do)\b", orig_fn_code))
+    orig_has_loop = bool(re.search(r"\b(while|for|do)\b", effective_orig_code))
     dec_has_loop = bool(re.search(r"\b(while|for|do)\b", decompiled_c_code))
     loop_preserved = orig_has_loop == dec_has_loop
 
-    orig_has_if = "if" in orig_fn_code
+    orig_has_if = "if" in effective_orig_code
     dec_has_if = "if" in decompiled_c_code
     if_preserved = orig_has_if == dec_has_if
 
     # 3. Struct Field Access Preservation (->field)
-    orig_fields = set(re.findall(r"->([a-zA-Z0-9_]+)", orig_fn_code))
+    orig_fields = set(re.findall(r"->([a-zA-Z0-9_]+)", effective_orig_code))
     dec_fields = set(re.findall(r"->([a-zA-Z0-9_]+)", decompiled_c_code))
 
     common_fields = orig_fields.intersection(dec_fields)
