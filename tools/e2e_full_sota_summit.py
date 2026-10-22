@@ -67,7 +67,8 @@ def test_ghidra_headless_and_ground_truth(evidence_dir: Path) -> dict:
     print(f"  -> Preserved loop: {gt_metrics['loop_structure_preserved']}, Preserved branch: {gt_metrics['branch_structure_preserved']}")
 
     assert gt_metrics["field_preservation_rate_pct"] == 100.0, f"Expected 100% field preservation, got {gt_metrics['field_preservation_rate_pct']}%"
-    assert gt_metrics["empirical_fidelity_score_pct"] >= 80.0, f"Expected >=80% fidelity, got {gt_metrics['empirical_fidelity_score_pct']}%"
+    assert gt_metrics["call_preservation_rate_pct"] == 100.0, f"Expected 100% call preservation, got {gt_metrics['call_preservation_rate_pct']}%"
+    assert gt_metrics["empirical_fidelity_score_pct"] == 100.0, f"Expected 100.0% fidelity, got {gt_metrics['empirical_fidelity_score_pct']}%"
 
     # Save evidence
     with open(evidence_dir / "ghidra_typed_cjson_delete.c", "w", encoding="utf-8") as f:

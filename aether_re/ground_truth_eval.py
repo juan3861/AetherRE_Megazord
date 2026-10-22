@@ -48,14 +48,19 @@ def evaluate_decompilation_against_ground_truth(
                         orig_fn_code = orig_source[idx : i + 1]
                         break
 
-    # 1. Compare Function Calls (Callee preservation)
-    orig_calls = set(re.findall(r"\b([a-zA-Z0-9_]+)\s*\(", orig_fn_code))
-    dec_calls = set(re.findall(r"\b([a-zA-Z0-9_]+)\s*\(", decompiled_c_code))
+    # 1. Compare Function Calls (Callee preservation, including dereferenced pointers (*fn)(...))
+    c_keywords = {"if", "while", "for", "switch", "sizeof", "return", "do", "code"}
+    call_pattern = re.compile(r"(?:\(\s*\*\s*(?:\([^)]+\)\s*)?([a-zA-Z0-9_]+)\s*\)|\b([a-zA-Z0-9_]+))\s*\(")
 
-    # Exclude C keywords from calls
-    c_keywords = {"if", "while", "for", "switch", "sizeof", "return", "do"}
-    orig_calls -= c_keywords
-    dec_calls -= c_keywords
+    orig_calls = {
+        m.group(1) or m.group(2)
+        for m in call_pattern.finditer(orig_fn_code)
+    } - c_keywords
+
+    dec_calls = {
+        m.group(1) or m.group(2)
+        for m in call_pattern.finditer(decompiled_c_code)
+    } - c_keywords
 
     common_calls = orig_calls.intersection(dec_calls)
     call_preservation_rate = (

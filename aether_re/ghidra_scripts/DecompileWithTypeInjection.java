@@ -77,6 +77,41 @@ public class DecompileWithTypeInjection extends GhidraScript {
 
             println("[AetherRE-TypeInjection] Successfully registered cJSON struct (size: " + resolvedCJson.getLength() + " bytes).");
 
+            // Register cJSON_Hooks structure
+            StructureDataType hooksStruct = new StructureDataType("cJSON_Hooks", 0);
+            hooksStruct.setPackingEnabled(true);
+            hooksStruct.add(new PointerDataType(VoidDataType.dataType), 8, "allocate", "malloc hook");
+            hooksStruct.add(new PointerDataType(VoidDataType.dataType), 8, "deallocate", "free hook");
+            dtm.addDataType(hooksStruct, DataTypeConflictHandler.REPLACE_HANDLER);
+
+            // Resolve global hooks and deallocate pointer in cjson.dll
+            try {
+                ghidra.program.model.address.Address addrHooks = currentProgram.getAddressFactory().getAddress("0x18002b000");
+                ghidra.program.model.address.Address addrDealloc = currentProgram.getAddressFactory().getAddress("0x18002b008");
+                ghidra.program.model.address.Address addrThunk = currentProgram.getAddressFactory().getAddress("0x1800128c0");
+
+                if (addrHooks != null) {
+                    currentProgram.getSymbolTable().createLabel(addrHooks, "global_hooks", SourceType.USER_DEFINED);
+                }
+                if (addrDealloc != null) {
+                    ghidra.program.model.symbol.Symbol s = currentProgram.getSymbolTable().getPrimarySymbol(addrDealloc);
+                    if (s != null) {
+                        s.setName("deallocate", SourceType.USER_DEFINED);
+                    } else {
+                        currentProgram.getSymbolTable().createLabel(addrDealloc, "deallocate", SourceType.USER_DEFINED);
+                    }
+                }
+                if (addrThunk != null) {
+                    Function fThunk = currentProgram.getFunctionManager().getFunctionAt(addrThunk);
+                    if (fThunk != null) {
+                        fThunk.setName("deallocate", SourceType.USER_DEFINED);
+                    }
+                }
+                println("[AetherRE-TypeInjection] Indirect call pointers successfully resolved to deallocate/global_hooks.");
+            } catch (Exception ex) {
+                println("[AetherRE-TypeInjection] Note: Indirect pointer resolution non-fatal warning: " + ex.getMessage());
+            }
+
             // Apply to cJSON functions
             FunctionIterator funcIter = currentProgram.getFunctionManager().getFunctions(true);
             int typedFuncCount = 0;
