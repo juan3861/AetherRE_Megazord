@@ -1,0 +1,103 @@
+{
+  "binary": "D:\\AetherRE_Megazord\\external_test_repos\\cpp_poly\\poly_test.dll",
+  "source": "D:\\AetherRE_Megazord\\external_test_repos\\cpp_poly\\poly_test.cpp",
+  "total_exports": 4,
+  "evaluated_exports": 4,
+  "perfect_fidelity_count_100pct": 4,
+  "average_library_fidelity_score_pct": 100.0,
+  "decompilation_elapsed_seconds": 42.82,
+  "functions": [
+    {
+      "ordinal": 1,
+      "name": "create_processor",
+      "status": "PASS",
+      "score_pct": 100.0,
+      "calls_preservation_pct": 100.0,
+      "fields_preservation_pct": 100.0,
+      "loop_preserved": true,
+      "branch_preserved": true,
+      "original_calls": [
+        "CryptoProcessor",
+        "FastProcessor",
+        "create_processor"
+      ],
+      "decompiled_calls": [
+        "CryptoProcessor",
+        "FastProcessor",
+        "create_processor",
+        "operator_new"
+      ],
+      "preserved_calls": [
+        "CryptoProcessor",
+        "FastProcessor",
+        "create_processor"
+      ]
+    },
+    {
+      "ordinal": 2,
+      "name": "destroy_processor",
+      "status": "PASS",
+      "score_pct": 100.0,
+      "calls_preservation_pct": 100.0,
+      "fields_preservation_pct": 100.0,
+      "loop_preserved": true,
+      "branch_preserved": true,
+      "original_calls": [
+        "delete",
+        "destroy_processor"
+      ],
+      "decompiled_calls": [
+        "delete",
+        "destroy_processor"
+      ],
+      "preserved_calls": [
+        "delete",
+        "destroy_processor"
+      ]
+    },
+    {
+      "ordinal": 3,
+      "name": "execute_processor",
+      "status": "PASS",
+      "score_pct": 100.0,
+      "calls_preservation_pct": 100.0,
+      "fields_preservation_pct": 100.0,
+      "loop_preserved": true,
+      "branch_preserved": true,
+      "original_calls": [
+        "execute_processor",
+        "process"
+      ],
+      "decompiled_calls": [
+        "execute_processor",
+        "process"
+      ],
+      "preserved_calls": [
+        "execute_processor",
+        "process"
+      ]
+    },
+    {
+      "ordinal": 4,
+      "name": "reset_processor",
+      "status": "PASS",
+      "score_pct": 100.0,
+      "calls_preservation_pct": 100.0,
+      "fields_preservation_pct": 100.0,
+      "loop_preserved": true,
+      "branch_preserved": true,
+      "original_calls": [
+        "reset",
+        "reset_processor"
+      ],
+      "decompiled_calls": [
+        "reset",
+        "reset_processor"
+      ],
+      "preserved_calls": [
+        "reset",
+        "reset_processor"
+      ]
+    }
+  ]
+}

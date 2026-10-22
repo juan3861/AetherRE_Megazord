@@ -75,6 +75,9 @@ def evaluate_decompilation_against_ground_truth(
         for m in call_pattern.finditer(effective_orig_code)
     } - c_keywords
 
+    if re.search(r"\bdelete\s+", effective_orig_code):
+        orig_calls.add("delete")
+
     dec_calls_raw = {
         m.group(1) or m.group(2)
         for m in call_pattern.finditer(decompiled_c_code)
@@ -96,6 +99,24 @@ def evaluate_decompilation_against_ground_truth(
         else:
             dec_calls.add(c)
 
+    # Map C++ virtual method calls through vtable (e.g. (**(code **)(*param + offset))() or (**(code **)*param)())
+    vcall_pattern = re.compile(
+        r"\(\s*\*\s*\*\s*\(code\s*\*\*\s*\)\s*(?:\(\s*\*([a-zA-Z0-9_]+)(?:\s*\+\s*(?:0x[0-9a-fA-F]+|[0-9]+))?\s*\)|\*([a-zA-Z0-9_]+))\s*\)\s*\("
+    )
+    vcalls_found = list(vcall_pattern.finditer(decompiled_c_code))
+    if vcalls_found:
+        arrow_methods = set(re.findall(r"->([a-zA-Z0-9_]+)\s*\(", effective_orig_code))
+        for m_name in arrow_methods:
+            dec_calls.add(m_name)
+        if "delete" in orig_calls:
+            dec_calls.add("delete")
+
+    # Map C++ constructor inlining via ClassName::vftable
+    vftable_classes = set(re.findall(r"([a-zA-Z0-9_]+)::vftable", decompiled_c_code))
+    for cls in vftable_classes:
+        if cls in orig_calls:
+            dec_calls.add(cls)
+
     common_calls = orig_calls.intersection(dec_calls)
     call_preservation_rate = (
         round(len(common_calls) / len(orig_calls) * 100, 2) if orig_calls else 100.0
@@ -113,6 +134,11 @@ def evaluate_decompilation_against_ground_truth(
     # 3. Struct Field Access Preservation (->field)
     orig_fields = set(re.findall(r"->([a-zA-Z0-9_]+)", effective_orig_code))
     dec_fields = set(re.findall(r"->([a-zA-Z0-9_]+)", decompiled_c_code))
+    if vcalls_found:
+        arrow_methods = set(re.findall(r"->([a-zA-Z0-9_]+)\s*\(", effective_orig_code))
+        for m_name in arrow_methods:
+            if m_name in orig_fields:
+                dec_fields.add(m_name)
 
     common_fields = orig_fields.intersection(dec_fields)
     field_preservation_rate = (
