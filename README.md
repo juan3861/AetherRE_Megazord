@@ -1,10 +1,14 @@
-# AetherRE MEGAZORD
+# Reverse Engineering Graph (AetherRE)
 
 Orquestrador de **engenharia reversa + forense de binários** que funde, num único pipeline, o melhor de:
 
 | Fonte | O que o Megazord absorveu |
 |-------|---------------------------|
-| **Ghidra** | Adapter headless de decompilação + modelo de análise SRE |
+| **NSA Ghidra 12.1.4** | Descompilação C industrial headless, High P-Code, injeção de structs C e resolução de vtables C++ |
+| **Webcrack 2.16.0** | Desempacotamento de Webpack/Rollup, desachatamento de fluxo (unflattening) e deobfuscation JS/TS |
+| **Windows DbgHelp** | Captura e auditoria forense de MiniDumps (.dmp), mapeamento de módulos e detecção de memória RWX |
+| **Ground Truth Evaluator** | Avaliação matemática empírica de fidelidade de descompilação contra código C/C++ de referência |
+| **MCP Server (JSON-RPC)** | Servidor nativo Model Context Protocol expondo 25 ferramentas para agentes de IA |
 | **ImHex** | Triage forense, entropia, vista de bytes, padrões |
 | **Cutter/Rizin** | Adapter CLI + disasm estilo radare + análise JSON |
 | **HyperDecode** | Auto-decode multi-camada (Base64/hex/URL/XOR) |
@@ -127,6 +131,21 @@ Relatórios comparativos gerados automaticamente:
 ## CLI
 
 ```powershell
+# Servidor MCP nativo JSON-RPC 2.0 (25 ferramentas registradas)
+py -3.13 megazord.py mcp
+
+# Descompilação C de nível industrial via NSA Ghidra 12.1.4 Headless
+py -3.13 megazord.py ghidra-decompile meu_binario.dll --type-injection --out decompiled.c
+
+# Descompactação e desofuscação de bundles JS/TS via webcrack 2.16.0
+py -3.13 megazord.py webcrack bundle.js --out-dir ./unpacked
+
+# Auditoria forense de arquivo MiniDump Windows (.dmp) para módulos e memória RWX
+py -3.13 megazord.py minidump-audit dump.dmp
+
+# Avaliação matemática de fidelidade contra código-fonte C/C++ de referência (Ground Truth)
+py -3.13 megazord.py ground-truth-bench --target binario.dll --source fonte.c --function nome_funcao
+
 # Status dos adaptadores
 py -3.13 megazord.py status
 
@@ -316,6 +335,25 @@ Opcionais (requerem instalação separada):
 
 Uso legítimo apenas. Ver seção "Uso legítimo" acima.
 
+
+## Resultados de Benchmarks Ground Truth (NSA Ghidra 12.1.4 Headless)
+
+Fidelidade matemática empírica comparando código descompilado contra código-fonte C/C++ de referência:
+
+| Biblioteca | Alvo Compilado | Linguagem | Exports Avaliados | Fidelidade Global | Exports com 100% de Paridade |
+|---|---|---|---|---|---|
+| **cJSON** | `cjson.dll` (x64 `/O2`) | C ANSI | 78 exports | **77.17%** | 17 funções |
+| **TinyExpr** | `tinyexpr.dll` (x64 `/O2`) | C99 | 5 exports | **81.40%** | 2 funções (`te_free`, `te_interp`) |
+| **C++ Poly** | `poly_test.dll` (x64 `/O2 /EHsc`) | C++17 Polymorphic | 4 exports | **100.00%** | 4 funções (todas com 100%) |
+
+Relatórios detalhados com diffs e AST preservada em `engineering_evidence/`.
+
+## Servidor MCP (Model Context Protocol)
+
+O Megazord implementa um servidor MCP oficial com 25 ferramentas forenses registradas via JSON-RPC 2.0 stdio:
+
+- Arquivo de configuração de integração: `aetherre-mcp-config.json`
+- Ativação nativa em ferramentas como Gemini CLI, Antigravity, Claude Desktop e Cursor.
 
 ## Evidence Kernel
 
