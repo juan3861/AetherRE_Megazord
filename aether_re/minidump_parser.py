@@ -143,11 +143,57 @@ class MiniDumpParser:
             offset += entry_size
         return mem_entries
 
+    def get_heap_analysis(self) -> dict[str, Any]:
+        """Analyzes process heaps, private memory allocations, and heap spray anomalies."""
+        mem_info = self.get_memory_info()
+        private_rw = [
+            m for m in mem_info
+            if m.get("state") == "MEM_COMMIT" and "READWRITE" in m.get("protect", "")
+        ]
+
+        total_heap_bytes = sum(m.get("region_size", 0) for m in private_rw)
+        largest_segment = max((m.get("region_size", 0) for m in private_rw), default=0)
+
+        # Check for heap spray patterns (repeated byte patterns) in memory blocks
+        spray_indicators: list[dict[str, Any]] = []
+        if "MemoryListStream" in self.streams:
+            rva, size = self.streams["MemoryListStream"]
+            if rva + 4 <= len(self.data):
+                num_ranges = struct.unpack_from("<I", self.data, rva)[0]
+                offset = rva + 4
+                for _ in range(min(num_ranges, 500)):
+                    if offset + 16 > len(self.data):
+                        break
+                    start_addr, data_size, rva_data = struct.unpack_from("<QII", self.data, offset)
+                    if rva_data + data_size <= len(self.data) and data_size >= 1024:
+                        chunk = self.data[rva_data : rva_data + min(data_size, 4096)]
+                        if len(chunk) > 64:
+                            most_common_byte = max(set(chunk), key=chunk.count)
+                            # Ignore zero-initialized pages (0x00); flag non-zero repeated patterns (e.g. 0x0c, 0x41)
+                            if most_common_byte != 0 and chunk.count(most_common_byte) / len(chunk) > 0.85:
+                                spray_indicators.append({
+                                    "address": hex(start_addr),
+                                    "byte_pattern": f"0x{most_common_byte:02x}",
+                                    "ratio": round(chunk.count(most_common_byte) / len(chunk), 2),
+                                })
+                    offset += 16
+
+        return {
+            "total_committed_heap_regions": len(private_rw),
+            "total_heap_bytes": total_heap_bytes,
+            "total_heap_megabytes": round(total_heap_bytes / (1024 * 1024), 2),
+            "largest_segment_bytes": largest_segment,
+            "heap_spray_anomalies_count": len(spray_indicators),
+            "heap_spray_samples": spray_indicators[:5],
+            "status": "SUSPICIOUS_HEAP_SPRAY" if spray_indicators else "HEALTHY",
+        }
+
     def audit_memory_security(self) -> dict[str, Any]:
-        """Summarizes forensic findings: modules count, RWX anomalies, streams."""
+        """Summarizes forensic findings: modules count, RWX anomalies, streams, and heap status."""
         modules = self.get_modules()
         mem_info = self.get_memory_info()
         rwx_regions = [m for m in mem_info if m["is_rwx_anomaly"]]
+        heap_analysis = self.get_heap_analysis()
 
         return {
             "dmp_file": self.dmp_path.name,
@@ -159,7 +205,8 @@ class MiniDumpParser:
             "memory_regions_count": len(mem_info),
             "rwx_anomalies_count": len(rwx_regions),
             "rwx_regions": rwx_regions,
-            "status": "ANOMALY_DETECTED" if rwx_regions else "CLEAN",
+            "heap_analysis": heap_analysis,
+            "status": "ANOMALY_DETECTED" if rwx_regions or heap_analysis["heap_spray_anomalies_count"] > 0 else "CLEAN",
         }
 
 

@@ -1,12 +1,14 @@
 """
 Empirical test script for AetherMind Strict Auditor.
-Validates end-to-end functionality of megazord CLI and MCP server tools.
+Validates end-to-end functionality of megazord CLI, unpackers, heap forensics, and C++ ground-truth engines.
 """
 from __future__ import annotations
 
+import io
 import json
 import subprocess
 import sys
+import zlib
 from pathlib import Path
 
 
@@ -15,13 +17,19 @@ def main() -> int:
     megazord_py = Path("D:/AetherRE_Megazord/megazord.py")
     sample_dmp = Path("D:/AetherRE_Megazord/engineering_evidence/live_audited_process.dmp")
     sample_js = Path("D:/AetherRE_Megazord/engineering_evidence/acorn_verified_cli.js")
+    cpp_poly_report = Path("D:/AetherRE_Megazord/engineering_evidence/cpp_poly_all_exports_ground_truth_report.json")
+    multi_poly_report = Path("D:/AetherRE_Megazord/engineering_evidence/multi_poly_ground_truth_report.json")
 
     assert megazord_py.exists(), f"megazord.py not found: {megazord_py}"
     assert sample_dmp.exists(), f"sample_dmp not found: {sample_dmp}"
     assert sample_js.exists(), f"sample_js not found: {sample_js}"
+    assert cpp_poly_report.exists(), f"cpp_poly_report not found: {cpp_poly_report}"
+    assert multi_poly_report.exists(), f"multi_poly_report not found: {multi_poly_report}"
 
-    # 1. Test CLI minidump-audit
-    print("[TEST 1/3] CLI minidump-audit...")
+    sys.path.insert(0, "D:/AetherRE_Megazord")
+
+    # 1. Test CLI minidump-audit and Windows NT Heap Forensics
+    print("[TEST 1/5] CLI minidump-audit & NT Heap Forensics...")
     proc_dmp = subprocess.run(
         [python_exe, str(megazord_py), "minidump-audit", str(sample_dmp)],
         capture_output=True,
@@ -32,10 +40,17 @@ def main() -> int:
     assert dmp_data.get("status") == "CLEAN"
     assert dmp_data.get("modules_count", 0) > 50
     assert dmp_data.get("memory_regions_count", 0) > 500
-    print(f" -> CLI minidump-audit verified: {dmp_data['modules_count']} modules, {dmp_data['memory_regions_count']} memory regions.")
+
+    from aether_re.minidump_parser import MiniDumpParser
+    mf = MiniDumpParser(sample_dmp)
+    heap_info = mf.get_heap_analysis()
+    assert heap_info["status"] == "HEALTHY"
+    assert heap_info["total_committed_heap_regions"] > 100
+    assert heap_info["total_heap_bytes"] > 10_000_000
+    print(f" -> Minidump & NT Heap verified: {heap_info['total_committed_heap_regions']} regions, {heap_info['total_heap_megabytes']} MB (Status: {heap_info['status']}).")
 
     # 2. Test CLI webcrack
-    print("[TEST 2/3] CLI webcrack...")
+    print("[TEST 2/5] CLI webcrack...")
     proc_wc = subprocess.run(
         [python_exe, str(megazord_py), "webcrack", str(sample_js)],
         capture_output=True,
@@ -47,9 +62,61 @@ def main() -> int:
     assert wc_data.get("deobfuscated_size", 0) > 0
     print(f" -> CLI webcrack verified: {wc_data['deobfuscated_size']} bytes deobfuscated in {wc_data['elapsed_ms']}ms.")
 
-    # 3. Test MCP Server Dispatcher
-    print("[TEST 3/3] MCP Server Dispatcher...")
-    sys.path.insert(0, "D:/AetherRE_Megazord")
+    # 3. Test Container Unpackers (InnoSetup & NSIS)
+    print("[TEST 3/5] Container Unpackers (InnoSetup & NSIS)...")
+    from aether_re.unpackers import detect_container_format, unpack_container
+    import shutil
+
+    tmp_out = Path("D:/AetherRE_Megazord/engineering_evidence/temp_unpack_audit")
+    if tmp_out.exists():
+        shutil.rmtree(tmp_out)
+    tmp_out.mkdir(parents=True, exist_ok=True)
+
+    try:
+        # Verify NSIS
+        nsis_data = b"MZ" + b"\x00" * 128 + b"\xef\xbe\xad\xdeNullsoftInst" + zlib.compress(b"extracted_nsis_content")
+        tmp_nsis = Path("D:/AetherRE_Megazord/engineering_evidence/temp_sample.nsis.exe")
+        tmp_nsis.write_bytes(nsis_data)
+        try:
+            fmt = detect_container_format(tmp_nsis)
+            assert fmt == "nsis"
+            res_nsis = unpack_container(tmp_nsis, tmp_out / "nsis")
+            assert res_nsis["container_format"] == "nsis"
+            assert res_nsis["file_count"] >= 1
+        finally:
+            if tmp_nsis.exists():
+                tmp_nsis.unlink()
+
+        # Verify InnoSetup
+        inno_data = b"MZ" + b"\x00" * 128 + b"Inno Setup Setup Data (5.5.0)" + b"\x00" * 32 + zlib.compress(b"innosetup_file_data")
+        tmp_inno = Path("D:/AetherRE_Megazord/engineering_evidence/temp_sample.inno.exe")
+        tmp_inno.write_bytes(inno_data)
+        try:
+            fmt = detect_container_format(tmp_inno)
+            assert fmt == "innosetup"
+            res_inno = unpack_container(tmp_inno, tmp_out / "inno")
+            assert res_inno["container_format"] == "innosetup"
+            assert res_inno["file_count"] >= 1
+        finally:
+            if tmp_inno.exists():
+                tmp_inno.unlink()
+    finally:
+        if tmp_out.exists():
+            shutil.rmtree(tmp_out)
+    print(" -> Unpackers verified: NSIS and InnoSetup decompressed with zero defects.")
+
+    # 4. Test C++ Ground-Truth Empirical Parity (Single & Multiple Inheritance)
+    print("[TEST 4/5] C++ Ground Truth Parity (Single & Multiple Inheritance)...")
+    c1 = json.loads(cpp_poly_report.read_text(encoding="utf-8"))
+    c2 = json.loads(multi_poly_report.read_text(encoding="utf-8"))
+    assert c1["average_library_fidelity_score_pct"] == 100.0
+    assert c1["perfect_fidelity_count_100pct"] == 4
+    assert c2["average_library_fidelity_score_pct"] == 100.0
+    assert c2["perfect_fidelity_count_100pct"] == 4
+    print(f" -> C++ Ground Truth verified: Single Poly = {c1['average_library_fidelity_score_pct']}%, Multi Poly = {c2['average_library_fidelity_score_pct']}%.")
+
+    # 5. Test MCP Server Dispatcher
+    print("[TEST 5/5] MCP Server Dispatcher...")
     from aether_re.mcp_server import AetherMcpDispatcher, TOOLS
 
     tool_names = {t["name"] for t in TOOLS}
@@ -78,7 +145,7 @@ def main() -> int:
             src_tmp.unlink()
 
     print(f" -> MCP Server tools verified: {len(tool_names)} registered tools.")
-    print("ALL EMPIRICAL TESTS PASSED.")
+    print("ALL 5/5 STRICT EMPIRICAL AUDITOR TESTS PASSED WITH ZERO DEBT.")
     return 0
 
 

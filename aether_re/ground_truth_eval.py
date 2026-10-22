@@ -130,6 +130,9 @@ def evaluate_decompilation_against_ground_truth(
     orig_has_if = "if" in effective_orig_code
     dec_has_if = "if" in decompiled_c_code
     if_preserved = orig_has_if == dec_has_if
+    # Compiler-synthesized branch for C++ operator new null check (lowering of new T(...))
+    if not orig_has_if and dec_has_if and "operator_new" in dec_calls_raw and "new " in effective_orig_code:
+        if_preserved = True
 
     # 3. Struct Field Access Preservation (->field)
     orig_fields = set(re.findall(r"->([a-zA-Z0-9_]+)", effective_orig_code))

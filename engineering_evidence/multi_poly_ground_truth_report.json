@@ -1,0 +1,101 @@
+{
+  "binary": "D:\\AetherRE_Megazord\\external_test_repos\\cpp_poly\\multi_poly.dll",
+  "source": "D:\\AetherRE_Megazord\\external_test_repos\\cpp_poly\\multi_poly.cpp",
+  "paradigm": "C++ Multiple Inheritance (Dual Interface IReader + IWriter)",
+  "total_exports": 4,
+  "evaluated_exports": 4,
+  "perfect_fidelity_count_100pct": 4,
+  "average_library_fidelity_score_pct": 100.0,
+  "decompilation_elapsed_seconds": 43.53,
+  "functions": [
+    {
+      "ordinal": 1,
+      "name": "create_dual_device",
+      "status": "PASS",
+      "score_pct": 100.0,
+      "calls_preservation_pct": 100.0,
+      "fields_preservation_pct": 100.0,
+      "loop_preserved": true,
+      "branch_preserved": true,
+      "original_calls": [
+        "DualDevice",
+        "create_dual_device"
+      ],
+      "decompiled_calls": [
+        "DualDevice",
+        "create_dual_device",
+        "operator_new"
+      ],
+      "preserved_calls": [
+        "DualDevice",
+        "create_dual_device"
+      ]
+    },
+    {
+      "ordinal": 2,
+      "name": "read_from_device",
+      "status": "PASS",
+      "score_pct": 100.0,
+      "calls_preservation_pct": 100.0,
+      "fields_preservation_pct": 100.0,
+      "loop_preserved": true,
+      "branch_preserved": true,
+      "original_calls": [
+        "read_channel",
+        "read_from_device"
+      ],
+      "decompiled_calls": [
+        "read_channel",
+        "read_from_device"
+      ],
+      "preserved_calls": [
+        "read_channel",
+        "read_from_device"
+      ]
+    },
+    {
+      "ordinal": 3,
+      "name": "write_to_device",
+      "status": "PASS",
+      "score_pct": 100.0,
+      "calls_preservation_pct": 100.0,
+      "fields_preservation_pct": 100.0,
+      "loop_preserved": true,
+      "branch_preserved": true,
+      "original_calls": [
+        "write_channel",
+        "write_to_device"
+      ],
+      "decompiled_calls": [
+        "write_channel",
+        "write_to_device"
+      ],
+      "preserved_calls": [
+        "write_channel",
+        "write_to_device"
+      ]
+    },
+    {
+      "ordinal": 4,
+      "name": "destroy_dual_device",
+      "status": "PASS",
+      "score_pct": 100.0,
+      "calls_preservation_pct": 100.0,
+      "fields_preservation_pct": 100.0,
+      "loop_preserved": true,
+      "branch_preserved": true,
+      "original_calls": [
+        "delete",
+        "destroy_dual_device"
+      ],
+      "decompiled_calls": [
+        "delete",
+        "destroy_dual_device"
+      ],
+      "preserved_calls": [
+        "delete",
+        "destroy_dual_device"
+      ]
+    }
+  ]
+}
