@@ -1,6 +1,6 @@
 """
 Empirical test script for AetherMind Strict Auditor.
-Validates end-to-end functionality of megazord CLI, unpackers, heap forensics, C++ ground-truth, and crypto detection engines.
+Validates end-to-end functionality of megazord CLI, unpackers, heap forensics, C++ ground-truth, crypto detection, and Golang symbol recovery engines.
 """
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ def main() -> int:
     sys.path.insert(0, "D:/AetherRE_Megazord")
 
     # 1. Test CLI minidump-audit and Windows NT Heap Forensics
-    print("[TEST 1/6] CLI minidump-audit & NT Heap Forensics...")
+    print("[TEST 1/7] CLI minidump-audit & NT Heap Forensics...")
     proc_dmp = subprocess.run(
         [python_exe, str(megazord_py), "minidump-audit", str(sample_dmp)],
         capture_output=True,
@@ -50,7 +50,7 @@ def main() -> int:
     print(f" -> Minidump & NT Heap verified: {heap_info['total_committed_heap_regions']} regions, {heap_info['total_heap_megabytes']} MB (Status: {heap_info['status']}).")
 
     # 2. Test CLI webcrack
-    print("[TEST 2/6] CLI webcrack...")
+    print("[TEST 2/7] CLI webcrack...")
     proc_wc = subprocess.run(
         [python_exe, str(megazord_py), "webcrack", str(sample_js)],
         capture_output=True,
@@ -63,7 +63,7 @@ def main() -> int:
     print(f" -> CLI webcrack verified: {wc_data['deobfuscated_size']} bytes deobfuscated in {wc_data['elapsed_ms']}ms.")
 
     # 3. Test Container Unpackers (InnoSetup & NSIS)
-    print("[TEST 3/6] Container Unpackers (InnoSetup & NSIS)...")
+    print("[TEST 3/7] Container Unpackers (InnoSetup & NSIS)...")
     from aether_re.unpackers import detect_container_format, unpack_container
     import shutil
 
@@ -106,7 +106,7 @@ def main() -> int:
     print(" -> Unpackers verified: NSIS and InnoSetup decompressed with zero defects.")
 
     # 4. Test C++ Ground-Truth Empirical Parity (Single & Multiple Inheritance)
-    print("[TEST 4/6] C++ Ground Truth Parity (Single & Multiple Inheritance)...")
+    print("[TEST 4/7] C++ Ground Truth Parity (Single & Multiple Inheritance)...")
     c1 = json.loads(cpp_poly_report.read_text(encoding="utf-8"))
     c2 = json.loads(multi_poly_report.read_text(encoding="utf-8"))
     assert c1["average_library_fidelity_score_pct"] == 100.0
@@ -116,7 +116,7 @@ def main() -> int:
     print(f" -> C++ Ground Truth verified: Single Poly = {c1['average_library_fidelity_score_pct']}%, Multi Poly = {c2['average_library_fidelity_score_pct']}%.")
 
     # 5. Test MCP Server Dispatcher
-    print("[TEST 5/6] MCP Server Dispatcher...")
+    print("[TEST 5/7] MCP Server Dispatcher...")
     from aether_re.mcp_server import AetherMcpDispatcher, TOOLS
 
     tool_names = {t["name"] for t in TOOLS}
@@ -125,7 +125,8 @@ def main() -> int:
     assert "aether_minidump_audit" in tool_names
     assert "aether_ground_truth_eval" in tool_names
     assert "aether_detect_crypto" in tool_names
-    assert len(tool_names) == 26
+    assert "aether_golang_recover" in tool_names
+    assert len(tool_names) == 27
 
     dmp_res = AetherMcpDispatcher.handle_minidump_audit(str(sample_dmp))
     assert dmp_res["modules_count"] > 50
@@ -146,10 +147,10 @@ def main() -> int:
         if src_tmp.exists():
             src_tmp.unlink()
 
-    print(f" -> MCP Server tools verified: {len(tool_names)} registered tools (including aether_detect_crypto).")
+    print(f" -> MCP Server tools verified: {len(tool_names)} registered tools (including aether_detect_crypto, aether_golang_recover).")
 
     # 6. Test CLI crypto-detect and MCP handle_detect_crypto (FindCrypt GEAR-01)
-    print("[TEST 6/6] CLI crypto-detect & Forensic Constant Engine...")
+    print("[TEST 6/7] CLI crypto-detect & Forensic Constant Engine...")
     from aether_re.crypto_detect import AES_SBOX, CHACHA20_CONST_32, SHA256_K_LE
 
     tmp_crypto = Path("D:/AetherRE_Megazord/engineering_evidence/temp_crypto_test.bin")
@@ -160,7 +161,6 @@ def main() -> int:
     tmp_crypto.write_bytes(payload)
 
     try:
-        # CLI invocation
         proc_crypto = subprocess.run(
             [python_exe, str(megazord_py), "crypto-detect", str(tmp_crypto)],
             capture_output=True,
@@ -173,7 +173,6 @@ def main() -> int:
         assert "ChaCha20" in c_data["identified_algorithms"]
         assert "SHA-256" in c_data["identified_algorithms"]
 
-        # MCP Dispatcher invocation
         mcp_crypto = AetherMcpDispatcher.handle_detect_crypto(str(tmp_crypto))
         assert mcp_crypto["total_constants_detected"] >= 3
         assert mcp_crypto["high_confidence_matches_count"] >= 3
@@ -182,7 +181,41 @@ def main() -> int:
             tmp_crypto.unlink()
 
     print(" -> Crypto Detection verified: AES, ChaCha20, SHA-256 S-Boxes and tables detected accurately via CLI & MCP.")
-    print("ALL 6/6 STRICT EMPIRICAL AUDITOR TESTS PASSED WITH ZERO DEBT.")
+
+    # 7. Test CLI golang-recover and MCP handle_golang_recover (GoReSym GEAR-02)
+    print("[TEST 7/7] CLI golang-recover & Go pclntab Engine...")
+    from tests.test_golang_recover import _build_go116_test_blob
+
+    tmp_go = Path("D:/AetherRE_Megazord/engineering_evidence/temp_go_test.exe")
+    blob = _build_go116_test_blob(ptr_size=8)
+    tmp_go.write_bytes(b"\x90" * 256 + blob + b"\x90" * 256)
+
+    try:
+        # CLI invocation
+        proc_go = subprocess.run(
+            [python_exe, str(megazord_py), "golang-recover", str(tmp_go)],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        go_data = json.loads(proc_go.stdout)
+        assert go_data["is_go_binary"] is True
+        assert go_data["total_functions"] == 3
+        recovered_names = [f["name"] for f in go_data["functions"]]
+        assert "main.main" in recovered_names
+        assert "runtime.morestack" in recovered_names
+        assert "net/http.Get" in recovered_names
+
+        # MCP Dispatcher invocation
+        mcp_go = AetherMcpDispatcher.handle_golang_recover(str(tmp_go))
+        assert mcp_go["is_go_binary"] is True
+        assert mcp_go["total_functions"] == 3
+    finally:
+        if tmp_go.exists():
+            tmp_go.unlink()
+
+    print(" -> Golang Recovery verified: pclntab parsed and 3/3 functions recovered via CLI & MCP.")
+    print("ALL 7/7 STRICT EMPIRICAL AUDITOR TESTS PASSED WITH ZERO DEBT.")
     return 0
 
 

@@ -3259,6 +3259,27 @@ def cmd_crypto_detect(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_golang_recover(args: argparse.Namespace) -> int:
+    """Extrai símbolos, funções e metadados de binários Go stripped via pclntab."""
+    from aether_re.golang_recover import recover_golang_symbols_from_file
+
+    target = Path(args.target)
+    if not target.exists() or not target.is_file():
+        print(json.dumps({"error": "target_not_found", "path": str(target)}))
+        return 1
+
+    report = recover_golang_symbols_from_file(target)
+
+    if getattr(args, "out", None):
+        out_p = Path(args.out)
+        out_p.parent.mkdir(parents=True, exist_ok=True)
+        out_p.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        print(f"Go Recover: {out_p} | {report['total_functions']} functions, version={report['go_version']}")
+    else:
+        print(json.dumps(report, indent=2, ensure_ascii=False))
+    return 0
+
+
 def _write_intake_result(value: dict[str, object], path: Path) -> None:
 
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -4625,6 +4646,11 @@ def main() -> int:
     crypto_parser.add_argument("target", help="Caminho do binário alvo")
     crypto_parser.add_argument("--out", help="Arquivo opcional de saída JSON")
     crypto_parser.set_defaults(func=cmd_crypto_detect)
+
+    go_parser = sub.add_parser("golang-recover", help="Extrai símbolos e nomes de funções de binários Go stripped (pclntab)")
+    go_parser.add_argument("target", help="Caminho do binário Go alvo")
+    go_parser.add_argument("--out", help="Arquivo opcional de saída JSON")
+    go_parser.set_defaults(func=cmd_golang_recover)
 
     args = p.parse_args()
 

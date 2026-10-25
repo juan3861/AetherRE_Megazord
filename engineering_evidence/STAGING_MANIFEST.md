@@ -1,16 +1,19 @@
 # MANIFESTO DE STAGING (STAGING MANIFEST)
 **Protocolo:** ALPHA-C7 DISCOVERY-100
-**Componente Selecionado:** `GEAR-01` — FindCrypt / Crypto Signature & S-Box Scanner
-**Origem Tecnológica:** Baseado nos algoritmos canônicos de `FindCrypt-Ghidra`, `findcrypt-yara` e `signsrch` (Luigi Auriemma)
-**Diretório de Staging:** `external_component_candidates/selected/crypto_detect/`
-**Módulo Destino de Produção:** `aether_re/crypto_detect.py`
-**Licença:** MIT / Public Domain (Totalmente permissiva e compatível)
+**Componentes Selecionados:** 
+- `GEAR-01` — FindCrypt / Crypto Signature & S-Box Scanner
+- `GEAR-02` — GoReSym / Golang Stripped Symbol & pclntab Extractor
 **Data:** 2026-10-25
 
 ---
 
-## 1. Avaliação de Gates Eliminatórios
+## 1. Componente GEAR-01 — FindCrypt / Crypto Scanner
+- **Origem Tecnológica:** Baseado nos algoritmos canônicos de `FindCrypt-Ghidra`, `findcrypt-yara` e `signsrch` (Luigi Auriemma)
+- **Diretório de Staging:** `external_component_candidates/selected/crypto_detect/`
+- **Módulo Destino de Produção:** `aether_re/crypto_detect.py`
+- **Licença:** MIT / Public Domain (Totalmente permissiva e compatível)
 
+### Avaliação de Gates Eliminatórios (GEAR-01)
 | Gate Eliminatório | Critério | Veredito | Justificativa |
 |---|---|---|---|
 | **Gate 1 — Licença** | Compatibilidade estrita com MIT/Apache-2.0 | **PASS** | Algoritmos e constantes matemáticas de domínio público e MIT |
@@ -21,31 +24,44 @@
 
 ---
 
-## 2. Inventário de Primitivas Criptográficas Mapeadas
+## 2. Componente GEAR-02 — GoReSym / Golang pclntab & Symbol Extractor
+- **Origem Tecnológica:** Baseado no design de desconstrução da tabela de símbolos `pclntab` do Go (`GoReSym` de Mandiant, `redress` de goretk)
+- **Diretório de Staging:** `external_component_candidates/selected/golang_recover/`
+- **Módulo Destino de Produção:** `aether_re/golang_recover.py`
+- **Licença:** Apache-2.0 (Permissiva e homologada)
 
-1. **AES / Rijndael:**
-   - S-Box padrão (256 bytes): `63 7c 77 7b f2 6b 6f c5 30 01 67 2b fe d7 ab 76...`
-   - InvS-Box (256 bytes): `52 09 6a d5 30 36 a5 38 bf 40 a3 9e 81 f3 d7 fb...`
-   - Rcon (Round Constants, 10 bytes): `01 02 04 08 10 20 40 80 1b 36`
-2. **SHA-256 (FIPS 180-4):**
-   - K constants (64 words uint32, 256 bytes): `428a2f98 71374491 b5c0fbcf e9b5dba5...`
-   - Initial State (8 words uint32, 32 bytes): `6a09e667 bb67ae85 3c6ef372 a54ff53a...`
-3. **MD5 (RFC 1321):**
-   - Sine Constants T[1..64] (256 bytes): `d76aa478 e8c7b756 242070db c1bdceee...`
-   - Initial State (16 bytes): `01 23 45 67 89 ab cd ef fe dc ba 98 76 54 32 10`
-4. **ChaCha20 & Salsa20:**
-   - 16-byte Constant String: `"expand 32-byte k"` (`65 78 70 61 6e 64 20 33 32 2d 62 79 74 65 20 6b`)
-   - 16-byte Constant String (16-byte key): `"expand 16-byte k"`
-5. **CRC32:**
-   - Tabela IEEE 802.3 (256 uint32, 1024 bytes) com polinômio `0xEDB88320`
-6. **TEA / XTEA / XXTEA:**
-   - Constante áurea (Golden Ratio Delta): `0x9E3779B9` e sua negação `0x61C88647`
-7. **DES / 3DES (FIPS 46-3):**
-   - Initial Permutation (IP) table (64 bytes)
-   - Permuted Choice 1 (PC1) table (56 bytes)
+### Avaliação de Gates Eliminatórios (GEAR-02)
+| Gate Eliminatório | Critério | Veredito | Justificativa |
+|---|---|---|---|
+| **Gate 1 — Licença** | Compatibilidade estrita com Apache-2.0 | **PASS** | Licença Apache-2.0 em total conformidade com a política do Megazord |
+| **Gate 2 — Origem Verificável** | Repositório canônico upstream comprovado | **PASS** | Mandiant/GoReSym e goretk/redress rastreados |
+| **Gate 3 — Vulnerabilidade** | Zero parsing inseguro ou estouro de buffer | **PASS** | Parsing de offsets verificado contra o tamanho do buffer (bounds-checked) |
+| **Gate 4 — Não-Duplicação** | Não duplica analisadores Go pré-existentes | **PASS** | O Megazord tratava executáveis Go stripados como blob binário genérico |
+| **Gate 5 — Versatilidade Multi-Versão** | Suporte às versões Go 1.2 até 1.23+ | **PASS** | Suporta magics 0xFFFFFFFB, 0xFFFFFFF0, 0xFFFFFFFA, 0xFFFFFFF1 |
 
 ---
 
-## 3. Experimento de Staging & Teste de Contrato
+## 3. Primitivas e Constantes Forenses Mapeadas
 
-Um harness mínimo isolado `external_component_candidates/selected/crypto_detect/test_staging_contract.py` é provisionado para garantir que a varredura atinge 100% de precisão sem falsos positivos em payloads aleatórios.
+1. **GEAR-01:**
+   - AES S-Box / InvS-Box / Rcon
+   - SHA-256 K constants / Initial State
+   - MD5 Sine Constants / Initial State
+   - ChaCha20 & Salsa20 Key Strings
+   - CRC32 IEEE 802.3 & Castagnoli tables
+   - TEA / XTEA / XXTEA Golden Ratio Deltas
+   - DES / 3DES Permutation tables
+   - SM4 S-Box
+
+2. **GEAR-02:**
+   - Go 1.2-1.15 Magic `0xFFFFFFFB` (Header com nfunc e functab ponteiros absolutos)
+   - Go 1.16-1.17 Magic `0xFFFFFFF0` (Offsets funcnametab, cutab, filetab, pctab)
+   - Go 1.18-1.19 Magic `0xFFFFFFFA` (Header modular e offsets 32-bit relativos a textStart)
+   - Go 1.20-1.23+ Magic `0xFFFFFFF1` (Header moderno com otimização DWARF inline)
+   - Extração de nomes de função, pacotes, namespaces e endereços PC virtuais
+
+---
+
+## 4. Experimentos de Staging & Testes de Contrato
+- `external_component_candidates/selected/crypto_detect/test_staging_contract.py` — **PASS**
+- `external_component_candidates/selected/golang_recover/test_staging_contract.py` — **PASS**

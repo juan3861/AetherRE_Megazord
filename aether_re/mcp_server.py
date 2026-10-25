@@ -464,7 +464,18 @@ TOOLS = [
             "required": ["target"]
         }
     },
-        {
+            {
+        "name": "aether_golang_recover",
+        "description": "Extrai símbolos, funções, pacotes e metadados de executáveis Go stripped (GoReSym / pclntab).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "target": {"type": "string", "description": "Caminho absoluto para o binário Go alvo."}
+            },
+            "required": ["target"]
+        }
+    },
+{
         "name": "aether_detect_crypto",
         "description": "Varre binários para constantes criptográficas, S-Boxes (AES, SM4), tabelas SHA/MD5/CRC32 e chaves (FindCrypt/SignSrch).",
         "inputSchema": {
@@ -575,6 +586,11 @@ class AetherMcpDispatcher:
 
     @staticmethod
     @staticmethod
+    @staticmethod
+    def handle_golang_recover(target: str) -> dict[str, Any]:
+        from aether_re.golang_recover import recover_golang_symbols_from_file
+        return recover_golang_symbols_from_file(target)
+
     def handle_detect_crypto(target: str) -> dict[str, Any]:
         from aether_re.crypto_detect import scan_file_for_crypto
         return scan_file_for_crypto(target)
@@ -1063,6 +1079,8 @@ def run_mcp_server() -> int:
                         )
                     elif tool_name == "aether_minidump_audit":
                         data = dispatcher.handle_minidump_audit(args["target"])
+                    elif tool_name == "aether_golang_recover":
+                        data = dispatcher.handle_golang_recover(args["target"])
                     elif tool_name == "aether_detect_crypto":
                         data = dispatcher.handle_detect_crypto(args["target"])
                     elif tool_name == "aether_ground_truth_eval":
