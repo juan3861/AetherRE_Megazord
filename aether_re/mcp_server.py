@@ -14,6 +14,7 @@ import re
 import sys
 from pathlib import Path
 from typing import Any
+from dataclasses import asdict
 
 from aether_re import __codename__, __version__
 from aether_re.capabilities import analyze_target_capabilities
@@ -463,7 +464,18 @@ TOOLS = [
             "required": ["target"]
         }
     },
-    {
+        {
+        "name": "aether_detect_crypto",
+        "description": "Varre binários para constantes criptográficas, S-Boxes (AES, SM4), tabelas SHA/MD5/CRC32 e chaves (FindCrypt/SignSrch).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "target": {"type": "string", "description": "Caminho absoluto para o binário alvo."}
+            },
+            "required": ["target"]
+        }
+    },
+{
         "name": "aether_ground_truth_eval",
         "description": "Avaliação empírica rigorosa de código descompilado contra código-fonte de referência ground truth (chamadas, loops, ramos e campos).",
         "inputSchema": {
@@ -562,6 +574,11 @@ class AetherMcpDispatcher:
         return parser.audit_memory_security()
 
     @staticmethod
+    @staticmethod
+    def handle_detect_crypto(target: str) -> dict[str, Any]:
+        from aether_re.crypto_detect import scan_file_for_crypto
+        return scan_file_for_crypto(target)
+
     def handle_ground_truth_eval(source_c: str, decompiled_c: str, function_name: str) -> dict[str, Any]:
         from aether_re.ground_truth_eval import evaluate_decompilation_against_ground_truth
         return evaluate_decompilation_against_ground_truth(source_c, decompiled_c, function_name)
@@ -613,7 +630,7 @@ class AetherMcpDispatcher:
             "exports_count": len(report.exports),
             "exports": [str(x) for x in report.exports[:50]],
             "findings_count": len(report.findings),
-            "findings": [f.to_dict() for f in report.findings[:30]],
+            "findings": [f.to_dict() if hasattr(f, "to_dict") else asdict(f) for f in report.findings[:30]],
             "functions_consensus_count": len(report.functions_consensus),
             "adapter_results": report.adapter_results,
             "limitations": report.limitations,
@@ -1046,6 +1063,8 @@ def run_mcp_server() -> int:
                         )
                     elif tool_name == "aether_minidump_audit":
                         data = dispatcher.handle_minidump_audit(args["target"])
+                    elif tool_name == "aether_detect_crypto":
+                        data = dispatcher.handle_detect_crypto(args["target"])
                     elif tool_name == "aether_ground_truth_eval":
                         data = dispatcher.handle_ground_truth_eval(
                             args["source_c"],

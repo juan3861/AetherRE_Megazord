@@ -15,6 +15,8 @@ tools/*
 !tools/benchmark_all_exports_ground_truth.py
 !tools/benchmark_cpp_poly_ground_truth.py
 !tools/benchmark_multi_poly_ground_truth.py
+!tools/build_discovery_100_catalog.py
+!tools/build_component_scorecard.py
 !tools/e2e_full_sota_summit.py
 !tools/webcrack_worker.cjs
 !tools/acorn_ast_worker.cjs

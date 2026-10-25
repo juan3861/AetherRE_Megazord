@@ -3238,6 +3238,27 @@ def cmd_ground_truth_bench(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_crypto_detect(args: argparse.Namespace) -> int:
+    """Varre binários para constantes criptográficas, S-Boxes, vetores de inicialização e tabelas."""
+    from aether_re.crypto_detect import scan_file_for_crypto
+
+    target = Path(args.target)
+    if not target.exists() or not target.is_file():
+        print(json.dumps({"error": "target_not_found", "path": str(target)}))
+        return 1
+
+    report = scan_file_for_crypto(target)
+
+    if getattr(args, "out", None):
+        out_p = Path(args.out)
+        out_p.parent.mkdir(parents=True, exist_ok=True)
+        out_p.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        print(f"Crypto Scan: {out_p} | {report['total_constants_detected']} constants, algos={report['identified_algorithms']}")
+    else:
+        print(json.dumps(report, indent=2, ensure_ascii=False))
+    return 0
+
+
 def _write_intake_result(value: dict[str, object], path: Path) -> None:
 
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -4599,6 +4620,11 @@ def main() -> int:
     gt_parser.add_argument("--function", default="cJSON_Delete", help="Nome da função para avaliar")
     gt_parser.add_argument("--out", help="Arquivo opcional de saída JSON")
     gt_parser.set_defaults(func=cmd_ground_truth_bench)
+
+    crypto_parser = sub.add_parser("crypto-detect", help="Varre binários para constantes criptográficas, S-Boxes e tabelas (FindCrypt)")
+    crypto_parser.add_argument("target", help="Caminho do binário alvo")
+    crypto_parser.add_argument("--out", help="Arquivo opcional de saída JSON")
+    crypto_parser.set_defaults(func=cmd_crypto_detect)
 
     args = p.parse_args()
 

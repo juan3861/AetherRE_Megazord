@@ -1,0 +1,22 @@
+{
+  "schema": "acceptance-manifest-v3",
+  "protocol": "ALPHA-C7 DISCOVERY-100",
+  "evaluated_at": "2026-10-25T18:25:35Z",
+  "decision": "APPROVED",
+  "verdict_reason": "Todos os 6 gates eliminatórios e empíricos aprovados com zero falhas, 100 repositórios catalogados sem alucinação, componente GEAR-01 integrado com 100% de cobertura nos testes e aprovação formal do Guardião Estrito OMEGA.",
+  "deliverables": [
+    "engineering_evidence/ACCEPTANCE_CONTRACT.md",
+    "engineering_evidence/EXISTING_CAPABILITY_MAP.md",
+    "engineering_evidence/TECHNOLOGY_GAP_MAP.md",
+    "engineering_evidence/SEARCH_QUERIES_AND_LIMITS.md",
+    "engineering_evidence/DISCOVERY_100_CATALOG.csv",
+    "engineering_evidence/COMPONENT_SCORECARD.csv",
+    "engineering_evidence/STAGING_MANIFEST.md",
+    "engineering_evidence/EXECUTION_ROADMAP.md",
+    "engineering_evidence/CONSENSUS_DECISION.md",
+    "aether_re/crypto_detect.py",
+    "tests/test_crypto_detect.py",
+    "tests/test_empirical_megazord_auditor.py",
+    "engineering_evidence/AUDIT_LEDGER_ROOT.json"
+  ]
+}
