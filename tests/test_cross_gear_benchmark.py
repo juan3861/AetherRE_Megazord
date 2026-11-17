@@ -31,7 +31,7 @@ def test_cross_gear_correlation_improves_tampered_pe_detection(tmp_path: Path):
 
 def test_all_36_mcp_tools_registered_and_valid_schema():
     names = [t["name"] for t in TOOLS]
-    assert len(names) >= 40
+    assert len(names) >= 44
     for required in (
         "aether_detect_crypto",
         "aether_golang_recover",
@@ -48,6 +48,10 @@ def test_all_36_mcp_tools_registered_and_valid_schema():
         "aether_ole_macro",
         "aether_driver_audit",
         "aether_vmlinux_carve",
+        "aether_dex_audit",
+        "aether_wasm_audit",
+        "aether_cfi_audit",
+        "aether_installer_audit",
     ):
         assert required in names
         handler_name = "handle_" + required.removeprefix("aether_")

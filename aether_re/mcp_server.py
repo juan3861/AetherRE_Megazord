@@ -644,6 +644,50 @@ TOOLS = [
             "required": ["target"]
         }
     },
+    {
+        "name": "aether_dex_audit",
+        "description": "Analisa bytecode Android Dalvik DEX (.dex) e containers APK (classes, métodos, libs nativas JNI e indicadores de reflexão/DexClassLoader) sem exigir JVM.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "target": {"type": "string", "description": "Caminho absoluto para o arquivo .dex ou .apk alvo."}
+            },
+            "required": ["target"]
+        }
+    },
+    {
+        "name": "aether_wasm_audit",
+        "description": "Inspeciona binários WebAssembly (.wasm), seções LEB128, imports, exports, capacidades WASI e strings de segmentos Data.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "target": {"type": "string", "description": "Caminho absoluto para o módulo .wasm alvo."}
+            },
+            "required": ["target"]
+        }
+    },
+    {
+        "name": "aether_cfi_audit",
+        "description": "Audita Intel CET (endbr64/endbr32), chamadas/saltos indiretos e superfície de gadgets (pop-ret, stack-pivot, syscall-ret) para avaliação de endurecimento CFI.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "target": {"type": "string", "description": "Caminho absoluto para o binário alvo."}
+            },
+            "required": ["target"]
+        }
+    },
+    {
+        "name": "aether_installer_audit",
+        "description": "Detecta e extrai metadados de instaladores InnoSetup, NSIS, Microsoft Cabinet (MSCF) e overlays 7z/RAR SFX.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "target": {"type": "string", "description": "Caminho absoluto para o instalador ou binário alvo."}
+            },
+            "required": ["target"]
+        }
+    },
 {
         "name": "aether_ground_truth_eval",
         "description": "Compara características estruturais e procura contraprovas comportamentais num modelo explícito de C inteiro32 puro. Score estrutural não mede fidelidade semântica; memória/chamadas/controle não suportados retornam inconclusivo.",
@@ -907,6 +951,26 @@ class AetherMcpDispatcher:
     def handle_vmlinux_carve(target: str) -> dict[str, Any]:
         from aether_re.vmlinux_extract import scan_file_vmlinux
         return scan_file_vmlinux(target).to_dict()
+
+    @staticmethod
+    def handle_dex_audit(target: str) -> dict[str, Any]:
+        from aether_re.dex_forensics import scan_file_dex
+        return scan_file_dex(target).to_dict()
+
+    @staticmethod
+    def handle_wasm_audit(target: str) -> dict[str, Any]:
+        from aether_re.wasm_forensics import scan_file_wasm
+        return scan_file_wasm(target).to_dict()
+
+    @staticmethod
+    def handle_cfi_audit(target: str) -> dict[str, Any]:
+        from aether_re.cfi_gadget_audit import scan_file_cfi_audit
+        return scan_file_cfi_audit(target).to_dict()
+
+    @staticmethod
+    def handle_installer_audit(target: str) -> dict[str, Any]:
+        from aether_re.installer_forensics import scan_file_installer
+        return scan_file_installer(target).to_dict()
 
     @staticmethod
     def handle_ground_truth_eval(source_c: str, decompiled_c: str, function_name: str) -> dict[str, Any]:
@@ -1435,6 +1499,14 @@ def run_mcp_server() -> int:
                         data = dispatcher.handle_driver_audit(args["target"])
                     elif tool_name == "aether_vmlinux_carve":
                         data = dispatcher.handle_vmlinux_carve(args["target"])
+                    elif tool_name == "aether_dex_audit":
+                        data = dispatcher.handle_dex_audit(args["target"])
+                    elif tool_name == "aether_wasm_audit":
+                        data = dispatcher.handle_wasm_audit(args["target"])
+                    elif tool_name == "aether_cfi_audit":
+                        data = dispatcher.handle_cfi_audit(args["target"])
+                    elif tool_name == "aether_installer_audit":
+                        data = dispatcher.handle_installer_audit(args["target"])
                     elif tool_name == "aether_ground_truth_eval":
                         data = dispatcher.handle_ground_truth_eval(
                             args["source_c"],

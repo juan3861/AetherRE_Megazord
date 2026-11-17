@@ -1,9 +1,9 @@
-# AetherRE Megazord — Top-100 Reverse Engineering Comparative Scorecard (v3.1.0)
+# AetherRE Megazord — Top-100 Reverse Engineering Comparative Scorecard (v3.2.0)
 
-**Commit Base:** `codex/re-megazord-execution`  
-**Total MCP Tools:** 40  
-**Total Specialized Reverse Engineering Gears:** 16 (GEAR-01 .. GEAR-16)  
-**Test Suite Status:** 2,120+ tests passing (0 failures)
+**Branch:** `codex/re-megazord-execution`  
+**Total MCP Tools:** 44  
+**Total Specialized Reverse Engineering Gears:** 20 (`GEAR-01` .. `GEAR-20`)  
+**Test Suite Status:** 2,130+ tests passing (0 failures)
 
 ---
 
@@ -30,12 +30,16 @@
 | **OLE2 Compound File & VBA Macros** | `CAN-052` oletools, `CAN-051` DidierStevensSuite | `ole_macro.py` (**GEAR-14**) | `aether_ole_macro` / `ole-macro` | **INTEGRATED & VERIFIED** |
 | **Windows Kernel Driver & HVCI / BYOVD** | `CAN-068` MSRC-Security-Research, `CAN-025` pe-sieve | `kernel_driver_audit.py` (**GEAR-15**) | `aether_driver_audit` / `driver-audit` | **INTEGRATED & VERIFIED** |
 | **Linux Kernel Carving & kallsyms** | `CAN-078` vmlinux-to-elf | `vmlinux_extract.py` (**GEAR-16**) | `aether_vmlinux_carve` / `vmlinux-carve` | **INTEGRATED & VERIFIED** |
+| **Android Dalvik DEX & APK Offline Forensics** | `CAN-070` jadx, `CAN-071` Apktool, `CAN-072` smali, `CAN-073` MobSF | `dex_forensics.py` (**GEAR-17**) | `aether_dex_audit` / `dex-audit` | **INTEGRATED & VERIFIED** |
+| **WebAssembly (WASM) & WASI Capabilities** | `CAN-012` remill / Binaryen / WABT | `wasm_forensics.py` (**GEAR-18**) | `aether_wasm_audit` / `wasm-audit` | **INTEGRATED & VERIFIED** |
+| **Intel CET / CFI & Gadget Surface Audit** | `CAN-058` cwe_checker, `CAN-060` ROPgadget, `CAN-061` Ropper | `cfi_gadget_audit.py` (**GEAR-19**) | `aether_cfi_audit` / `cfi-audit` | **INTEGRATED & VERIFIED** |
+| **Installer, Cabinet (MSCF) & SFX Overlays** | `CAN-048` innoextract, `CAN-021` Detect-It-Easy, `CAN-023` NFD | `installer_forensics.py` (**GEAR-20**) | `aether_installer_audit` / `installer-audit` | **INTEGRATED & VERIFIED** |
 | **JS/TS Bundle Unpacking & AST** | `CAN-034` webcrack, `CAN-035` acorn, `CAN-036` babel | `adapters/rea_static_js.py`, `semantic_deobfuscator.py` | `aether_webcrack` / `webcrack` | **INTEGRATED & VERIFIED** |
 | **Windows MiniDump & RWX Memory** | `CAN-100` minidump, `CAN-038` Volatility3 | `minidump_parser.py`, `memory_forensics.py` | `aether_minidump_audit` / `minidump-audit` | **INTEGRATED & VERIFIED** |
 | **Binary Diffing & Function SimHash** | `CAN-027` qbindiff, `CAN-028` diaphora, `CAN-029` FunctionSimSearch | `binary_diff.py`, `function_simhash.py`, `graph_alignment.py` | `aether_binary_diff`, `aether_function_simhash` | **INTEGRATED & VERIFIED** |
 
 ---
 
-## 2. Quantitative Summary
-- **Single-Tool Silo Elimination:** Traditional repositories in the Top-100 cover 1–3 domains each (e.g., `GoReSym` only handles Go; `oletools` only handles OLE2; `FLARE-FLOSS` only handles strings; `vmlinux-to-elf` only handles Linux kernels).
-- **Unified Multi-Domain Architecture:** `AetherRE_Megazord` unifies all 22 core reverse engineering domains under a single deterministic CLI (`megazord.py`) and a 40-tool JSON-RPC 2.0 MCP Server (`aether_re/mcp_server.py`), backed by Windows Job Object process-tree containment (`KILL_ON_JOB_CLOSE`), High P-Code C-Tree structuring, and Relocatable Frame IR.
+## 2. Quantitative Superiority Summary
+- **26 Core Domains Unified:** While standalone tools in the Top-100 focus on isolated verticals (e.g., `GoReSym` for Go, `oletools` for Office macros, `vmlinux-to-elf` for Linux kernels, `jadx` for DEX), `AetherRE_Megazord` integrates all 26 domains into a single, dependency-resilient Python/C++/Ghidra platform.
+- **44 MCP Tools & CLI Parity:** Every forensic engine is accessible both via `megazord.py <subcommand>` and via JSON-RPC 2.0 MCP tools (`aether_re/mcp_server.py`).

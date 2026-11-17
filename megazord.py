@@ -3442,6 +3442,86 @@ def cmd_vmlinux_carve(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_dex_audit(args: argparse.Namespace) -> int:
+    """Analisa bytecode Dalvik DEX (.dex) e containers APK sem exigir JVM externa."""
+    from aether_re.dex_forensics import scan_file_dex
+
+    target = Path(args.target)
+    if not target.exists() or not target.is_file():
+        print(json.dumps({"error": "target_not_found", "path": str(target)}))
+        return 1
+
+    report = scan_file_dex(target).to_dict()
+    if getattr(args, "out", None):
+        out_p = Path(args.out)
+        out_p.parent.mkdir(parents=True, exist_ok=True)
+        out_p.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        print(f"DEX/APK Audit: {out_p} | classes={report.get('class_count', 0)}, methods={report.get('method_count', 0)}")
+    else:
+        print(json.dumps(report, indent=2, ensure_ascii=False))
+    return 0
+
+
+def cmd_wasm_audit(args: argparse.Namespace) -> int:
+    """Inspeciona binários WebAssembly (.wasm), seções, imports, exports e capacidades WASI."""
+    from aether_re.wasm_forensics import scan_file_wasm
+
+    target = Path(args.target)
+    if not target.exists() or not target.is_file():
+        print(json.dumps({"error": "target_not_found", "path": str(target)}))
+        return 1
+
+    report = scan_file_wasm(target).to_dict()
+    if getattr(args, "out", None):
+        out_p = Path(args.out)
+        out_p.parent.mkdir(parents=True, exist_ok=True)
+        out_p.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        print(f"WASM Audit: {out_p} | imports={len(report.get('imports', []))}, exports={len(report.get('exports', []))}")
+    else:
+        print(json.dumps(report, indent=2, ensure_ascii=False))
+    return 0
+
+
+def cmd_cfi_audit(args: argparse.Namespace) -> int:
+    """Audita Intel CET (endbr64/32), desvios indiretos e superfície de gadgets (CFI/ROP)."""
+    from aether_re.cfi_gadget_audit import scan_file_cfi_audit
+
+    target = Path(args.target)
+    if not target.exists() or not target.is_file():
+        print(json.dumps({"error": "target_not_found", "path": str(target)}))
+        return 1
+
+    report = scan_file_cfi_audit(target).to_dict()
+    if getattr(args, "out", None):
+        out_p = Path(args.out)
+        out_p.parent.mkdir(parents=True, exist_ok=True)
+        out_p.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        print(f"CFI/CET Audit: {out_p} | cet_ibt={report.get('cet_ibt_enabled')}, gadgets={report.get('unique_gadgets_count', 0)}")
+    else:
+        print(json.dumps(report, indent=2, ensure_ascii=False))
+    return 0
+
+
+def cmd_installer_audit(args: argparse.Namespace) -> int:
+    """Inspeciona instaladores InnoSetup, NSIS, Microsoft Cabinet (MSCF) e overlays SFX."""
+    from aether_re.installer_forensics import scan_file_installer
+
+    target = Path(args.target)
+    if not target.exists() or not target.is_file():
+        print(json.dumps({"error": "target_not_found", "path": str(target)}))
+        return 1
+
+    report = scan_file_installer(target).to_dict()
+    if getattr(args, "out", None):
+        out_p = Path(args.out)
+        out_p.parent.mkdir(parents=True, exist_ok=True)
+        out_p.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        print(f"Installer Audit: {out_p} | type={report.get('installer_type')}, cab_files={len(report.get('cabinet_files', []))}")
+    else:
+        print(json.dumps(report, indent=2, ensure_ascii=False))
+    return 0
+
+
 def cmd_floss_strings(args: argparse.Namespace) -> int:
     """Reconstrói stack strings x86/x64, decodifica strings XOR e extrai payloads Base64 (FLOSS)."""
     from aether_re.floss_strings import scan_file_floss_strings
@@ -5220,6 +5300,26 @@ def main() -> int:
     vmlinux_parser.add_argument("target", help="Caminho da imagem de kernel alvo")
     vmlinux_parser.add_argument("--out", help="Arquivo opcional de saída JSON")
     vmlinux_parser.set_defaults(func=cmd_vmlinux_carve)
+
+    dex_parser = sub.add_parser("dex-audit", help="Analisa bytecode Dalvik DEX (.dex) e containers APK offline")
+    dex_parser.add_argument("target", help="Caminho do arquivo .dex ou .apk alvo")
+    dex_parser.add_argument("--out", help="Arquivo opcional de saída JSON")
+    dex_parser.set_defaults(func=cmd_dex_audit)
+
+    wasm_parser = sub.add_parser("wasm-audit", help="Inspeciona módulos WebAssembly (.wasm), seções, imports, exports e WASI")
+    wasm_parser.add_argument("target", help="Caminho do módulo .wasm alvo")
+    wasm_parser.add_argument("--out", help="Arquivo opcional de saída JSON")
+    wasm_parser.set_defaults(func=cmd_wasm_audit)
+
+    cfi_parser = sub.add_parser("cfi-audit", help="Audita Intel CET (endbr64/32), desvios indiretos e superfície de gadgets (CFI/ROP)")
+    cfi_parser.add_argument("target", help="Caminho do binário alvo")
+    cfi_parser.add_argument("--out", help="Arquivo opcional de saída JSON")
+    cfi_parser.set_defaults(func=cmd_cfi_audit)
+
+    inst_parser = sub.add_parser("installer-audit", help="Analisa instaladores InnoSetup, NSIS, Cabinet (MSCF) e overlays SFX")
+    inst_parser.add_argument("target", help="Caminho do instalador ou binário alvo")
+    inst_parser.add_argument("--out", help="Arquivo opcional de saída JSON")
+    inst_parser.set_defaults(func=cmd_installer_audit)
 
     args = p.parse_args()
 
