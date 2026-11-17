@@ -37,6 +37,7 @@ def _build_mock_asar(files: dict[str, bytes]) -> bytes:
     header_dict = {"files": header_files}
     header_json = json.dumps(header_dict).encode("utf-8")
     header_len = len(header_json)
+    aligned_len = (header_len + 3) & ~3
 
     # O formato ASAR tem:
     # 4 bytes de tamanho alinhado (uint32)
@@ -48,11 +49,11 @@ def _build_mock_asar(files: dict[str, bytes]) -> bytes:
     header_prefix = struct.pack(
         "<IIII",
         4,
-        header_len + 8,
-        header_len + 4,
+        aligned_len + 8,
+        aligned_len + 4,
         header_len,
     )
-    return header_prefix + header_json + bytes(payload)
+    return header_prefix + header_json + b"\0" * (aligned_len - header_len) + bytes(payload)
 
 
 def test_sanitize_path_safety():
@@ -185,7 +186,9 @@ def test_unpack_pyinstaller_payload(tmp_path: Path):
 
     out_dir = tmp_path / "out_pyz"
     report = unpack_container(exe_path, out_dir)
-    assert report["status"] == "unpacked"
+    assert report["status"] == "partial"
+    assert report["extraction_kind"] == "carving"
+    assert report["content_complete"] is False
     assert report["container_format"] == "pyinstaller"
     assert (out_dir / "extracted_payload.pyz").read_bytes() == pyz_blob
 
@@ -197,7 +200,8 @@ def test_unpack_firmware_carving(tmp_path: Path):
 
     out_dir = tmp_path / "out_fw"
     report = unpack_container(fw_path, out_dir)
-    assert report["status"] == "unpacked"
+    assert report["status"] == "partial"
+    assert report["content_complete"] is False
     assert report["container_format"] == "firmware"
     assert report["file_count"] >= 1
     carved_files = list(out_dir.glob("carved_*.bin"))
@@ -227,7 +231,8 @@ def test_unpack_nsis_installer(tmp_path: Path):
 
     out_dir = tmp_path / "out_nsis"
     report = unpack_container(installer, out_dir)
-    assert report["status"] == "unpacked"
+    assert report["status"] == "partial"
+    assert report["content_complete"] is False
     assert report["container_format"] == "nsis"
     assert (out_dir / "nsis_header.bin").exists()
     assert (out_dir / "nsis_block_000.bin").read_bytes() == b"MZ_DUMMY_EXECUTABLE_PAYLOAD_CONTENT" * 10
@@ -245,8 +250,125 @@ def test_unpack_innosetup_installer(tmp_path: Path):
 
     out_dir = tmp_path / "out_inno"
     report = unpack_container(installer, out_dir)
-    assert report["status"] == "unpacked"
+    assert report["status"] == "partial"
+    assert report["content_complete"] is False
     assert report["container_format"] == "innosetup"
     assert (out_dir / "inno_setup_info.json").exists()
     assert (out_dir / "inno_header_block.bin").exists()
+
+
+def _nsis_blob(content: bytes) -> bytes:
+    import zlib
+    return b"MZ" + b"\x00" * 128 + b"\xef\xbe\xad\xdeNullsoftInst" + zlib.compress(content)
+
+
+def test_nsis_inflated_output_cannot_exceed_per_file_budget(tmp_path):
+    target = tmp_path / "bomb.exe"
+    target.write_bytes(_nsis_blob(b"A" * 65536))
+    out = tmp_path / "out"
+    result = unpack_container(target, out, max_bytes=100000, max_file_bytes=1024)
+    assert result["status"] == "failed"
+    assert result["file_count"] == 0
+    assert not out.exists()
+    assert any("budget" in e["detail"] for e in result["errors"])
+
+
+def test_nsis_accumulated_output_cannot_exceed_total_budget(tmp_path):
+    target = tmp_path / "two-blocks.exe"
+    target.write_bytes(_nsis_blob(b"A" * 600) + _nsis_blob(b"B" * 600)[145:])
+    out = tmp_path / "out"
+    result = unpack_container(target, out, max_bytes=1024, max_file_bytes=1024)
+    assert result["status"] == "failed"
+    assert result["file_count"] == 0
+    assert not out.exists()
+
+
+def test_failed_zip_extraction_does_not_publish_earlier_members(tmp_path):
+    target = tmp_path / "mixed.zip"
+    with zipfile.ZipFile(target, "w") as zf:
+        zf.writestr("good.txt", b"valid")
+        zf.writestr("../escape.txt", b"invalid")
+    out = tmp_path / "out"
+    result = unpack_container(target, out)
+    assert result["status"] == "failed"
+    assert not out.exists()
+    assert not (tmp_path / "escape.txt").exists()
+
+
+def test_extraction_refuses_existing_destination_without_overwriting(tmp_path):
+    target = tmp_path / "sample.zip"
+    with zipfile.ZipFile(target, "w") as zf:
+        zf.writestr("evidence.txt", b"replacement")
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "evidence.txt").write_bytes(b"original")
+    result = unpack_container(target, out)
+    assert result["status"] == "failed"
+    assert (out / "evidence.txt").read_bytes() == b"original"
+
+
+@pytest.mark.parametrize("limits", [
+    {"max_files": 0}, {"max_files": True}, {"max_bytes": -1},
+    {"max_file_bytes": 0},
+])
+def test_invalid_extraction_budgets_fail_before_publication(tmp_path, limits):
+    target = tmp_path / "sample.zip"
+    with zipfile.ZipFile(target, "w") as zf:
+        zf.writestr("test.txt", b"data")
+    out = tmp_path / "out"
+    result = unpack_container(target, out, **limits)
+    assert result["status"] == "failed"
+    assert not out.exists()
+
+
+def test_pyinstaller_carving_obeys_byte_budget(tmp_path):
+    target = tmp_path / "frozen.exe"
+    target.write_bytes(b"MZ" + PYZ_COOKIE + b"A" * 4096)
+    out = tmp_path / "out"
+    result = unpack_container(target, out, max_file_bytes=128)
+    assert result["status"] == "failed"
+    assert not out.exists()
+
+
+def test_inno_header_carving_obeys_file_count_budget(tmp_path):
+    target = tmp_path / "installer.exe"
+    target.write_bytes(b"MZ Inno Setup Setup Data (6.2.0)" + b"\x00" * 100)
+    out = tmp_path / "out"
+    result = unpack_container(target, out, max_files=1)
+    assert result["status"] == "failed"
+    assert not out.exists()
+
+
+def test_asar_pickle_alignment_preserves_exact_member_bytes(tmp_path):
+    # Independent literal Pickle layout: JSON=47 bytes, padding=1, data starts64.
+    header = b'{"files":{"x":{"size":8,"offset":"0"}}}'
+    header += b" " * (47 - len(header))
+    target = tmp_path / "aligned.asar"
+    target.write_bytes(struct.pack("<IIII",4,56,52,47) + header + b"\0" + b"ORIGINAL")
+    out = tmp_path / "out"
+    result = unpack_container(target,out)
+    assert result["status"] == "unpacked"
+    assert (out / "x").read_bytes() == b"ORIGINAL"
+
+
+@pytest.mark.parametrize("name", [".. /escape", "file.txt:stream", "trailing.", "trailing "])
+def test_windows_alias_and_stream_paths_are_rejected(name):
+    with pytest.raises(UnpackError):
+        _sanitize_path(name)
+
+
+@pytest.mark.parametrize("manifest", [
+    [],
+    {"files":{"x":{"size":True,"offset":"0"}}},
+    {"files":{"x":{"size":1,"offset":"0"},"missing":{"size":1}}},
+])
+def test_asar_invalid_members_cannot_be_silently_omitted(tmp_path,manifest):
+    data = json.dumps(manifest).encode()
+    padded = (len(data)+3)&~3
+    target = tmp_path / "invalid.asar"
+    target.write_bytes(struct.pack("<IIII",4,padded+8,padded+4,len(data))+data+b"\0"*(padded-len(data))+b"AB")
+    out = tmp_path / "out"
+    result = unpack_container(target,out)
+    assert result["status"] == "failed"
+    assert not out.exists()
 

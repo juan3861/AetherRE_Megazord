@@ -18,6 +18,7 @@ import re
 import stat
 import struct
 import tarfile
+import tempfile
 import zipfile
 import zlib
 from dataclasses import dataclass
@@ -79,6 +80,8 @@ def _sanitize_path(relative_name: str, max_path_len: int = 512) -> str:
     if len(normalized) > max_path_len:
         raise UnpackError("path_length_exceeded")
     for part in posix.parts:
+        if part.endswith((".", " ")) or any(ord(c) < 32 or c in '<>:"|?*' for c in part):
+            raise UnpackError(f"nonportable_windows_path:{part}")
         root_part = part.rstrip(" .").split(".", 1)[0].upper()
         if root_part in _RESERVED_NAMES:
             raise UnpackError(f"reserved_device_name:{part}")
@@ -137,26 +140,43 @@ def _unpack_asar(
     if len(data) < 16 or not data.startswith(b"\x04\x00\x00\x00"):
         raise UnpackError("asar_header_invalid")
     header_json_size = struct.unpack("<I", data[12:16])[0]
+    header_size, header_payload_size = struct.unpack("<II", data[4:12])
+    aligned_json_size = (header_json_size + 3) & ~3
+    if (header_size != aligned_json_size + 8 or header_payload_size != aligned_json_size + 4
+            or 8 + header_size > len(data)):
+        raise UnpackError("asar_pickle_header_invalid")
     header_bytes = data[16 : 16 + header_json_size]
     try:
         header_dict = json.loads(header_bytes.decode("utf-8"))
     except Exception as exc:
         raise UnpackError(f"asar_header_json_invalid:{exc}")
 
-    base_payload_offset = 16 + header_json_size
+    base_payload_offset = 8 + header_size
     extracted: list[dict[str, Any]] = []
     total_bytes = 0
 
     def walk_tree(current_dir: str, node: dict[str, Any]):
         nonlocal total_bytes
-        files = node.get("files", {})
+        if not isinstance(node,dict) or "files" not in node:
+            raise UnpackError("asar_directory_invalid")
+        files = node["files"]
+        if not isinstance(files,dict):
+            raise UnpackError("asar_directory_invalid")
         for name, item in files.items():
+            if not isinstance(item,dict) or "link" in item or item.get("unpacked"):
+                raise UnpackError("asar_external_or_link_member_unsupported")
             rel_path = f"{current_dir}/{name}".strip("/")
             if "files" in item:
                 walk_tree(rel_path, item)
             elif "size" in item and "offset" in item:
-                size = int(item["size"])
-                offset = int(item["offset"])
+                size = item["size"]
+                offset = item["offset"]
+                if type(size) is not int or not (type(offset) is int or
+                        isinstance(offset,str) and re.fullmatch(r"[0-9]+",offset)):
+                    raise UnpackError("asar_range_type_invalid")
+                offset = int(offset)
+                if size < 0 or offset < 0:
+                    raise UnpackError("asar_negative_range")
                 if size > max_file_bytes:
                     raise UnpackError(f"file_budget_exceeded:{rel_path}")
                 if len(extracted) + 1 > max_files:
@@ -181,6 +201,8 @@ def _unpack_asar(
                     "size_bytes": size,
                     "sha256": _sha256_bytes(file_data),
                 })
+            else:
+                raise UnpackError("asar_member_metadata_incomplete")
 
     walk_tree("", header_dict)
     return extracted
@@ -201,6 +223,8 @@ def _unpack_zip(
         for info in zf.infolist():
             if info.is_dir():
                 continue
+            if stat.S_ISLNK(info.external_attr >> 16):
+                raise UnpackError("unsupported_zip_symlink")
             safe_rel = _sanitize_path(info.filename)
             size = info.file_size
             if size > max_file_bytes:
@@ -238,9 +262,11 @@ def _unpack_tar(
     total_bytes = 0
     mode = "r:*" if target.suffix in {".gz", ".tgz", ".bz2", ".xz"} else "r:"
     with tarfile.open(target, mode=mode) as tf:
-        for member in tf.getmembers():
-            if not member.isfile():
+        for member in tf:
+            if member.isdir():
                 continue
+            if not member.isfile():
+                raise UnpackError("unsupported_tar_member")
             safe_rel = _sanitize_path(member.name)
             size = member.size
             if size > max_file_bytes:
@@ -326,6 +352,8 @@ def _unpack_nsis(
 
     # Salva o cabeçalho bruto do script NSIS
     hdr_blob = data[hdr_start : min(hdr_start + 64 * 1024, len(data))]
+    if len(hdr_blob) > max_file_bytes or len(hdr_blob) > max_bytes:
+        raise UnpackError("header_budget_exceeded")
     dest_hdr = out_dir / "nsis_header.bin"
     dest_hdr.write_bytes(hdr_blob)
     extracted.append({
@@ -340,14 +368,24 @@ def _unpack_nsis(
     block_idx = 0
     search_pos = 0
 
-    while search_pos < len(payload) and len(extracted) < max_files:
+    total_bytes = len(hdr_blob)
+    while search_pos < len(payload):
         z_match = re.search(b"\x78[\x9c\x01\xda]", payload[search_pos:])
         if not z_match:
             break
         stream_start = search_pos + z_match.start()
+        if len(extracted) >= max_files:
+            raise UnpackError("max_files_exceeded")
+        output_limit = min(max_file_bytes, max_bytes - total_bytes)
         try:
             decompressor = zlib.decompressobj()
-            decomp = decompressor.decompress(payload[stream_start : stream_start + max_file_bytes])
+            # max_length is an OUTPUT ceiling. Slicing compressed input does
+            # not constrain inflation and permits small decompression bombs.
+            decomp = decompressor.decompress(payload[stream_start:], output_limit + 1)
+            if len(decomp) > output_limit:
+                raise UnpackError("decompressed_output_budget_exceeded")
+            if not decompressor.eof:
+                raise UnpackError("compressed_stream_truncated")
             if len(decomp) > 16:
                 block_name = f"nsis_block_{block_idx:03d}.bin"
                 dest_block = out_dir / block_name
@@ -359,9 +397,10 @@ def _unpack_nsis(
                     "compression": "zlib",
                 })
                 block_idx += 1
+                total_bytes += len(decomp)
                 search_pos = stream_start + max(1, len(payload[stream_start:]) - len(decompressor.unused_data))
                 continue
-        except Exception:
+        except zlib.error:
             pass
         search_pos = stream_start + 1
 
@@ -416,6 +455,44 @@ def _unpack_innosetup(
     return extracted
 
 
+def _validate_extraction_files(
+    out_dir: Path, extracted: list[dict[str, Any]], *,
+    max_files: int, max_bytes: int, max_file_bytes: int,
+) -> None:
+    """Reconcile the manifest with actual staged bytes before publication."""
+    if not extracted:
+        raise UnpackError("no_artifacts_extracted")
+    if len(extracted) > max_files:
+        raise UnpackError("max_files_exceeded")
+    total = 0
+    names: set[str] = set()
+    for artifact in extracted:
+        name = _sanitize_path(artifact["relative_path"])
+        if name.casefold() in names:
+            raise UnpackError("duplicate_output_path")
+        names.add(name.casefold())
+        path = out_dir / name
+        size = path.stat().st_size
+        if not path.is_file() or path.is_symlink() or size != artifact["size_bytes"]:
+            raise UnpackError("staged_artifact_mismatch")
+        if size > max_file_bytes:
+            raise UnpackError(f"file_budget_exceeded:{name}")
+        total += size
+        if total > max_bytes:
+            raise UnpackError("max_bytes_budget_exceeded")
+        if _sha256_bytes(path.read_bytes()) != artifact["sha256"]:
+            raise UnpackError("staged_hash_mismatch")
+    actual = {p.relative_to(out_dir).as_posix().casefold() for p in out_dir.rglob("*") if p.is_file()}
+    if names != actual:
+        raise UnpackError("staged_inventory_mismatch")
+
+
+def _assert_no_links(path: Path) -> None:
+    for component in (path.absolute(), *path.absolute().parents):
+        if component.is_symlink() or component.is_junction():
+            raise UnpackError("path_contains_link_or_junction")
+
+
 def unpack_container(
     target: Path,
     out_dir: Path,
@@ -424,89 +501,91 @@ def unpack_container(
     max_bytes: int = 512 * 1024 * 1024,
     max_file_bytes: int = 64 * 1024 * 1024,
 ) -> dict[str, Any]:
-    """Desempacota qualquer container suportado para o diretório de destino de forma segura."""
+    """Extract a snapshot into private staging and publish a NEW directory.
+
+    Installer/firmware/PYZ carving is explicitly partial. A failure publishes
+    no files; an existing destination is never reused or overwritten.
+    """
     target_path = Path(target)
     dest_path = Path(out_dir)
-
-    if not target_path.is_file():
-        return {
-            "schema": SCHEMA,
-            "status": "failed",
-            "target": str(target),
-            "container_format": "unknown",
-            "files_extracted": [],
-            "errors": [{"code": "target_file_not_found"}],
-            "limitations": ["alvo inexistente ou ilegível"],
-        }
-
-    dest_path.mkdir(parents=True, exist_ok=True)
-    fmt = detect_container_format(target_path)
+    fmt = "unknown"
+    target_hash = None
     errors: list[dict[str, str]] = []
     extracted: list[dict[str, Any]] = []
-
     try:
-        if fmt == "asar":
-            extracted = _unpack_asar(
-                target_path, dest_path,
-                max_files=max_files, max_bytes=max_bytes, max_file_bytes=max_file_bytes,
-            )
-        elif fmt == "zip":
-            extracted = _unpack_zip(
-                target_path, dest_path,
-                max_files=max_files, max_bytes=max_bytes, max_file_bytes=max_file_bytes,
-            )
-        elif fmt in {"tar", "gzip"}:
-            extracted = _unpack_tar(
-                target_path, dest_path,
-                max_files=max_files, max_bytes=max_bytes, max_file_bytes=max_file_bytes,
-            )
-        elif fmt == "firmware":
-            extracted = _carve_firmware_streams(
-                target_path, dest_path,
-                max_files=max_files, max_bytes=max_bytes,
-            )
-        elif fmt == "nsis":
-            extracted = _unpack_nsis(
-                target_path, dest_path,
-                max_files=max_files, max_bytes=max_bytes, max_file_bytes=max_file_bytes,
-            )
-        elif fmt == "innosetup":
-            extracted = _unpack_innosetup(
-                target_path, dest_path,
-                max_files=max_files, max_bytes=max_bytes, max_file_bytes=max_file_bytes,
-            )
-        elif fmt == "pyinstaller":
-            # Extrai payload PYZ bruto para inspeção
-            data = target_path.read_bytes()
-            pos = data.find(PYZ_COOKIE)
-            if pos != -1:
-                pyz_blob = data[pos:]
-                pyz_dest = dest_path / "extracted_payload.pyz"
-                pyz_dest.write_bytes(pyz_blob)
-                extracted.append({
-                    "relative_path": "extracted_payload.pyz",
-                    "size_bytes": len(pyz_blob),
-                    "sha256": _sha256_bytes(pyz_blob),
-                })
-        else:
-            errors.append({"code": "unsupported_container_format", "detail": fmt})
-    except (UnpackError, OSError, ValueError) as exc:
-        errors.append({"code": "unpack_failure", "detail": str(exc)})
+        if not target_path.is_file():
+            raise UnpackError("target_file_not_found")
+        _assert_no_links(target_path)
+        _assert_no_links(dest_path)
+        for limit in (max_files, max_bytes, max_file_bytes):
+            if type(limit) is not int or limit <= 0:
+                raise UnpackError("invalid_extraction_budget")
+        if dest_path.exists():
+            raise UnpackError("destination_exists")
+        # Input has its own bounded budget, independent of output inflation.
+        with target_path.open("rb") as handle:
+            data = handle.read(512 * 1024 * 1024 + 1)
+        if len(data) > 512 * 1024 * 1024:
+            raise UnpackError("input_budget_exceeded")
+        target_hash = _sha256_bytes(data)
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix=".aether-unpack-", dir=dest_path.parent) as job:
+            job_path = Path(job)
+            snapshot = job_path / ("input" + "".join(target_path.suffixes))
+            snapshot.write_bytes(data)
+            stage = job_path / "artifacts"
+            stage.mkdir()
+            fmt = detect_container_format(snapshot)
+            handlers = {
+                "asar": _unpack_asar, "zip": _unpack_zip,
+                "tar": _unpack_tar, "gzip": _unpack_tar,
+                "nsis": _unpack_nsis, "innosetup": _unpack_innosetup,
+            }
+            if fmt in handlers:
+                extracted = handlers[fmt](snapshot, stage, max_files=max_files,
+                                         max_bytes=max_bytes, max_file_bytes=max_file_bytes)
+            elif fmt == "firmware":
+                extracted = _carve_firmware_streams(snapshot, stage, max_files=max_files, max_bytes=max_bytes)
+            elif fmt == "pyinstaller":
+                pos = data.find(PYZ_COOKIE)
+                if pos != -1:
+                    pyz_blob = data[pos:]
+                    if len(pyz_blob) > min(max_file_bytes, max_bytes):
+                        raise UnpackError("pyz_output_budget_exceeded")
+                    (stage / "extracted_payload.pyz").write_bytes(pyz_blob)
+                    extracted = [{"relative_path": "extracted_payload.pyz", "size_bytes": len(pyz_blob),
+                                  "sha256": _sha256_bytes(pyz_blob)}]
+            else:
+                raise UnpackError(f"unsupported_container_format:{fmt}")
+            _validate_extraction_files(stage, extracted, max_files=max_files,
+                                       max_bytes=max_bytes, max_file_bytes=max_file_bytes)
+            _assert_no_links(dest_path)
+            if dest_path.exists():
+                raise UnpackError("destination_exists")
+            stage.rename(dest_path)
+    except (UnpackError, OSError, ValueError, tarfile.TarError, zipfile.BadZipFile) as exc:
+        extracted = []
+        errors.append({"code": "target_file_not_found" if str(exc) == "target_file_not_found" else "unpack_failure", "detail": str(exc)})
 
-    status = "failed" if errors and not extracted else ("partial" if errors else "unpacked")
+    carving = fmt in {"firmware", "nsis", "innosetup", "pyinstaller"}
+    status = "failed" if errors else ("partial" if carving else "unpacked")
 
     return {
         "schema": SCHEMA,
         "status": status,
         "target": str(target_path.resolve()),
-        "target_sha256": hashlib.sha256(target_path.read_bytes()).hexdigest(),
+        "target_sha256": target_hash,
         "container_format": fmt,
         "destination": str(dest_path.resolve()),
         "file_count": len(extracted),
         "files_extracted": extracted,
         "errors": errors,
+        "extraction_kind": "carving" if carving else "archive_extraction",
+        "content_complete": not errors and not carving,
+        "preservation_scope": "regular_file_bytes_only",
         "limitations": [
             "desempacotamento extrai artefatos preservando integridade, não realiza descompilação de código",
             "limites de arquivo e contenção fail-closed são aplicados contra zip-bomb e path traversal",
+            *(["carving parcial: não reconstrói a árvore original de arquivos nem valida o instalador"] if carving else []),
         ],
     }

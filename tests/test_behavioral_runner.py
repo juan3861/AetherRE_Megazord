@@ -138,6 +138,41 @@ def test_tampered_target_hash_fails_before_guest_execution(tmp_path):
     assert not called
 
 
+@pytest.mark.parametrize("artifact_name", ["original.bin", "candidate.bin"])
+def test_execution_binary_changed_after_validation_is_rejected_before_guest_execution(tmp_path, monkeypatch, artifact_name):
+    from aether_re import behavioral_runner
+
+    candidate, handoff, _ = _write_bundle(tmp_path)
+    validate = behavioral_runner.validate_candidate
+
+    def validate_then_mutate(*args, **kwargs):
+        result = validate(*args, **kwargs)
+        (tmp_path / artifact_name).write_bytes(b"changed after the evidence hash was checked")
+        return result
+
+    monkeypatch.setattr(behavioral_runner, "validate_candidate", validate_then_mutate)
+    calls = []
+
+    def executor(request):
+        calls.append(request)
+        return _signed_result(request)
+
+    report = run_behavioral_cases(
+        candidate=candidate,
+        artifact_root=tmp_path,
+        case_manifest_path=tmp_path / "cases.json",
+        signed_handoff=handoff,
+        guest_executor=executor,
+        verify_attestation=_verify,
+        timeout_s=5,
+        max_output_bytes=4096,
+    )
+
+    assert report["status"] == "invalid"
+    assert any(error["code"] == "execution_artifact_hash_changed" for error in report["errors"])
+    assert calls == []
+
+
 def test_missing_guest_observation_fails_closed(tmp_path):
     def executor(request):
         return _signed_result(request, case_id="wrong-case")

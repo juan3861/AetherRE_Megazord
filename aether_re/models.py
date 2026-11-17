@@ -16,6 +16,9 @@ class Finding:
     evidence: str = ""
     confidence: float = 0.5  # 0.0–1.0
 
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
 
 @dataclass
 class FunctionSketch:
@@ -25,6 +28,9 @@ class FunctionSketch:
     strings_near: list[str] = field(default_factory=list)
     notes: str = ""
     confidence: float = 0.3
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
 
 
 @dataclass

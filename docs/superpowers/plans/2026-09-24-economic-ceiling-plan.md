@@ -133,3 +133,55 @@
 - Stop a profile from promotion when the required tool, license, corpus, guest, rollback, oracle, or reviewer evidence is absent; continue other independent profiles.
 - The completed product may be called high-confidence only within its measured profile and input envelope. Reconstructing mathematically lost source or proving behavior for arbitrary future inputs is outside any valid acceptance claim.
 
+---
+
+## Maximum-ceiling reuse-first execution addendum — 2026-10-12
+
+**Purpose:** maximize defensible extraction and composition of existing engineering components without rebuilding mature parsers/decompilers, while preserving every source tool's provenance and every uncertainty. “Complete” means all declared finite profile envelopes are implemented, integrated, measured, independently reviewed, and certified; it never means exact recovery of arbitrary original source or proof for every future behavior.
+
+### Execution order
+
+1. **Custody and baseline:** retain the existing dirty checkout; capture branch, HEAD, all pending paths, current commands, and prior evidence before each new code change. No reset, clean, checkout, stash, or overwrite of prior evidence.
+2. **Reuse inventory and eligibility:** for each candidate component record official origin, exact version, content hash/signature, SPDX license, runtime, supported profile, limits, and actual smoke evidence. Distinguish `candidate → acquired → hash-verified → executed → integrated → profile-tested → certified`; never promote a component because it merely exists on disk.
+3. **Reuse-first extraction lanes:** use locked, isolated workers for the formats they demonstrably support. Begin with the already-present REA 6.4.0 JavaScript/Electron adapter and the existing native PE/ELF tools. Add JVM, Android, .NET, WASM, Mach-O, or firmware only after a real worker, license/provenance lock, real sample, oracle, and bounded execution path exist.
+4. **Evidence federation, not blind merging:** preserve each engine's raw result and subject hash as separate evidence. Produce a field-level provenance map and `LossLedger`; correlate only fields with validated shared identity/semantics. Until that contract is tested, report `not_attempted` rather than manufacture a merged graph or consensus.
+5. **Reconstruction:** label outputs as original source, recovered source, decompiler output, pseudocode, generated candidate, or behavior-tested candidate. Keep source/build/binary links hash-bound; treat compilation and similarity as separate from behavioral equivalence.
+6. **Dynamic behavior:** only after VM transport, private-network isolation, disposable disk, lease/nonce, collector, resource limits, and rollback checks pass. Start with an explicitly benign marker; execute no unknown target on the host. A provisioned VM/checkpoint is not proof of an executed trace or rollback.
+7. **Corpus and accuracy:** register legal basis, family, hashes, oracle provenance, and split membership. Freeze thresholds before blind holdout; report per-profile denominators, precision/recall, abstention, confidence intervals, parse failures, timeouts, and crashes. Do not use a global percentage to hide weak profiles.
+8. **Release:** two clean replays, full tests, current manifests, independent reviewer signature, external immutable custody, and owner promotion decision. Until then report local implementation/testing separately from external homologation.
+
+### Immediate execution slice (start here)
+
+- [x] Run focused REA adapter/CLI tests on the current checkout: 9 passed, 0 failed/errors/skips.
+- [x] Recompute the locked worker verification against the actual E: package tree and Node runtime: verified, zero issues.
+- [x] Execute a real static-only smoke on a tiny, benign, locally created JavaScript/Electron fixture; bind the immutable input snapshot, worker/runtime identities, process containment result, raw engine output, federated report, and artifact hashes.
+- [x] Verify the snapshot and report artifacts independently (16 checks); the tool contract states static-only and the report does not claim cross-engine graph equivalence or a profile certificate.
+- [x] The smoke exposed no defect, so conditional TDD repair was not triggered; no production-code change was made in this slice.
+- [x] Update this plan's checkpoint, the project Hub note, Florence audit, and SDD progress ledger in the same cycle. This run tests integration only; it does not certify the JavaScript profile, close F-gates, or change the strict 0/13 release ruling.
+
+### Next reuse-integration slice — exact artifact identity, not semantic graph merge
+
+- [x] Add failing tests for a field-level correspondence record joining only the same captured input file by normalized relative path and SHA-256; verify byte length from the snapshot and AetherRE inventory, since REA graph observations do not independently provide a size field.
+- [x] Implement `build_artifact_correspondence(...) -> artifact-correspondence.v1`; preserve unmatched/conflicting records and counts, reject duplicate/unsafe identities, and explicitly state that byte identity is not semantic agreement.
+- [x] Keep `cross_engine_correlation.status=not_attempted`; no graph nodes/edges, behavior, or source equivalence are merged or inferred by this slice.
+- [x] Re-run focused tests, the real worker-backed smoke, artifact hash verification, `selftest`, and the full suite after integration.
+- [x] Record new exact-current evidence and update the project note, Florence audit, master plant, and progress ledger. Retain the first smoke bundle as pre-correspondence history; do not rewrite its hashes.
+
+### Finish criteria for this campaign
+
+The technical campaign may be called complete only for an explicitly named finite profile set whose workers are hash-locked and actually executed, whose authorized corpus/oracles and blind holdouts are disjoint, whose outputs retain provenance/loss and uncertainty, whose declared tests/replays pass, and whose independent review/release evidence is valid. Dynamic profiles additionally require a real guest run and demonstrated rollback. Universal arbitrary-program exact source recovery remains outside the attainable claim.
+
+
+### Resultado do slice de identidade exata — 2026-10-12
+
+As cinco tarefas do slice estão concluídas com teste e execução real: 12 testes focados passaram; o worker REA 6.4.0 revalidou sem issues; smoke real produziu 3/3 correspondências exatas de bytes; verificador local 20/20; regressão integral 828 passed/3 skipped/0 falhas/erros. Evidências e hashes estão no checkpoint e no ledger. Nenhuma fusão semântica foi feita e nenhuma certificação ou gate foi promovido. Próximo passo continua sendo corpora/oráculos para perfis finitos e prova dinâmica em guest real.
+### Suplemento de revalidação final — 2026-10-12 17:16 -03
+
+Este registro complementa e **supersede os denominadores de teste anteriores neste ciclo**; não altera o estado de gates. Foram adicionados testes fail-closed para colisão de caminhos por case-folding (`Main.js`/`main.js`), conflito de byte length no inventário AetherRE e ID de nó REA duplicado.
+
+- Focada `tests/test_rea_static_adapter.py tests/test_rea_cli.py`: **15 passed**, 0 falhas/erros/skips, 2,10 s.
+- Suíte integral final, Python 3.13.13, plugin autoload desativado: **831 passed, 3 skipped, 0 failed, 0 errors**, 834 coletados, 284,27 s, exit 0. Os três skips continuam sendo duas fixtures Ghidra/`GHIDRA_HOME` e uma fixture MSVC/`MEGAZORD_MSVC_PE_FIXTURE`. JUnit `E:\AetherRE_Evidence\megazord-reuse-ceiling-20261012T2001Z\pytest-full-final.xml`, SHA-256 `06B91BCE56CD8F73E59C04B96CBC2B808E75E5FFD8978ECDECABB3AA57AD9D9B`; log SHA-256 `AF95F333D8C08FCF1DFCCE3E4F2D487143ECE9098303DBEC4F43DFC6350FE614`.
+- Revalidação final: `megazord status=0`, `megazord selftest=0`, `compileall=0`, `git diff --check=0`. Worktree continua com 20 registros, branch/HEAD inalterados (`codex/re-megazord-execution` / `42775fc8266f2cf2ff0b4a8dc1833f20dc4db186`). SHA do teste atualizado: `tests/test_rea_static_adapter.py` `CF89BFCE3DB5326D6A10E255EC403F4838ECBC80322965D437C3FFFC9CB0D086`.
+- O smoke real e seu recibo 20/20 permanecem válidos porque o código de produção e a amostra não mudaram; o incremento final desta revalidação foi apenas cobertura adicional de teste. Bundle permanece em `E:\AetherRE_Evidence\megazord-reuse-ceiling-20261012T2001Z\`.
+
+**Conclusão limitada:** subfatia de identidade exata implementada, executada e coberta pelos testes locais. Não significa perfil JavaScript certificado, fusão semântica, equivalência comportamental, homologação por terceiro ou evidência WORM. F00–F12 seguem **0/13 QUITADA**, release **PARCIALMENTE QUITADA**; F08/F09, G3/G5, G8/G9 e perfis restantes continuam em dívida.

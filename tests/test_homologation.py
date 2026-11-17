@@ -284,3 +284,43 @@ def test_homologation_rejects_reparse_target_path_before_hashing(tmp_path, monke
 
     assert report["status"] == "fail"
     assert any(item["code"] == "target_link" for item in report["issues"])
+
+
+def test_homologate_cli_verifies_released_and_active_locks(tmp_path, monkeypatch):
+    import sys
+    import megazord
+
+    target, run = _package(tmp_path)
+    out = tmp_path / "homologation.json"
+
+    monkeypatch.setattr(sys, "argv", ["megazord.py", "homologate", str(run), "--target", str(target), "--out", str(out)])
+    assert megazord.main() == 0
+    assert json.loads(out.read_text(encoding="utf-8"))["status"] == "pass"
+
+    lock = RunLock(run / "run.lock")
+    lock.acquire()
+    try:
+        monkeypatch.setattr(sys, "argv", ["megazord.py", "homologate", str(run), "--target", str(target), "--out", str(out)])
+        assert megazord.main() == 2
+        assert any(i["code"] == "run_lock_present" for i in json.loads(out.read_text(encoding="utf-8"))["issues"])
+
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["megazord.py", "homologate", str(run), "--target", str(target), "--active-lock-token", lock._owner_token, "--out", str(out)],
+        )
+        assert megazord.main() == 0
+        active_report = json.loads(out.read_text(encoding="utf-8"))
+        assert active_report["status"] == "pass"
+        assert active_report["run_lock_state"] == "expected_active"
+
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["megazord.py", "homologate", str(run), "--target", str(target), "--active-lock-token", "wrong-token", "--out", str(out)],
+        )
+        assert megazord.main() == 2
+        assert any(i["code"] == "run_lock_owner_mismatch" for i in json.loads(out.read_text(encoding="utf-8"))["issues"])
+    finally:
+        assert lock.release() is True
+

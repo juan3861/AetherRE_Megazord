@@ -3102,42 +3102,185 @@ def cmd_semantic_deobfuscate(args: argparse.Namespace) -> int:
 
 
 def cmd_ghidra_decompile(args: argparse.Namespace) -> int:
-    """Descompila um binário executável usando NSA Ghidra 12.1.4 Headless + Injeção de Tipos."""
-    from aether_re.ghidra_headless_bridge import GhidraHeadlessBridge
+    """Exporta análise estática Ghidra com tipos observados, sem injeção heurística."""
+    from aether_re.ghidra_headless_bridge import GhidraHeadlessBridge, publish_export_output
+
+    runtime_lock=getattr(args,'ghidra_runtime_lock',None)
+    if runtime_lock is not None:
+        from aether_re.ghidra_runtime_lock import read_ghidra_runtime_lock
+        try:
+            if getattr(args,'out',None) and Path(args.out).suffix.lower()=='.c':raise ValueError('runtime_lock_requires_json_output')
+            read_ghidra_runtime_lock(runtime_lock)
+        except (OSError,ValueError,TypeError) as exc:
+            print(json.dumps(dict(success=False,status='runtime_lock_configuration_invalid',error_message=str(exc)[:300])))
+            return 1
+
+    observed_selector=getattr(args,'observe_frame_function',None)
+    frame_runtime=getattr(args,'frame_runtime',None)
+    from aether_re.frame_request import validate_frame_runtime_request,frame_program_succeeded
+    try:validate_frame_runtime_request(frame_runtime,getattr(args,'derive_frame_function',None),observed_selector)
+    except ValueError as exc:
+        print(json.dumps(dict(success=False,status='frame_runtime_configuration_invalid',error_message=str(exc))))
+        return 1
+    frame_options={} if frame_runtime is None else dict(frame_runtime=frame_runtime)
+    native_inputs=None;native_failed=False
+    from aether_re.native_frame_request import (validate_native_frame_request,read_native_frame_inputs,
+        snapshot_native_frame_inputs,native_input_destination)
+    try:
+        validate_native_frame_request(observed_selector,getattr(args,'frame_object_bytes',None),getattr(args,'frame_language_dir',None),
+            **{key:getattr(args,key,None) for key in ('derive_frame_function','frame_fact','reconstruct_function',
+                'memory_model','memory_derivation','call_model','debug_pdb','dia_helper','dia_dll','out')})
+        if observed_selector is not None:
+            preflight=read_native_frame_inputs(args.target,args.frame_language_dir)
+            native_inputs=snapshot_native_frame_inputs(preflight,native_input_destination(getattr(args,'out',None)))
+    except (OSError,ValueError,ImportError) as exc:
+        print(json.dumps(dict(success=False,status='native_frame_configuration_invalid',error_message=str(exc)[:300])))
+        return 1
+
+    frame_selector=getattr(args,'derive_frame_function',None)
+    frame_reference=getattr(args,'frame_fact',None)
+    frame_data=None;frame_intake=None
+    from aether_re.frame_request import validate_frame_request,read_frame_fact
+    try:
+        validate_frame_request(frame_selector,frame_reference,**{key:getattr(args,key,None) for key in
+            ('reconstruct_function','memory_model','memory_derivation','call_model','debug_pdb','dia_helper','dia_dll','out')})
+        if frame_selector is not None:frame_data,frame_intake=read_frame_fact(frame_reference)
+    except (OSError,ValueError) as exc:
+        print(json.dumps(dict(success=False,status='frame_configuration_invalid',error_message=str(exc)[:300])))
+        return 1
+
+    memory_model=getattr(args,'memory_model',None)
+    selector=getattr(args,'reconstruct_function',None)
+    call_model=getattr(args,'call_model',None)
+    from aether_re.call_closure import validate_call_configuration
+    try:validate_call_configuration(call_model,memory_model,selector)
+    except ValueError as exc:
+        print(json.dumps(dict(success=False,status='call_configuration_invalid',error_message=str(exc))))
+        return 1
+    memory_derivation=getattr(args,'memory_derivation',None)
+    if memory_derivation is not None:
+        from aether_re.native_memory_custody import validate_memory_reference
+        try:validate_memory_reference(memory_derivation,memory_model,selector)
+        except ValueError as exc:
+            print(json.dumps(dict(success=False,status='memory_configuration_invalid',error_message=str(exc))))
+            return 1
+    if memory_model is not None and (memory_model not in ('bounded-bytes.v1','bounded-bytes.v2') or not isinstance(selector,str) or not selector.strip()):
+        print(json.dumps(dict(success=False,status='memory_configuration_invalid',error_message='requires a supported bounded-bytes model and reconstruct_function')))
+        return 1
+
+    debug_paths=[getattr(args,key,None) for key in ('debug_pdb','dia_helper','dia_dll')]
+    if any(p is not None for p in debug_paths) and (any(not isinstance(p,str) or not 1<=len(p)<=32768 for p in debug_paths) or not getattr(args,'reconstruct_function',None)):
+        print(json.dumps(dict(success=False,status='debug_configuration_invalid',error_message='requires reconstruct_function, debug_pdb, dia_helper and dia_dll')))
+        return 1
 
     target = Path(args.target)
     if not target.exists():
         print(json.dumps({"error": f"target_not_found: {target}"}))
         return 1
 
-    bridge = GhidraHeadlessBridge()
+    memory_options={}
+    if call_model is not None:memory_options['call_model']=call_model
+    if memory_derivation is not None:
+        from aether_re.native_memory_custody import admit_memory_for_target
+        try:memory_options['_memory_context']=admit_memory_for_target(memory_derivation,target)
+        except (OSError,ValueError) as exc:
+            print(json.dumps(dict(success=False,status='memory_derivation_invalid',error_message=str(exc)[:300])))
+            return 1
+    bridge = GhidraHeadlessBridge(**({'runtime_lock':str(runtime_lock)} if runtime_lock is not None else {}))
     script = "DecompileWithTypeInjection.java" if getattr(args, "type_injection", False) else "DecompileAllFunctions.java"
     timeout = getattr(args, "timeout", 300)
     max_cpu = getattr(args, "max_cpu", 4)
 
-    res = bridge.decompile_binary(target, timeout_seconds=timeout, max_cpu=max_cpu, script_name=script)
+    backend_target=Path(native_inputs['target_path']) if native_inputs is not None else target
+    res = bridge.decompile_binary(backend_target, timeout_seconds=timeout, max_cpu=max_cpu, script_name=script,
+        **({'temp_work_dir':str(Path(native_inputs['target_path']).parent/'ghidra-export')} if native_inputs is not None else {}))
     payload = {
         "success": res.success,
+        "status": res.status,
+        "type_policy": res.type_policy,
+        "ir_coverage": res.ir_coverage(),
+        "limitations": res.limitations,
         "binary_path": res.binary_path,
+        "target_sha256": res.target_sha256,
+        "worker_execution": res.worker_execution,
+        "execution_scope": "static_decompilation_no_target_execution",
         "total_functions": res.total_functions,
         "decompiled_functions": res.decompiled_functions,
         "elapsed_seconds": res.elapsed_seconds,
-        "functions": {k: {"address": v.address, "params": v.params, "return_type": v.return_type, "c_snippet": (v.decompiled_c or '')[:200]} for k, v in list(res.functions.items())[:50]},
+        "functions": {k: {"name": v.name, "address": v.address, "success": v.success, "params": v.params, "return_type": v.return_type, "signature_source": v.signature_source, "ir_summary": v.ir_preview(), "c_snippet": (v.decompiled_c or '')[:200]} for k, v in list(res.functions.items())[:50]},
+        "functions_returned": min(50,len(res.functions)),
+        "functions_truncated": len(res.functions)>50,
     }
     if res.error_message:
         payload["error_message"] = res.error_message
+    if native_inputs is not None:
+        payload['native_frame_input_receipt']=native_inputs['receipt']
+        payload['native_frame_export']=dict(artifact_dir=res.artifact_dir,artifact_hashes=dict(res.artifact_hashes))
+    if runtime_lock is not None:
+        payload['runtime_lock_export']=dict(artifact_dir=res.artifact_dir,artifact_hashes=dict(res.artifact_hashes))
+
+    if getattr(args, "ir_function", None) is not None:
+        try:
+            payload["function_ir"] = res.select_ir_graph(args.ir_function)
+            if getattr(args, "out", None) and Path(args.out).suffix.lower() == ".c":
+                raise ValueError("ghidra_selected_ir_requires_json_output")
+        except ValueError as exc:
+            payload.update(success=False, export_status=res.status, status="ir_selection_failed", error_message=str(exc))
+            print(json.dumps(payload, indent=2, ensure_ascii=False))
+            return 1
+
+    if not res.success:
+        if (native_inputs is not None or runtime_lock is not None) and getattr(args,'out',None):
+            publish_export_output(Path(args.out),json.dumps(payload,indent=2,ensure_ascii=False)+'\n')
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+        return 1
+
+    if getattr(args, "reconstruct_function", None) is not None:
+        try:
+            payload['function_reconstruction'] = res.select_reconstruction(args.reconstruct_function,
+                debug_pdb=getattr(args,'debug_pdb',None),dia_helper=getattr(args,'dia_helper',None),dia_dll=getattr(args,'dia_dll',None),memory_model=memory_model,**memory_options)
+            if payload['function_reconstruction']['status'] != 'complete':
+                raise ValueError('ghidra_reconstruction_unsupported')
+            if getattr(args,'out',None) and Path(args.out).suffix.lower()=='.c':
+                raise ValueError('ghidra_reconstruction_requires_json_output')
+        except ValueError as exc:
+            payload.update(success=False,export_status=res.status,status='reconstruction_failed',error_message=str(exc))
+            print(json.dumps(payload,indent=2,ensure_ascii=False))
+            return 1
+
+    if frame_selector is not None:
+        try:
+            payload['derived_frame_program']=res.select_frame_program(frame_selector,frame_data,**frame_options)
+            payload['derived_frame_program']['frame_fact_intake']=frame_intake
+            if not frame_program_succeeded(payload['derived_frame_program'],frame_runtime):
+                raise ValueError('ghidra_derived_frame_program_refused')
+        except ValueError as exc:
+            payload.update(success=False,export_status=res.status,status='derived_frame_program_failed',error_message=str(exc))
+            print(json.dumps(payload,indent=2,ensure_ascii=False))
+            return 1
+
+    if observed_selector is not None:
+        try:
+            payload['derived_frame_program']=res.select_observed_frame_program(observed_selector,
+                target_bytes=native_inputs['target_bytes'],language_sources=native_inputs['language_sources'],object_bytes=args.frame_object_bytes,input_receipt=native_inputs['receipt'],**frame_options)
+            if not frame_program_succeeded(payload['derived_frame_program'],frame_runtime):raise ValueError('ghidra_observed_frame_program_refused')
+        except ValueError as exc:
+            payload.update(success=False,export_status=res.status,status='native_frame_observation_failed',error_message=str(exc)[:400])
+            native_failed=True
 
     if getattr(args, "out", None):
         out_p = Path(args.out)
-        out_p.parent.mkdir(parents=True, exist_ok=True)
-        if out_p.suffix == ".c":
-            out_p.write_text(res.full_c_source, encoding="utf-8")
-        else:
-            out_p.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        content = res.full_c_source if out_p.suffix == ".c" else json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
+        try:
+            publish_export_output(out_p, content)
+        except (OSError, ValueError) as exc:
+            payload.update(success=False, export_status=res.status, status="publication_failed", error_message=str(exc))
+            print(json.dumps(payload, indent=2, ensure_ascii=False))
+            return 1
         print(f"Ghidra Decompilation: {out_p} | {res.decompiled_functions}/{res.total_functions} functions in {res.elapsed_seconds:.2f}s")
     else:
         print(json.dumps(payload, indent=2, ensure_ascii=False))
-    return 0 if res.success else 1
+    return 0 if res.success and not native_failed else 1
 
 
 def cmd_webcrack(args: argparse.Namespace) -> int:
@@ -3221,20 +3364,227 @@ def cmd_ground_truth_bench(args: argparse.Namespace) -> int:
 
     bridge = GhidraHeadlessBridge()
     res = bridge.decompile_binary(target, script_name="DecompileWithTypeInjection.java")
-    if not res.success or fn_name not in res.functions:
+    function = res.get_unique_function(fn_name)
+    if not res.success or function is None:
         print(json.dumps({"error": f"function_not_decompiled: {fn_name}"}))
         return 1
 
-    fn_code = res.functions[fn_name].decompiled_c or ""
+    fn_code = function.decompiled_c or ""
     gt = evaluate_decompilation_against_ground_truth(source, fn_code, fn_name)
 
     if getattr(args, "out", None):
         out_p = Path(args.out)
         out_p.parent.mkdir(parents=True, exist_ok=True)
         out_p.write_text(json.dumps(gt, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-        print(f"Ground Truth Benchmark: {out_p} | fidelity={gt['empirical_fidelity_score_pct']}%")
+        print(f"Ground Truth Comparison: {out_p} | structural_similarity={gt['structural_similarity_score_pct']}% | behavior={gt['behavioral_comparison']['status']}")
     else:
         print(json.dumps(gt, indent=2, ensure_ascii=False))
+    return 0 if gt["behavioral_comparison"]["status"] == "equivalent_in_model" else 2
+
+
+def cmd_floss_strings(args: argparse.Namespace) -> int:
+    """Reconstrói stack strings x86/x64, decodifica strings XOR e extrai payloads Base64 (FLOSS)."""
+    from aether_re.floss_strings import scan_file_floss_strings
+
+    target = Path(args.target)
+    if not target.exists() or not target.is_file():
+        print(json.dumps({"error": "target_not_found", "path": str(target)}))
+        return 1
+
+    report = scan_file_floss_strings(target)
+    if getattr(args, "out", None):
+        out_p = Path(args.out)
+        out_p.parent.mkdir(parents=True, exist_ok=True)
+        out_p.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        print(f"FLOSS Strings: {out_p} | stack={report.get('total_stack_strings', 0)}, xor={report.get('total_xor_strings', 0)}")
+    else:
+        print(json.dumps(report, indent=2, ensure_ascii=False))
+    return 0
+
+
+def cmd_cpp_rtti(args: argparse.Namespace) -> int:
+    """Recupera classes C++ RTTI (MSVC/Itanium), hierarquia de herança e ponteiros VTable."""
+    from aether_re.cpp_rtti import scan_file_cpp_rtti
+
+    target = Path(args.target)
+    if not target.exists() or not target.is_file():
+        print(json.dumps({"error": "target_not_found", "path": str(target)}))
+        return 1
+
+    report = scan_file_cpp_rtti(target)
+    if getattr(args, "out", None):
+        out_p = Path(args.out)
+        out_p.parent.mkdir(parents=True, exist_ok=True)
+        out_p.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        print(f"C++ RTTI: {out_p} | classes={report.get('total_classes', 0)}, abi={report.get('abi')}")
+    else:
+        print(json.dumps(report, indent=2, ensure_ascii=False))
+    return 0
+
+
+def cmd_api_hash_resolve(args: argparse.Namespace) -> int:
+    """Resolve hashes de API ofuscados (ROR13, DJB2, FNV-1a, CRC32) em binários/shellcode."""
+    from aether_re.api_hash_resolve import scan_file_api_hashes
+
+    target = Path(args.target)
+    if not target.exists() or not target.is_file():
+        print(json.dumps({"error": "target_not_found", "path": str(target)}))
+        return 1
+
+    report = scan_file_api_hashes(target)
+    if getattr(args, "out", None):
+        out_p = Path(args.out)
+        out_p.parent.mkdir(parents=True, exist_ok=True)
+        out_p.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        print(f"API Hash Resolve: {out_p} | resolved={report.get('total_resolved', 0)}")
+    else:
+        print(json.dumps(report, indent=2, ensure_ascii=False))
+    return 0
+
+
+def cmd_dotnet_audit(args: argparse.Namespace) -> int:
+    """Inspeciona streams de metadados CLR .NET (BSJB, #Strings, #US) sem runtime externo."""
+    from aether_re.dotnet_forensics import scan_file_dotnet
+
+    target = Path(args.target)
+    if not target.exists() or not target.is_file():
+        print(json.dumps({"error": "target_not_found", "path": str(target)}))
+        return 1
+
+    report = scan_file_dotnet(target)
+    if getattr(args, "out", None):
+        out_p = Path(args.out)
+        out_p.parent.mkdir(parents=True, exist_ok=True)
+        out_p.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        print(f".NET Audit: {out_p} | is_dotnet={report.get('is_dotnet')}, user_strings={report.get('total_user_strings', 0)}")
+    else:
+        print(json.dumps(report, indent=2, ensure_ascii=False))
+    return 0
+
+
+def cmd_python_audit(args: argparse.Namespace) -> int:
+    """Analisa bytecode Python (.pyc) e executáveis empacotados PyInstaller (CArchive/TOC)."""
+    from aether_re.python_forensics import scan_file_python_artifact
+
+    target = Path(args.target)
+    if not target.exists() or not target.is_file():
+        print(json.dumps({"error": "target_not_found", "path": str(target)}))
+        return 1
+
+    report = scan_file_python_artifact(target)
+
+    if getattr(args, "out", None):
+        out_p = Path(args.out)
+        out_p.parent.mkdir(parents=True, exist_ok=True)
+        out_p.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        print(f"Python Audit: {out_p} | kind={report.get('kind')}, status={report.get('status')}")
+    else:
+        print(json.dumps(report, indent=2, ensure_ascii=False))
+    return 0
+
+
+def cmd_firmware_audit(args: argparse.Namespace) -> int:
+    """Analisa imagens de firmware, UEFI FV, U-Boot, FDT/DTB, arquivos e entropia."""
+    from aether_re.firmware_forensics import scan_file_firmware
+
+    target = Path(args.target)
+    if not target.exists() or not target.is_file():
+        print(json.dumps({"error": "target_not_found", "path": str(target)}))
+        return 1
+
+    report = scan_file_firmware(target)
+
+    if getattr(args, "out", None):
+        out_p = Path(args.out)
+        out_p.parent.mkdir(parents=True, exist_ok=True)
+        out_p.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        print(f"Firmware Audit: {out_p} | signatures={report.get('total_signatures', 0)}, entropy={report.get('global_entropy')}")
+    else:
+        print(json.dumps(report, indent=2, ensure_ascii=False))
+    return 0
+
+
+def cmd_rust_recover(args: argparse.Namespace) -> int:
+    """Extrai versão rustc, crates Cargo, arquivos .rs e símbolos demangled de binários Rust."""
+    from aether_re.rust_recover import scan_file_rust
+
+    target = Path(args.target)
+    if not target.exists() or not target.is_file():
+        print(json.dumps({"error": "target_not_found", "path": str(target)}))
+        return 1
+
+    report = scan_file_rust(target)
+
+    if getattr(args, "out", None):
+        out_p = Path(args.out)
+        out_p.parent.mkdir(parents=True, exist_ok=True)
+        out_p.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        print(f"Rust Recover: {out_p} | is_rust={report.get('is_rust_binary')}, crates={report.get('total_crates', 0)}")
+    else:
+        print(json.dumps(report, indent=2, ensure_ascii=False))
+    return 0
+
+
+def cmd_macho_audit(args: argparse.Namespace) -> int:
+    """Analisa binários Mach-O 32/64/Fat, CodeSignature, Entitlements e metadados ObjC/Swift."""
+    from aether_re.macho_forensics import scan_file_macho
+
+    target = Path(args.target)
+    if not target.exists() or not target.is_file():
+        print(json.dumps({"error": "target_not_found", "path": str(target)}))
+        return 1
+
+    report = scan_file_macho(target)
+
+    if getattr(args, "out", None):
+        out_p = Path(args.out)
+        out_p.parent.mkdir(parents=True, exist_ok=True)
+        out_p.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        print(f"Mach-O Audit: {out_p} | status={report['status']}, slices={len(report.get('slices', []))}")
+    else:
+        print(json.dumps(report, indent=2, ensure_ascii=False))
+    return 0
+
+
+def cmd_elf_dwarf(args: argparse.Namespace) -> int:
+    """Analisa binários ELF, mitigações (RELRO/NX/PIE/Canary) e recupera tipos/funções DWARF."""
+    from aether_re.dwarf_types import scan_file_elf_dwarf
+
+    target = Path(args.target)
+    if not target.exists() or not target.is_file():
+        print(json.dumps({"error": "target_not_found", "path": str(target)}))
+        return 1
+
+    report = scan_file_elf_dwarf(target)
+
+    if getattr(args, "out", None):
+        out_p = Path(args.out)
+        out_p.parent.mkdir(parents=True, exist_ok=True)
+        out_p.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        print(f"ELF/DWARF Audit: {out_p} | status={report['status']}, structs={report.get('dwarf', {}).get('total_structs', 0)}")
+    else:
+        print(json.dumps(report, indent=2, ensure_ascii=False))
+    return 0
+
+
+def cmd_authenticode_audit(args: argparse.Namespace) -> int:
+    """Audita assinatura Authenticode PE, certificados PKCS#7, Rich Header, mitigações e overlay."""
+    from aether_re.authenticode_audit import scan_file_authenticode
+
+    target = Path(args.target)
+    if not target.exists() or not target.is_file():
+        print(json.dumps({"error": "target_not_found", "path": str(target)}))
+        return 1
+
+    report = scan_file_authenticode(target)
+
+    if getattr(args, "out", None):
+        out_p = Path(args.out)
+        out_p.parent.mkdir(parents=True, exist_ok=True)
+        out_p.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        print(f"Authenticode Audit: {out_p} | status={report['status']}, digest_match={report['authenticode'].get('digest_match')}")
+    else:
+        print(json.dumps(report, indent=2, ensure_ascii=False))
     return 0
 
 
@@ -3412,6 +3762,30 @@ def cmd_universal(args: argparse.Namespace) -> int:
 
     profile = getattr(args, "profile", None)
 
+    from dataclasses import replace
+    policy=replace(CasePolicy.static_only(),request_native_reconstruction=getattr(args,'native_reconstruction',False),
+        ghidra_timeout_seconds=getattr(args,'ghidra_timeout',180),debug_pdb=getattr(args,'debug_pdb',None),
+        dia_helper=getattr(args,'dia_helper',None),dia_dll=getattr(args,'dia_dll',None),native_memory_model=getattr(args,'native_memory_model',None),native_memory_derivation=getattr(args,'native_memory_derivation',None),native_call_model=getattr(args,'native_call_model',None),
+        derive_frame_function=getattr(args,'derive_frame_function',None),frame_fact=getattr(args,'frame_fact',None),
+        observe_frame_function=getattr(args,'observe_frame_function',None),frame_object_bytes=getattr(args,'frame_object_bytes',None),
+        frame_language_dir=getattr(args,'frame_language_dir',None),frame_runtime=getattr(args,'frame_runtime',None),ghidra_runtime_lock=getattr(args,'ghidra_runtime_lock',None))
+    debug_paths=policy.native_debug_paths()
+    policy.validate_native_memory()
+    policy.validate_frame_program()
+    policy.validate_observed_frame()
+    policy.validate_frame_runtime()
+    policy.validate_runtime_lock()
+    if profile=='js-electron' and policy.ghidra_runtime_lock is not None:
+        raise ValueError('runtime_lock_unsupported_explicit_profile')
+    if profile=='js-electron' and policy.observe_frame_function is not None:
+        raise ValueError('native_frame_unsupported_explicit_profile')
+    if profile=='js-electron' and policy.derive_frame_function is not None:
+        raise ValueError('frame_unsupported_explicit_profile')
+    if profile=='js-electron' and policy.native_memory_model is not None:
+        raise ValueError('native_memory_unsupported_explicit_profile')
+    if profile=='js-electron' and debug_paths is not None:
+        raise ValueError('native_debug_unsupported_explicit_profile')
+
     if profile == "js-electron":
 
         adapter = ReaStaticJavaScriptAdapter()
@@ -3428,12 +3802,44 @@ def cmd_universal(args: argparse.Namespace) -> int:
 
         return 0 if state == "succeeded" else 2
 
-    report = run_universal_case(Path(args.target), Path(args.out), CasePolicy.static_only())
+    report = run_universal_case(Path(args.target), Path(args.out), policy)
 
     print(json.dumps(report.to_dict(), ensure_ascii=False, indent=2))
 
     return 0
 
+
+
+def cmd_ghidra_runtime_lock(args: argparse.Namespace) -> int:
+    """Create/check a complete local byte reference without executing a worker."""
+    from aether_re.ghidra_runtime_lock import (build_ghidra_runtime_lock,
+        verify_ghidra_runtime_lock,read_ghidra_runtime_lock,runtime_lock_bytes)
+    from aether_re.ghidra_headless_bridge import GhidraHeadlessBridge,publish_export_output
+    try:
+        ghidra=Path(args.ghidra_home) if args.ghidra_home else GhidraHeadlessBridge.DEFAULT_GHIDRA_PATH.resolve(strict=True)
+        jdk=Path(args.jdk_home) if args.jdk_home else GhidraHeadlessBridge.DEFAULT_JDK_PATH.resolve(strict=True)
+        output=Path(args.out).absolute()
+        if output.exists() or output.is_symlink():raise ValueError('runtime_lock_output_exists')
+        for root in (ghidra,jdk):
+            if output.resolve()==root.resolve() or root.resolve() in output.resolve().parents:
+                raise ValueError('runtime_lock_output_inside_bundle')
+        if args.action=='create':
+            if args.lock is not None:raise ValueError('runtime_lock_create_does_not_take_lock')
+            result=build_ghidra_runtime_lock(ghidra,jdk);content=runtime_lock_bytes(result).decode('utf-8')
+            success=True
+        else:
+            if args.lock is None:raise ValueError('runtime_lock_verify_requires_lock')
+            pin=read_ghidra_runtime_lock(args.lock)
+            result=verify_ghidra_runtime_lock(pin['manifest'],ghidra,jdk)
+            result['reference']=dict(path=pin['path'],raw_sha256=pin['raw_sha256'])
+            content=json.dumps(result,indent=2,ensure_ascii=False)+'\n';success=result['verified']
+        digest=publish_export_output(output,content)
+        print(json.dumps(dict(success=success,action=args.action,path=str(output),sha256=digest,
+            upstream_authenticity_proved=False,continuous_execution_integrity_proved=False)))
+        return 0 if success else 1
+    except (OSError,ValueError,TypeError) as exc:
+        print(json.dumps(dict(success=False,status='runtime_lock_command_failed',error_message=str(exc)[:300])))
+        return 1
 
 
 def main() -> int:
@@ -3485,8 +3891,31 @@ def main() -> int:
     universal.add_argument("--out", required=True, help="Diretório novo de saída")
 
     universal.add_argument("--profile", help="Perfil estático explícito (ex: js-electron)")
+    universal.add_argument('--native-reconstruction',action='store_true',help='Executa Ghidra estático governado e reconstrói funções escalares via IR/C-Tree')
+    universal.add_argument('--derive-frame-function',help='Deriva um programa condicional de frames para a função selecionada; não prova layout ou ABI nativos')
+    universal.add_argument('--frame-runtime',choices=['invocation-arena.v1'],help='Arena lógica por invocação para modelo derivado explícito; não admite execução nativa ou ABI')
+    universal.add_argument('--observe-frame-function',help='Observa prefixo estático de endereço Windows x64 e deriva modelo; requer extensão e fontes de linguagem')
+    universal.add_argument('--frame-object-bytes',type=int,help='Extensão solicitada de 1–4096 bytes; não inferida dos efeitos do callee')
+    universal.add_argument('--frame-language-dir',help='Diretório das fontes x86 declaradas; não atesta autenticidade da toolchain')
+    universal.add_argument('--frame-fact',help='Hipótese JSON de frames vinculada ao hash do alvo; requer --derive-frame-function')
+    universal.add_argument('--native-memory-model',choices=['bounded-bytes.v1','bounded-bytes.v2'],help='Memória explícita: v1 contígua, v2 esparsa; exige --native-reconstruction')
+    universal.add_argument('--native-memory-derivation',help='Bundle de mapa custodiado vinculado ao alvo; exige modelo de memória e reconstrução nativa')
+    universal.add_argument('--native-call-model',choices=['bounded-direct-pure-calls.v1','bounded-direct-effects-calls.v1','bounded-ms-x64-stack-values.v1'],help='Composição condicional de chamadas diretas, perfil puro ou efeitos com rastro de operações; exige --native-memory-model bounded-bytes.v2 e --native-reconstruction; não recupera ABI')
+    universal.add_argument('--ghidra-timeout',type=int,default=180,help='Prazo do worker estático Ghidra (1–600 segundos)')
+    universal.add_argument('--ghidra-runtime-lock',help='Pin local completo de Ghidra/JDK antes e depois do worker; não é atestação de aquisição')
+    universal.add_argument('--debug-pdb',help='PDB opcional vinculado ao PE admitido; requer reconstrução nativa e helper/DIA explícitos')
+    universal.add_argument('--dia-helper',help='Helper DIA explícito para tipos observados')
+    universal.add_argument('--dia-dll',help='DLL do SDK DIA explícita')
 
     universal.set_defaults(func=cmd_universal)
+
+    runtime_lock_parser=sub.add_parser('ghidra-runtime-lock',help='Cria/verifica pin local completo de Ghidra/JDK sem executar worker')
+    runtime_lock_parser.add_argument('action',choices=['create','verify'])
+    runtime_lock_parser.add_argument('--ghidra-home',help='Raiz explícita Ghidra; padrão da instalação local')
+    runtime_lock_parser.add_argument('--jdk-home',help='Raiz explícita JDK; padrão da instalação local')
+    runtime_lock_parser.add_argument('--lock',help='Referência JSON para verify')
+    runtime_lock_parser.add_argument('--out',required=True,help='Novo arquivo fora dos bundles')
+    runtime_lock_parser.set_defaults(func=cmd_ghidra_runtime_lock)
 
 
 
@@ -4615,8 +5044,23 @@ def main() -> int:
     
     ghidra_parser = sub.add_parser("ghidra-decompile", help="Descompila um binário executável usando NSA Ghidra 12.1.4 Headless + Injeção de Tipos")
     ghidra_parser.add_argument("target", help="Caminho do binário alvo")
-    ghidra_parser.add_argument("--type-injection", action="store_true", help="Ativa injeção automática de structs e protótipos C recuperados")
+    ghidra_parser.add_argument("--type-injection", action="store_true", help="Entrada legada: exporta tipos observados, sem injeção automática de hipóteses cJSON")
+    ghidra_parser.add_argument("--ir-function", help="Retorna grafo High P-Code por identidade hash!space:address ou nome único (JSON)")
+    ghidra_parser.add_argument("--reconstruct-function", help="Reconstrói C escalar do High P-Code via C-Tree; efeitos sem modelo abstêm (JSON)")
+    ghidra_parser.add_argument('--derive-frame-function',help='Produz programa derivado condicional de frame por identidade/nome único; exige --frame-fact e saída JSON')
+    ghidra_parser.add_argument('--frame-runtime',choices=['invocation-arena.v1'],help='Arena lógica por invocação para modelo derivado explícito; não admite execução nativa ou ABI')
+    ghidra_parser.add_argument('--observe-frame-function',help='Observa prefixo estático de endereço Windows x64 e deriva modelo; requer extensão e fontes de linguagem')
+    ghidra_parser.add_argument('--frame-object-bytes',type=int,help='Extensão solicitada de 1–4096 bytes; não inferida dos efeitos do callee')
+    ghidra_parser.add_argument('--frame-language-dir',help='Diretório das fontes x86 declaradas; não atesta autenticidade da toolchain')
+    ghidra_parser.add_argument('--frame-fact',help='JSON local limitado de hipótese de frame; não verifica ABI ou relação nativa')
+    ghidra_parser.add_argument('--memory-model',choices=['bounded-bytes.v1','bounded-bytes.v2'],help='Memória explícita: v1 contígua, v2 esparsa; exige --reconstruct-function')
+    ghidra_parser.add_argument('--memory-derivation',help='Bundle de mapa custodiado vinculado ao alvo; exige --memory-model e --reconstruct-function')
+    ghidra_parser.add_argument('--call-model',choices=['bounded-direct-pure-calls.v1','bounded-direct-effects-calls.v1','bounded-ms-x64-stack-values.v1'],help='Composição condicional de chamadas diretas, perfil puro ou efeitos com rastro de operações; exige --memory-model bounded-bytes.v2 e --reconstruct-function; não recupera ABI')
+    ghidra_parser.add_argument('--debug-pdb',help='PDB local para adaptador separado de retorno escalar vinculado por GUID/age')
+    ghidra_parser.add_argument('--dia-helper',help='Helper DIA explícito para ler PDB; nunca executa o alvo')
+    ghidra_parser.add_argument('--dia-dll',help='DLL DIA explícita, capturada e hashada com o helper')
     ghidra_parser.add_argument("--timeout", type=int, default=300, help="Timeout em segundos (padrão: 300)")
+    ghidra_parser.add_argument('--ghidra-runtime-lock',help='Pin local completo de Ghidra/JDK antes e depois do worker; requer saída JSON')
     ghidra_parser.add_argument("--max-cpu", type=int, default=4, help="Número de núcleos de CPU para análise (padrão: 4)")
     ghidra_parser.add_argument("--out", help="Arquivo opcional de saída (.c ou .json)")
     ghidra_parser.set_defaults(func=cmd_ghidra_decompile)
@@ -4651,6 +5095,56 @@ def main() -> int:
     go_parser.add_argument("target", help="Caminho do binário Go alvo")
     go_parser.add_argument("--out", help="Arquivo opcional de saída JSON")
     go_parser.set_defaults(func=cmd_golang_recover)
+
+    auth_parser = sub.add_parser("authenticode-audit", help="Audita assinatura Authenticode PE, PKCS#7, Rich Header e mitigações")
+    auth_parser.add_argument("target", help="Caminho do binário PE alvo")
+    auth_parser.add_argument("--out", help="Arquivo opcional de saída JSON")
+    auth_parser.set_defaults(func=cmd_authenticode_audit)
+
+    elf_parser = sub.add_parser("elf-dwarf", help="Audita binários ELF, mitigações (RELRO/NX/PIE/Canary) e tipos DWARF")
+    elf_parser.add_argument("target", help="Caminho do binário ELF alvo")
+    elf_parser.add_argument("--out", help="Arquivo opcional de saída JSON")
+    elf_parser.set_defaults(func=cmd_elf_dwarf)
+
+    macho_parser = sub.add_parser("macho-audit", help="Analisa Mach-O, CodeSignature, Entitlements e ObjC/Swift")
+    macho_parser.add_argument("target", help="Caminho do binário Mach-O alvo")
+    macho_parser.add_argument("--out", help="Arquivo opcional de saída JSON")
+    macho_parser.set_defaults(func=cmd_macho_audit)
+
+    rust_parser = sub.add_parser("rust-recover", help="Extrai crates, versão rustc, paths .rs e símbolos demangled de binários Rust")
+    rust_parser.add_argument("target", help="Caminho do binário Rust alvo")
+    rust_parser.add_argument("--out", help="Arquivo opcional de saída JSON")
+    rust_parser.set_defaults(func=cmd_rust_recover)
+
+    fw_parser = sub.add_parser("firmware-audit", help="Analisa firmware, UEFI FV, U-Boot, FDT/DTB, filesystems e entropia")
+    fw_parser.add_argument("target", help="Caminho da imagem de firmware alvo")
+    fw_parser.add_argument("--out", help="Arquivo opcional de saída JSON")
+    fw_parser.set_defaults(func=cmd_firmware_audit)
+
+    py_parser = sub.add_parser("python-audit", help="Analisa bytecode .pyc e executáveis PyInstaller (CArchive/TOC)")
+    py_parser.add_argument("target", help="Caminho do artefato Python (.pyc/.exe) alvo")
+    py_parser.add_argument("--out", help="Arquivo opcional de saída JSON")
+    py_parser.set_defaults(func=cmd_python_audit)
+
+    rtti_parser = sub.add_parser("cpp-rtti", help="Recupera classes C++ RTTI, hierarquia de herança e VTables")
+    rtti_parser.add_argument("target", help="Caminho do binário C++ alvo")
+    rtti_parser.add_argument("--out", help="Arquivo opcional de saída JSON")
+    rtti_parser.set_defaults(func=cmd_cpp_rtti)
+
+    apihash_parser = sub.add_parser("api-hash-resolve", help="Resolve hashes de API ofuscados (ROR13, DJB2, FNV-1a, CRC32)")
+    apihash_parser.add_argument("target", help="Caminho do binário/shellcode alvo")
+    apihash_parser.add_argument("--out", help="Arquivo opcional de saída JSON")
+    apihash_parser.set_defaults(func=cmd_api_hash_resolve)
+
+    dotnet_parser = sub.add_parser("dotnet-audit", help="Inspeciona metadados CLR .NET (BSJB, #Strings, #US) offline")
+    dotnet_parser.add_argument("target", help="Caminho do assembly .NET alvo")
+    dotnet_parser.add_argument("--out", help="Arquivo opcional de saída JSON")
+    dotnet_parser.set_defaults(func=cmd_dotnet_audit)
+
+    floss_parser = sub.add_parser("floss-strings", help="Reconstrói stack strings x86/x64, XOR e Base64 (FLARE-FLOSS)")
+    floss_parser.add_argument("target", help="Caminho do binário alvo")
+    floss_parser.add_argument("--out", help="Arquivo opcional de saída JSON")
+    floss_parser.set_defaults(func=cmd_floss_strings)
 
     args = p.parse_args()
 

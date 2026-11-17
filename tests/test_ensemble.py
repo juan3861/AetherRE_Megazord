@@ -50,6 +50,26 @@ def test_consensus_merges_same_address_sources():
     assert functions[0].coverage == 0.4
 
 
+def test_single_backend_does_not_receive_source_agreement_credit():
+    evidence = [
+        FunctionEvidence(
+            address="0x1000",
+            name="sub_1000",
+            source="rizin",
+            confidence=0.85,
+            quality=0.80,
+            coverage=0.90,
+        )
+    ]
+
+    functions = merge_function_evidence(evidence, ["rizin"])
+
+    assert len(functions) == 1
+    assert functions[0].source_agreement == 0.0
+    assert functions[0].confidence == 0.5725
+    assert any("não há corroboração independente" in warning for warning in functions[0].warnings)
+
+
 def test_native_clusters_do_not_create_function_addresses():
     evidence = [
         FunctionEvidence(

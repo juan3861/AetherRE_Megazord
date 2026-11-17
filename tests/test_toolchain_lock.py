@@ -130,3 +130,66 @@ def test_verify_toolchain_lock_rehashes_executable_and_fails_closed(tmp_path):
     report = verify_toolchain_lock(ToolchainLock.from_dict(valid_lock(tools=[worker])))
     assert report["verified"] is False
     assert report["tools"][0]["state"] == "hash_mismatch"
+
+
+def test_toolchain_verify_cli_checks_dotnet_and_rea_locks(tmp_path, monkeypatch):
+    import sys
+    import megazord
+
+    exe = tmp_path / "worker.exe"
+    exe.write_bytes(b"pinned-worker")
+    lock_path = tmp_path / "toolchain.lock.json"
+    dump_toolchain_lock(
+        ToolchainLock.from_dict(valid_lock(tools=[valid_worker(argv=[str(exe)], sha256=hashlib.sha256(exe.read_bytes()).hexdigest())])),
+        lock_path,
+    )
+    dotnet_bin = tmp_path / "dotnet.exe"
+    dotnet_bin.write_bytes(b"dotnet-runtime")
+    ilspy_dll = tmp_path / "ilspycmd.dll"
+    ilspy_dll.write_bytes(b"ilspy-worker")
+    dotnet_lock = tmp_path / "dotnet_workers.lock.json"
+    dotnet_lock.write_text(
+        json.dumps({
+            "schema": "dotnet-worker-lock.v1",
+            "profile": "dotnet",
+            "worker": {
+                "name": "ilspycmd",
+                "version": "11.1.0.9782",
+                "path": str(ilspy_dll),
+                "sha256": hashlib.sha256(ilspy_dll.read_bytes()).hexdigest(),
+                "version_argv": ["--version"],
+                "version_contains": "ilspycmd: 11.1.0.9782",
+                "official_url": "https://github.com/icsharpcode/ILSpy/releases/tag/v11.1",
+                "license_spdx": "MIT",
+            },
+            "runtime": {
+                "name": "dotnet",
+                "sdk_version": "10.0.203",
+                "path": str(dotnet_bin),
+                "sha256": hashlib.sha256(dotnet_bin.read_bytes()).hexdigest(),
+                "version_argv": ["--version"],
+                "framework": "Microsoft.NETCore.App",
+                "framework_version": "10.0.7",
+                "framework_version_argv": ["--list-runtimes"],
+            },
+            "invocation": {"argv_template": ["{dotnet}", "{ilspycmd}", "{input}"], "shell": False, "output_mode": "bounded_stdout"},
+            "limits": {"wall_seconds": 120, "memory_mb": 1536, "cpu_seconds": 120, "input_bytes": 1024, "output_bytes": 1024, "probe_output_bytes": 1024},
+        }),
+        encoding="utf-8",
+    )
+    rea_lock = tmp_path / "rea_static_workers.lock.json"
+    rea_lock.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(megazord, "verify_rea_worker", lambda _p: {"verified": True, "issues": [], "worker": {"name": "rea-agents-static-js-electron"}})
+    out = tmp_path / "verify.json"
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["megazord.py", "toolchain-verify", "--lock", str(lock_path), "--dotnet-lock", str(dotnet_lock), "--rea-lock", str(rea_lock), "--out", str(out)],
+    )
+    assert megazord.main() == 0
+    verified = json.loads(out.read_text(encoding="utf-8"))
+    assert verified["verified"] is True
+    assert verified["dotnet_worker_verified"] is True
+    assert verified["rea_worker_verified"] is True
+

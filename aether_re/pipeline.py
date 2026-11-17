@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import atexit
 import json
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -67,6 +67,9 @@ LIMITATIONS_BASE = [
     "Análise completa de caixa-preta combina estática + dinâmica + emulação + contexto humano.",
 ]
 
+MAX_NATIVE_REPORT_BYTES = 8 * 1024 * 1024
+MAX_NATIVE_DEBUG_BYTES = 8 * 1024 * 1024
+
 
 @dataclass(frozen=True)
 class CasePolicy:
@@ -81,6 +84,65 @@ class CasePolicy:
     request_dynamic: bool = False
     lab_policy: dict[str, Any] | None = None
     runtime_proof: dict[str, Any] | None = None
+    request_native_reconstruction: bool = False
+    ghidra_timeout_seconds: int = 180
+    debug_pdb: str | Path | None = None
+    dia_helper: str | Path | None = None
+    dia_dll: str | Path | None = None
+    native_memory_model: str | None = None
+    native_memory_derivation: str | Path | None = None
+    native_call_model: str | None = None
+    derive_frame_function: str | None = None
+    frame_fact: str | Path | None = None
+    observe_frame_function: str | None = None
+    frame_object_bytes: int | None = None
+    frame_language_dir: str | Path | None = None
+    frame_runtime: str | None = None
+    ghidra_runtime_lock: str | Path | None = None
+
+    def validate_frame_runtime(self) -> None:
+        from aether_re.frame_request import validate_frame_runtime_request
+        validate_frame_runtime_request(self.frame_runtime,self.derive_frame_function,self.observe_frame_function)
+
+    def validate_runtime_lock(self) -> None:
+        if self.ghidra_runtime_lock is None:return
+        if not (self.request_native_reconstruction or self.derive_frame_function is not None or self.observe_frame_function is not None):
+            raise ValueError('runtime_lock_requires_ghidra_worker_request')
+        from aether_re.ghidra_runtime_lock import read_ghidra_runtime_lock
+        read_ghidra_runtime_lock(self.ghidra_runtime_lock)
+
+    def validate_observed_frame(self) -> None:
+        from aether_re.native_frame_request import validate_native_frame_request
+        validate_native_frame_request(self.observe_frame_function,self.frame_object_bytes,self.frame_language_dir,
+            derive_frame_function=self.derive_frame_function,frame_fact=self.frame_fact,
+            memory_model=self.native_memory_model,memory_derivation=self.native_memory_derivation,
+            call_model=self.native_call_model,debug_pdb=self.debug_pdb,dia_helper=self.dia_helper,dia_dll=self.dia_dll)
+
+    def validate_frame_program(self) -> None:
+        from aether_re.frame_request import validate_frame_request
+        validate_frame_request(self.derive_frame_function, self.frame_fact,
+            memory_model=self.native_memory_model, memory_derivation=self.native_memory_derivation,
+            call_model=self.native_call_model, debug_pdb=self.debug_pdb,
+            dia_helper=self.dia_helper, dia_dll=self.dia_dll)
+
+    def validate_native_memory(self) -> None:
+        from aether_re.call_closure import validate_call_configuration
+        validate_call_configuration(self.native_call_model,self.native_memory_model,'native-case' if self.request_native_reconstruction is True else None)
+        if self.native_memory_model is not None and (self.native_memory_model not in ('bounded-bytes.v1','bounded-bytes.v2') or self.request_native_reconstruction is not True):
+            raise ValueError('native_memory_requires_reconstruction_and_bounded_bytes_model')
+        if self.native_memory_derivation is not None:
+            from aether_re.native_memory_custody import validate_memory_reference
+            validate_memory_reference(self.native_memory_derivation,self.native_memory_model,'native-case' if self.request_native_reconstruction is True else None)
+
+    def native_debug_paths(self) -> tuple[Path, Path, Path] | None:
+        values=(self.debug_pdb,self.dia_helper,self.dia_dll)
+        if not any(value is not None for value in values):
+            return None
+        if (self.request_native_reconstruction is not True
+            or any(not isinstance(value,(str,Path)) or not 1<=len(str(value))<=32768
+                or not str(value).strip() or '\0' in str(value) for value in values)):
+            raise ValueError('native_debug_requires_reconstruction_pdb_helper_dll')
+        return tuple(Path(value) for value in values)
 
     @classmethod
     def static_only(cls, principal: str = "local-owner") -> "CasePolicy":
@@ -124,9 +186,11 @@ class CaseReport:
     certification_status: str
     original_source_recovered: bool = False
     limitations: tuple[str, ...] = ()
+    native_reconstruction: dict[str, Any] | None = None
+    derived_frame_program: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        result = {
             "schema": self.schema, "case_id": self.case_id,
             "target_sha256": self.target_sha256, "profile": self.profile,
             "observations": [
@@ -142,7 +206,11 @@ class CaseReport:
             "certification_status": self.certification_status,
             "original_source_recovered": self.original_source_recovered,
             "limitations": list(self.limitations),
+            "native_reconstruction": self.native_reconstruction,
         }
+        if self.derived_frame_program is not None:
+            result['derived_frame_program'] = self.derived_frame_program
+        return result
 
 
 def run_profile_workers(intake: Any, decision: Any, policy: CasePolicy) -> tuple[CaseObservation, ...]:
@@ -255,10 +323,135 @@ def _dynamic_gate(policy: CasePolicy, target_sha256: str) -> str:
     return "eligible_no_executor"
 
 
+def _export_native(intake: Any, store: EvidenceStore, out_dir: Path, policy: CasePolicy) -> Any:
+    from aether_re.ghidra_headless_bridge import GhidraHeadlessBridge
+    if type(policy.ghidra_timeout_seconds) is not int or not 1 <= policy.ghidra_timeout_seconds <= 600:
+        raise ValueError('native_reconstruction_timeout_invalid')
+    bridge=GhidraHeadlessBridge(**({'runtime_lock':str(policy.ghidra_runtime_lock)} if policy.ghidra_runtime_lock is not None else {}))
+    exported = bridge.decompile_binary(store.resolve(intake.root_artifact),
+        timeout_seconds=policy.ghidra_timeout_seconds, temp_work_dir=out_dir/'native_worker')
+    if exported.target_sha256 != intake.root_artifact.sha256:
+        raise ValueError('native_reconstruction_target_mismatch')
+    return exported
+
+
+def _native_reconstruction(intake: Any, decision: Any, store: EvidenceStore, out_dir: Path, policy: CasePolicy, *, _exported: Any = None) -> dict[str, Any]:
+    """One governed backend over the admitted snapshot; finite, explicit coverage."""
+    from aether_re.ghidra_headless_bridge import publish_export_output
+    result = dict(schema='native-reconstruction-case.v1',status='unsupported_profile',
+        target_sha256=intake.root_artifact.sha256,total_functions=0,attempted_functions=0,
+        reconstructed_functions=0,unsupported_functions=0,functions={},truncated=False,binary_equivalence_proved=False,
+        debug_adapted_functions=0,debug_unavailable_functions=0,debug_types=dict(status='not_requested'),
+        target_executed=False,limitations=['observed High P-Code reconstruction, not recovered types/ABI or binary equivalence'])
+    debug_paths=policy.native_debug_paths()
+    policy.validate_native_memory()
+    memory_options={} if policy.native_memory_model is None else dict(memory_model=policy.native_memory_model)
+    if policy.native_call_model is not None:
+        memory_options['call_model']=policy.native_call_model
+        result['requested_call_model']=policy.native_call_model
+    if debug_paths is not None and decision.profile_id!='native-pe':
+        result['debug_types']=dict(status='unavailable',code='debug_types_require_native_pe')
+    if decision.profile_id not in {'native-pe','native-elf','macho'}:
+        return result
+    if type(policy.ghidra_timeout_seconds) is not int or not 1<=policy.ghidra_timeout_seconds<=600:
+        raise ValueError('native_reconstruction_timeout_invalid')
+    snapshot=store.resolve(intake.root_artifact)
+    if policy.native_memory_derivation is not None:
+        from aether_re.native_memory_custody import admit_memory_for_target
+        memory_options['_memory_context']=admit_memory_for_target(policy.native_memory_derivation,snapshot)
+    observed=None
+    if debug_paths is not None and decision.profile_id=='native-pe':
+        from aether_re.pdb_dia import extract_pdb_symbols
+        observed=extract_pdb_symbols(debug_paths[0],helper_path=debug_paths[1],dia_dll=debug_paths[2],
+            binary_path=snapshot,temp_work_dir=out_dir/'native_debug_worker')
+        encoded_debug=json.dumps(observed,ensure_ascii=False,indent=2)+'\n'
+        if len(encoded_debug.encode('utf-8'))>MAX_NATIVE_DEBUG_BYTES:
+            result['debug_types']=dict(status='unavailable',code='debug_report_output_budget')
+            observed=None
+        else:
+            debug_output=out_dir/'native_debug_types.json'
+            publish_export_output(debug_output,encoded_debug)
+            result['debug_types']={key:observed[key] for key in (
+                'status','code','count','truncated','type_coverage','binding','binary_sha256','pdb_sha256',
+                'helper_sha256','dia_dll_sha256','worker_execution','artifact_dir') if key in observed}
+            result['debug_types'].update(report_path=str(debug_output),report_sha256=sha256_file(debug_output))
+    exported = _export_native(intake, store, out_dir, policy) if _exported is None else _exported
+    result.update(status='backend_failed',total_functions=exported.total_functions,
+        export_status=exported.status,worker_execution=exported.worker_execution,artifact_dir=exported.artifact_dir,
+        ir_coverage=exported.ir_coverage(),error_message=exported.error_message)
+    if exported.target_sha256!=intake.root_artifact.sha256:
+        raise ValueError('native_reconstruction_target_mismatch')
+    if exported.success:
+        result['status']='complete'
+        for identity,info in sorted(exported.functions.items()):
+            if result['attempted_functions']>=50:
+                result.update(status='partial',truncated=True);break
+            selected_graph=info.normalized_ir
+            try:
+                reconstruction=exported.select_reconstruction(identity,**memory_options) if info.normalized_ir else dict(status='unavailable',structured_c_source=None)
+            except ValueError as exc:
+                reconstruction=dict(status='invalid',structured_c_source=None,errors=[str(exc)[:400]])
+                selected_graph=None
+            adapted=False
+            if debug_paths is not None:
+                debug_error='debug_return_requires_scalar_translation'
+                if reconstruction['status']=='complete':
+                    debug_error=result['debug_types'].get('code','debug_type_report_unavailable')
+                    if observed is not None and observed.get('status')=='complete':
+                        try:
+                            reconstruction=exported.select_reconstruction(identity,debug_report=observed,**memory_options)
+                            adapted=True
+                        except ValueError as exc:
+                            debug_error=str(exc)[:400]
+                if not adapted:
+                    reconstruction['debug_return_adapter']=dict(status='unavailable',errors=[debug_error],
+                        binary_equivalence_proved=False,abi_recovered=False)
+            item=dict(name=info.name,address=info.address,graph=selected_graph,reconstruction=reconstruction)
+            translated=reconstruction['status']=='complete'
+            candidate={**result,'functions':{**result['functions'],identity:item},
+                'attempted_functions':result['attempted_functions']+1,
+                'reconstructed_functions':result['reconstructed_functions']+int(translated),
+                'unsupported_functions':result['unsupported_functions']+int(not translated),
+                'debug_adapted_functions':result['debug_adapted_functions']+int(adapted),
+                'debug_unavailable_functions':result['debug_unavailable_functions']+int(debug_paths is not None and not adapted),
+                'status':result['status'] if translated and (debug_paths is None or adapted) else 'partial'}
+            # Account for the exact final envelope, keys, indentation and newline.
+            if len((json.dumps(candidate,ensure_ascii=False,indent=2)+'\n').encode('utf-8'))>MAX_NATIVE_REPORT_BYTES:
+                result.update(status='partial',truncated=True);break
+            result=candidate
+    publication=out_dir/'native_reconstruction.json'
+    encoded=json.dumps(result,ensure_ascii=False,indent=2)+'\n'
+    if len(encoded.encode('utf-8'))>MAX_NATIVE_REPORT_BYTES:
+        raise ValueError('native_reconstruction_envelope_budget_exceeded')
+    publish_export_output(publication,encoded)
+    return result
+
+
 def run_universal_case(target: Path, out_dir: Path, policy: CasePolicy) -> CaseReport:
     target, out_dir = Path(target).resolve(), Path(out_dir).resolve()
     if not isinstance(policy, CasePolicy):
         raise TypeError("case_policy_required")
+    if type(policy.request_native_reconstruction) is not bool:
+        raise ValueError('native_reconstruction_request_invalid')
+    policy.native_debug_paths()
+    policy.validate_native_memory()
+    policy.validate_frame_program()
+    policy.validate_observed_frame()
+    policy.validate_frame_runtime()
+    policy.validate_runtime_lock()
+    frame_preflight = None
+    observed_preflight = None
+    if ((policy.derive_frame_function is not None or policy.observe_frame_function is not None)
+            and not policy.authorization.allows('static-analysis')):
+        raise ValueError('static_analysis_not_authorized')
+    if policy.derive_frame_function is not None:
+        from aether_re.frame_request import read_frame_fact
+        frame_preflight = read_frame_fact(policy.frame_fact)
+    if policy.observe_frame_function is not None:
+        from aether_re.native_frame_request import read_native_frame_inputs
+        observed_preflight=read_native_frame_inputs(target,policy.frame_language_dir)
+    if (out_dir/'case_report.json').exists():
+        raise FileExistsError('case_report_already_exists')
     dynamic_status = _dynamic_gate(policy, sha256_file(target))
     intake = prepare_case(IntakeRequest(target, out_dir / "intake", policy.authorization, policy.intake_limits))
     store = EvidenceStore(intake.manifest_path.parent)
@@ -267,6 +460,35 @@ def run_universal_case(target: Path, out_dir: Path, policy: CasePolicy) -> CaseR
     graph = normalize_observations(intake, observations, decision.profile_id)
     reconstruction = verify_reconstruction(intake, graph, policy)
     report = certify_case(intake, decision, graph, reconstruction, policy, observations, dynamic_status)
+    if observed_preflight is not None:
+        from aether_re.native_frame_request import snapshot_native_frame_inputs
+        from aether_re.universal_frame import build_observed_frame_case,publish_frame_case
+        observed_inputs=snapshot_native_frame_inputs(observed_preflight,out_dir/'observed_frame_inputs',
+            expected_target_sha256=intake.root_artifact.sha256)
+        need_export=(decision.profile_id=='native-pe' or
+            policy.request_native_reconstruction and decision.profile_id in {'native-pe','native-elf','macho'})
+        exported=_export_native(intake,store,out_dir,policy) if need_export else None
+        derived=build_observed_frame_case(exported,target_sha256=intake.root_artifact.sha256,
+            selector=policy.observe_frame_function,inputs=observed_inputs,object_bytes=policy.frame_object_bytes,profile=decision.profile_id,
+            **({'frame_runtime':policy.frame_runtime} if policy.frame_runtime is not None else {}))
+        report=replace(report,derived_frame_program=publish_frame_case(derived,out_dir/'derived_frame_program.json'))
+        if policy.request_native_reconstruction:
+            report=replace(report,native_reconstruction=_native_reconstruction(intake,decision,store,out_dir,policy,_exported=exported))
+    elif frame_preflight is not None:
+        from aether_re.universal_frame import snapshot_frame_fact, build_frame_case, publish_frame_case
+        fact, receipt = snapshot_frame_fact(policy.frame_fact, out_dir/'derived_frame_fact.json',
+            target_sha256=intake.root_artifact.sha256, preflight=frame_preflight)
+        exported = (_export_native(intake, store, out_dir, policy)
+            if decision.profile_id in {'native-pe', 'native-elf', 'macho'} else None)
+        derived = build_frame_case(exported, target_sha256=intake.root_artifact.sha256,
+            selector=policy.derive_frame_function, fact=fact, intake=receipt, profile=decision.profile_id,
+            **({'frame_runtime':policy.frame_runtime} if policy.frame_runtime is not None else {}))
+        report = replace(report, derived_frame_program=publish_frame_case(derived, out_dir/'derived_frame_program.json'))
+        if policy.request_native_reconstruction:
+            report = replace(report, native_reconstruction=_native_reconstruction(
+                intake, decision, store, out_dir, policy, _exported=exported))
+    elif policy.request_native_reconstruction:
+        report=replace(report,native_reconstruction=_native_reconstruction(intake,decision,store,out_dir,policy))
     out_dir.mkdir(parents=True, exist_ok=True)
     report_path = out_dir / "case_report.json"
     if report_path.exists():

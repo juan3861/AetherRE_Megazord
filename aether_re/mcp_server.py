@@ -430,12 +430,27 @@ TOOLS = [
     },
     {
         "name": "aether_ghidra_decompile",
-        "description": "Descompilação C de nível industrial e extração de High P-Code via NSA Ghidra 12.1.4 Headless com suporte a injeção de tipos e recuperação de structs.",
+        "description": "Exportação estática C/High P-Code pelo Ghidra, com inventário por endereço e tipos observados; pseudo-fonte não é fonte original.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "target": {"type": "string", "description": "Caminho absoluto para o binário (PE/ELF)."},
-                "type_injection": {"type": "boolean", "description": "Se verdadeiro, injeta structs e tipos recuperados.", "default": True},
+                "type_injection": {"type": "boolean", "description": "Opção legada: exporta tipos observados, sem injetar hipóteses cJSON ou provar recuperação de tipos.", "default": False},
+                "ir_function": {"type": "string", "maxLength": 4096, "description": "Identidade hash!space:address ou nome único para retornar o grafo High P-Code validado dessa função."},
+                "reconstruct_function": {"type": "string", "maxLength": 4096, "description": "Reconstrução C escalar via High P-Code/C-Tree por identidade ou nome único; efeitos sem modelo abstêm."},
+                "memory_model": {"type":"string","enum":["bounded-bytes.v1","bounded-bytes.v2"],"description":"Hipótese explícita: v1 região contígua, v2 regiões esparsas; exige reconstruct_function. Não recupera ABI nem prova equivalência binária."},
+                "memory_derivation": {"type":"string","maxLength":32768,"description":"Bundle local de mapa custodiado para o mesmo alvo; exige memory_model e reconstruct_function."},
+                "call_model": {"type":"string","enum":["bounded-direct-pure-calls.v1","bounded-direct-effects-calls.v1","bounded-ms-x64-stack-values.v1"],"description":"Composição condicional de chamadas diretas: perfil puro ou efeitos com terceiro estado/rastro de operações; exige memory_model bounded-bytes.v2 e reconstruct_function. Não recupera ABI nem certifica comportamento binário."},
+                "derive_frame_function": {"type":"string","maxLength":4096,"description":"Seleciona programa derivado condicional por identidade ou nome único; exige frame_fact. Não admite perfil nativo ou ABI."},
+                "frame_fact": {"type":"string","maxLength":32768,"description":"Caminho local do JSON limitado de hipótese de frame; usado somente com derive_frame_function."},
+                "frame_runtime": {"type":"string","enum":["invocation-arena.v1"],"description":"Arena lógica para uma rota explícita de modelo derivado. Não admite perfil nativo ou ABI."},
+                "observe_frame_function": {"type":"string","maxLength":4096,"description":"Observa prefixo estático de endereço Windows x64 e deriva modelo; requer frame_object_bytes e frame_language_dir. Não admite frame nativo."},
+                "frame_object_bytes": {"type":"integer","minimum":1,"maximum":4096,"description":"Extensão solicitada, não inferida dos efeitos do callee."},
+                "frame_language_dir": {"type":"string","maxLength":32768,"description":"Fontes x86 declaradas para o layout de registros; não atesta autenticidade da toolchain."},
+                "ghidra_runtime_lock": {"type":"string","maxLength":32768,"description":"Pin local completo de Ghidra/JDK, verificado antes e depois do worker. Não autentica aquisição ou execução imutável."},
+                "debug_pdb": {"type":"string","description":"PDB local opcional para adaptador de retorno; exige dia_helper/dia_dll e reconstruct_function."},
+                "dia_helper": {"type":"string","description":"Helper DIA explícito e hashado; ferramenta de análise, não alvo."},
+                "dia_dll": {"type":"string","description":"DLL DIA explícita e hashada."},
                 "timeout": {"type": "integer", "description": "Timeout em segundos (padrão: 300).", "default": 300}
             },
             "required": ["target"]
@@ -486,9 +501,119 @@ TOOLS = [
             "required": ["target"]
         }
     },
+    {
+        "name": "aether_audit_authenticode",
+        "description": "Audita assinatura Authenticode PE (PKCS#7), verifica digest PE, Rich Header, mitigações ASLR/DEP/CFG e overlay.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "target": {"type": "string", "description": "Caminho absoluto para o binário PE alvo."}
+            },
+            "required": ["target"]
+        }
+    },
+    {
+        "name": "aether_elf_dwarf_audit",
+        "description": "Analisa binários ELF32/64, mitigações (RELRO, NX, PIE, Canary, Fortify) e extrai structs, funções e linhas DWARF.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "target": {"type": "string", "description": "Caminho absoluto para o binário ELF alvo."}
+            },
+            "required": ["target"]
+        }
+    },
+    {
+        "name": "aether_macho_audit",
+        "description": "Analisa binários Mach-O 32/64/Fat, CodeSignature (cdhash/team_id/entitlements), segmentos e símbolos ObjC/Swift.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "target": {"type": "string", "description": "Caminho absoluto para o binário Mach-O alvo."}
+            },
+            "required": ["target"]
+        }
+    },
+    {
+        "name": "aether_rust_recover",
+        "description": "Extrai versão rustc, dependências de crates Cargo, paths .rs e símbolos Rust demangled de binários stripped.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "target": {"type": "string", "description": "Caminho absoluto para o binário Rust alvo."}
+            },
+            "required": ["target"]
+        }
+    },
+    {
+        "name": "aether_firmware_audit",
+        "description": "Analisa imagens de firmware: UEFI Firmware Volumes, U-Boot uImage, FDT/DTB, SquashFS, streams comprimidos e entropia.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "target": {"type": "string", "description": "Caminho absoluto para a imagem de firmware alvo."}
+            },
+            "required": ["target"]
+        }
+    },
+    {
+        "name": "aether_python_audit",
+        "description": "Analisa bytecode Python (.pyc 3.8..3.14) e extrai Tabela de Conteúdos (TOC) de executáveis PyInstaller.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "target": {"type": "string", "description": "Caminho absoluto para o arquivo .pyc ou executável PyInstaller."}
+            },
+            "required": ["target"]
+        }
+    },
+    {
+        "name": "aether_cpp_rtti",
+        "description": "Recupera classes C++ RTTI (MSVC/Itanium), hierarquia de herança e VTables sem executar o binário.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "target": {"type": "string", "description": "Caminho absoluto para o binário C++ alvo."}
+            },
+            "required": ["target"]
+        }
+    },
+    {
+        "name": "aether_api_hash_resolve",
+        "description": "Resolve hashes de API ofuscados (ROR13, DJB2, FNV-1a, CRC32) em shellcode e binários.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "target": {"type": "string", "description": "Caminho absoluto para o binário ou shellcode alvo."}
+            },
+            "required": ["target"]
+        }
+    },
+    {
+        "name": "aether_dotnet_audit",
+        "description": "Inspeciona metadados CLR .NET (BSJB, #Strings, #US User Strings) de forma estática offline.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "target": {"type": "string", "description": "Caminho absoluto para o assembly .NET alvo."}
+            },
+            "required": ["target"]
+        }
+    },
+    {
+        "name": "aether_floss_strings",
+        "description": "Reconstrói stack strings x86/x64, decodifica strings XOR de byte único e extrai Base64 (FLARE-FLOSS).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "target": {"type": "string", "description": "Caminho absoluto para o binário alvo."}
+            },
+            "required": ["target"]
+        }
+    },
 {
         "name": "aether_ground_truth_eval",
-        "description": "Avaliação empírica rigorosa de código descompilado contra código-fonte de referência ground truth (chamadas, loops, ramos e campos).",
+        "description": "Compara características estruturais e procura contraprovas comportamentais num modelo explícito de C inteiro32 puro. Score estrutural não mede fidelidade semântica; memória/chamadas/controle não suportados retornam inconclusivo.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -547,20 +672,111 @@ def _categorize_strings(raw_strings: list[str], max_count: int = 100) -> dict[st
 class AetherMcpDispatcher:
     """Despachante de comandos e ferramentas para o servidor MCP."""
     @staticmethod
-    def handle_ghidra_decompile(target: str, type_injection: bool = True, timeout: int = 300) -> dict[str, Any]:
+    def handle_ghidra_decompile(target: str, type_injection: bool = False, timeout: int = 300, ir_function: str | None = None, reconstruct_function: str | None = None, debug_pdb: str | None = None, dia_helper: str | None = None, dia_dll: str | None = None, memory_model: str | None = None, memory_derivation: str | None = None, call_model: str | None = None, derive_frame_function: str | None = None, frame_fact: str | None = None, observe_frame_function: str | None = None, frame_object_bytes: int | None = None, frame_language_dir: str | None = None, ghidra_runtime_lock: str | None = None, frame_runtime: str | None = None) -> dict[str, Any]:
         from aether_re.ghidra_headless_bridge import GhidraHeadlessBridge
-        bridge = GhidraHeadlessBridge()
+        from aether_re.frame_request import validate_frame_request,read_frame_fact
+        from aether_re.native_frame_request import (validate_native_frame_request,read_native_frame_inputs,
+            snapshot_native_frame_inputs,native_input_destination)
+        native_inputs=None
+        from aether_re.frame_request import validate_frame_runtime_request,frame_program_succeeded
+        try:validate_frame_runtime_request(frame_runtime,derive_frame_function,observe_frame_function)
+        except ValueError as exc:
+            return dict(success=False,status='frame_runtime_configuration_invalid',error_message=str(exc))
+        frame_options={} if frame_runtime is None else dict(frame_runtime=frame_runtime)
+        try:
+            validate_native_frame_request(observe_frame_function,frame_object_bytes,frame_language_dir,
+                derive_frame_function=derive_frame_function,frame_fact=frame_fact,reconstruct_function=reconstruct_function,
+                memory_model=memory_model,memory_derivation=memory_derivation,call_model=call_model,
+                debug_pdb=debug_pdb,dia_helper=dia_helper,dia_dll=dia_dll)
+            if observe_frame_function is not None:
+                native_inputs=snapshot_native_frame_inputs(read_native_frame_inputs(target,frame_language_dir),native_input_destination())
+        except (OSError,ValueError,ImportError) as exc:
+            return dict(success=False,status='native_frame_configuration_invalid',error_message=str(exc)[:300])
+        frame_data=None;frame_intake=None
+        try:
+            validate_frame_request(derive_frame_function,frame_fact,reconstruct_function=reconstruct_function,memory_model=memory_model,
+                memory_derivation=memory_derivation,call_model=call_model,debug_pdb=debug_pdb,dia_helper=dia_helper,dia_dll=dia_dll)
+            if derive_frame_function is not None:frame_data,frame_intake=read_frame_fact(frame_fact)
+        except (OSError,ValueError) as exc:
+            return dict(success=False,status='frame_configuration_invalid',error_message=str(exc)[:300])
+        from aether_re.call_closure import validate_call_configuration
+        try:validate_call_configuration(call_model,memory_model,reconstruct_function)
+        except ValueError as exc:return dict(success=False,status='call_configuration_invalid',error_message=str(exc))
+        memory_options={}
+        if call_model is not None:memory_options['call_model']=call_model
+        if memory_derivation is not None:
+            from aether_re.native_memory_custody import validate_memory_reference,admit_memory_for_target
+            try:
+                validate_memory_reference(memory_derivation,memory_model,reconstruct_function)
+                memory_options['_memory_context']=admit_memory_for_target(memory_derivation,target)
+            except (OSError,ValueError) as exc:
+                return dict(success=False,status='memory_derivation_invalid',error_message=str(exc)[:300])
+        if memory_model is not None and (memory_model not in ('bounded-bytes.v1','bounded-bytes.v2') or not isinstance(reconstruct_function,str) or not reconstruct_function.strip()):
+            return dict(success=False,status='memory_configuration_invalid',error_message='requires a supported bounded-bytes model and reconstruct_function')
+        debug_paths=(debug_pdb,dia_helper,dia_dll)
+        if any(p is not None for p in debug_paths) and (any(not isinstance(p,str) or not 1<=len(p)<=32768 for p in debug_paths) or not reconstruct_function):
+            return dict(success=False,status='debug_configuration_invalid',error_message='requires reconstruct_function, debug_pdb, dia_helper and dia_dll')
+        if ghidra_runtime_lock is not None:
+            from aether_re.ghidra_runtime_lock import read_ghidra_runtime_lock
+            try:read_ghidra_runtime_lock(ghidra_runtime_lock)
+            except (OSError,ValueError,TypeError) as exc:
+                return dict(success=False,status='runtime_lock_configuration_invalid',error_message=str(exc)[:300])
+        bridge = GhidraHeadlessBridge(**({'runtime_lock':str(ghidra_runtime_lock)} if ghidra_runtime_lock is not None else {}))
         script = "DecompileWithTypeInjection.java" if type_injection else "DecompileAllFunctions.java"
-        res = bridge.decompile_binary(target, timeout_seconds=timeout, script_name=script)
-        return {
+        backend_target=native_inputs['target_path'] if native_inputs is not None else target
+        res = bridge.decompile_binary(backend_target, timeout_seconds=timeout, script_name=script,
+            **({'temp_work_dir':str(Path(native_inputs['target_path']).parent/'ghidra-export')} if native_inputs is not None else {}))
+        payload = {
             "success": res.success,
+            "status": res.status,
+            "type_policy": res.type_policy,
+            "ir_coverage": res.ir_coverage(),
+            "limitations": res.limitations,
             "binary_path": res.binary_path,
+            "target_sha256": res.target_sha256,
+            "worker_execution": res.worker_execution,
+            "execution_scope": "static_decompilation_no_target_execution",
             "total_functions": res.total_functions,
             "decompiled_functions": res.decompiled_functions,
             "elapsed_seconds": res.elapsed_seconds,
-            "functions_summary": {k: {"address": v.address, "params": v.params, "return_type": v.return_type, "c_snippet": (v.decompiled_c or '')[:200]} for k, v in list(res.functions.items())[:30]},
+            "functions_summary": {k: {"name": v.name, "address": v.address, "success": v.success, "params": v.params, "return_type": v.return_type, "signature_source": v.signature_source, "ir_summary": v.ir_preview(), "c_snippet": (v.decompiled_c or '')[:200]} for k, v in list(res.functions.items())[:30]},
+            "functions_returned": min(30,len(res.functions)),
+            "functions_truncated": len(res.functions)>30,
             "error_message": res.error_message,
         }
+        if native_inputs is not None:
+            payload['native_frame_input_receipt']=native_inputs['receipt']
+            payload['native_frame_export']=dict(artifact_dir=res.artifact_dir,artifact_hashes=dict(res.artifact_hashes))
+        if ghidra_runtime_lock is not None:
+            payload['runtime_lock_export']=dict(artifact_dir=res.artifact_dir,artifact_hashes=dict(res.artifact_hashes))
+        if ir_function is not None:
+            try:
+                payload["function_ir"] = res.select_ir_graph(ir_function)
+            except ValueError as exc:
+                payload.update(success=False, export_status=res.status, status="ir_selection_failed", error_message=str(exc))
+        if reconstruct_function is not None:
+            try:
+                payload['function_reconstruction']=res.select_reconstruction(reconstruct_function,debug_pdb=debug_pdb,dia_helper=dia_helper,dia_dll=dia_dll,memory_model=memory_model,**memory_options)
+                if payload['function_reconstruction']['status']!='complete':
+                    raise ValueError('ghidra_reconstruction_unsupported')
+            except ValueError as exc:
+                payload.update(success=False,export_status=res.status,status='reconstruction_failed',error_message=str(exc))
+        if derive_frame_function is not None and res.success:
+            try:
+                payload['derived_frame_program']=res.select_frame_program(derive_frame_function,frame_data,**frame_options)
+                payload['derived_frame_program']['frame_fact_intake']=frame_intake
+                if not frame_program_succeeded(payload['derived_frame_program'],frame_runtime):
+                    raise ValueError('ghidra_derived_frame_program_refused')
+            except ValueError as exc:
+                payload.update(success=False,export_status=res.status,status='derived_frame_program_failed',error_message=str(exc))
+        if observe_frame_function is not None and res.success:
+            try:
+                payload['derived_frame_program']=res.select_observed_frame_program(observe_frame_function,
+                    target_bytes=native_inputs['target_bytes'],language_sources=native_inputs['language_sources'],object_bytes=frame_object_bytes,input_receipt=native_inputs['receipt'],**frame_options)
+                if not frame_program_succeeded(payload['derived_frame_program'],frame_runtime):raise ValueError('ghidra_observed_frame_program_refused')
+            except ValueError as exc:
+                payload.update(success=False,export_status=res.status,status='native_frame_observation_failed',error_message=str(exc)[:400])
+        return payload
 
     @staticmethod
     def handle_webcrack(target: str, out_dir: str | None = None) -> dict[str, Any]:
@@ -585,16 +801,66 @@ class AetherMcpDispatcher:
         return parser.audit_memory_security()
 
     @staticmethod
-    @staticmethod
-    @staticmethod
     def handle_golang_recover(target: str) -> dict[str, Any]:
         from aether_re.golang_recover import recover_golang_symbols_from_file
         return recover_golang_symbols_from_file(target)
 
+    @staticmethod
     def handle_detect_crypto(target: str) -> dict[str, Any]:
         from aether_re.crypto_detect import scan_file_for_crypto
         return scan_file_for_crypto(target)
 
+    @staticmethod
+    def handle_audit_authenticode(target: str) -> dict[str, Any]:
+        from aether_re.authenticode_audit import scan_file_authenticode
+        return scan_file_authenticode(target)
+
+    @staticmethod
+    def handle_elf_dwarf_audit(target: str) -> dict[str, Any]:
+        from aether_re.dwarf_types import scan_file_elf_dwarf
+        return scan_file_elf_dwarf(target)
+
+    @staticmethod
+    def handle_macho_audit(target: str) -> dict[str, Any]:
+        from aether_re.macho_forensics import scan_file_macho
+        return scan_file_macho(target)
+
+    @staticmethod
+    def handle_rust_recover(target: str) -> dict[str, Any]:
+        from aether_re.rust_recover import scan_file_rust
+        return scan_file_rust(target)
+
+    @staticmethod
+    def handle_firmware_audit(target: str) -> dict[str, Any]:
+        from aether_re.firmware_forensics import scan_file_firmware
+        return scan_file_firmware(target)
+
+    @staticmethod
+    def handle_python_audit(target: str) -> dict[str, Any]:
+        from aether_re.python_forensics import scan_file_python_artifact
+        return scan_file_python_artifact(target)
+
+    @staticmethod
+    def handle_cpp_rtti(target: str) -> dict[str, Any]:
+        from aether_re.cpp_rtti import scan_file_cpp_rtti
+        return scan_file_cpp_rtti(target)
+
+    @staticmethod
+    def handle_api_hash_resolve(target: str) -> dict[str, Any]:
+        from aether_re.api_hash_resolve import scan_file_api_hashes
+        return scan_file_api_hashes(target)
+
+    @staticmethod
+    def handle_dotnet_audit(target: str) -> dict[str, Any]:
+        from aether_re.dotnet_forensics import scan_file_dotnet
+        return scan_file_dotnet(target)
+
+    @staticmethod
+    def handle_floss_strings(target: str) -> dict[str, Any]:
+        from aether_re.floss_strings import scan_file_floss_strings
+        return scan_file_floss_strings(target)
+
+    @staticmethod
     def handle_ground_truth_eval(source_c: str, decompiled_c: str, function_name: str) -> dict[str, Any]:
         from aether_re.ground_truth_eval import evaluate_decompilation_against_ground_truth
         return evaluate_decompilation_against_ground_truth(source_c, decompiled_c, function_name)
@@ -1069,8 +1335,20 @@ def run_mcp_server() -> int:
                     elif tool_name == "aether_ghidra_decompile":
                         data = dispatcher.handle_ghidra_decompile(
                             args["target"],
-                            type_injection=args.get("type_injection", True),
+                            type_injection=args.get("type_injection", False),
+                            ir_function=args.get("ir_function"),
+                            reconstruct_function=args.get("reconstruct_function"),
+                            memory_model=args.get('memory_model'),
+                            memory_derivation=args.get('memory_derivation'),
+                            call_model=args.get('call_model'),
+                            **({key:args.get(key) for key in ('derive_frame_function','frame_fact')}
+                               if any(args.get(key) is not None for key in ('derive_frame_function','frame_fact')) else {}),
+                            **({key:args.get(key) for key in ('observe_frame_function','frame_object_bytes','frame_language_dir')}
+                               if any(args.get(key) is not None for key in ('observe_frame_function','frame_object_bytes','frame_language_dir')) else {}),
+                            debug_pdb=args.get('debug_pdb'),dia_helper=args.get('dia_helper'),dia_dll=args.get('dia_dll'),
                             timeout=args.get("timeout", 300),
+                            **({'ghidra_runtime_lock':args['ghidra_runtime_lock']} if args.get('ghidra_runtime_lock') is not None else {}),
+                            **({'frame_runtime':args['frame_runtime']} if args.get('frame_runtime') is not None else {}),
                         )
                     elif tool_name == "aether_webcrack":
                         data = dispatcher.handle_webcrack(
@@ -1083,6 +1361,26 @@ def run_mcp_server() -> int:
                         data = dispatcher.handle_golang_recover(args["target"])
                     elif tool_name == "aether_detect_crypto":
                         data = dispatcher.handle_detect_crypto(args["target"])
+                    elif tool_name == "aether_audit_authenticode":
+                        data = dispatcher.handle_audit_authenticode(args["target"])
+                    elif tool_name == "aether_elf_dwarf_audit":
+                        data = dispatcher.handle_elf_dwarf_audit(args["target"])
+                    elif tool_name == "aether_macho_audit":
+                        data = dispatcher.handle_macho_audit(args["target"])
+                    elif tool_name == "aether_rust_recover":
+                        data = dispatcher.handle_rust_recover(args["target"])
+                    elif tool_name == "aether_firmware_audit":
+                        data = dispatcher.handle_firmware_audit(args["target"])
+                    elif tool_name == "aether_python_audit":
+                        data = dispatcher.handle_python_audit(args["target"])
+                    elif tool_name == "aether_cpp_rtti":
+                        data = dispatcher.handle_cpp_rtti(args["target"])
+                    elif tool_name == "aether_api_hash_resolve":
+                        data = dispatcher.handle_api_hash_resolve(args["target"])
+                    elif tool_name == "aether_dotnet_audit":
+                        data = dispatcher.handle_dotnet_audit(args["target"])
+                    elif tool_name == "aether_floss_strings":
+                        data = dispatcher.handle_floss_strings(args["target"])
                     elif tool_name == "aether_ground_truth_eval":
                         data = dispatcher.handle_ground_truth_eval(
                             args["source_c"],

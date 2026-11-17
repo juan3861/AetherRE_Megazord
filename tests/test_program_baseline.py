@@ -168,3 +168,81 @@ def test_junit_provenance_uses_one_snapshot_when_file_mutates_before_parse(
         "skipped": 0,
         "tests": 1,
     }
+
+
+def test_gitignore_does_not_mask_referenced_tools_or_locks() -> None:
+    import ast
+
+    root = Path(__file__).resolve().parents[1]
+    required_tools = set((
+        "tools/authorized_local_corpus.py",
+        "tools/blind_release.py",
+        "tools/bootstrap_corpus.py",
+        "tools/build_dia_extract.ps1",
+        "tools/build_phase_declaration.py",
+        "tools/complex_corpus.py",
+        "tools/custody_snapshot.py",
+        "tools/dia_extract.cpp",
+        "tools/dotnet_workers.lock.json",
+        "tools/f00_program_baseline.py",
+        "tools/f02_commit_crash_campaign.py",
+        "tools/f02_concurrency_stress.py",
+        "tools/f02_fault_campaign.py",
+        "tools/f02_process_crash_campaign.py",
+        "tools/f08_windows_sandbox_probe.py",
+        "tools/f11_adversarial_campaign.py",
+        "tools/f11_adversarial_cli_campaign.py",
+        "tools/f11_remaining_boundary_campaign.py",
+        "tools/f12_universal_release.py",
+        "tools/ghidra_distribution.candidate.json",
+        "tools/hyperv_benign_trace_run.bat",
+        "tools/hyperv_benign_trace_run.ps1",
+        "tools/hyperv_observe.ps1",
+        "tools/hyperv_observe_and_verify.bat",
+        "tools/hyperv_prepare_nocloud.bat",
+        "tools/hyperv_prepare_nocloud.ps1",
+        "tools/hyperv_provision.bat",
+        "tools/hyperv_provision.ps1",
+        "tools/jar_workers.lock.json",
+        "tools/juliet_multifile_corpus.py",
+        "tools/phase_test_map.py",
+        "tools/rea_static_workers.lock.json",
+        "tools/run_tests.py",
+        "tools/run_validation_campaign.py",
+        "tools/split_contract.py",
+        "tools/static_workers.lock.json",
+        "tools/toolchain.lock.json",
+        "tools/tri_split_ci.py",
+        "tools/tri_split_evaluate.py",
+        "tools/tri_split_release.py",
+        "tools/tri_split_unblind.py",
+        "tools/verify_ubuntu_source.py",
+    ))
+    for test_file in (root / "tests").glob("test_*.py"):
+        tree = ast.parse(test_file.read_text(encoding="utf-8", errors="replace"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name.startswith("tools."):
+                        required_tools.add(f"tools/{alias.name.split('.')[1]}.py")
+            elif isinstance(node, ast.ImportFrom) and node.module and node.module.startswith("tools"):
+                parts = node.module.split(".")
+                if len(parts) >= 2:
+                    required_tools.add(f"tools/{parts[1]}.py")
+    for rel in sorted(required_tools):
+        assert (root / rel).is_file(), f"missing required tool/lock: {rel}"
+        check = subprocess.run(
+            ["git", "-C", str(root), "check-ignore", "--no-index", "-q", rel],
+            capture_output=True,
+            check=False,
+        )
+        assert check.returncode != 0, f"required tool/lock is masked by .gitignore: {rel}"
+
+
+def test_phase_test_map_has_zero_unmapped_modules() -> None:
+    from tools.phase_test_map import build_map
+
+    root = Path(__file__).resolve().parents[1]
+    mapping = build_map(root)
+    assert mapping["unmapped_modules"] == []
+

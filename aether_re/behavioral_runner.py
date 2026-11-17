@@ -61,6 +61,15 @@ def _within(root: Path, raw_path: Any) -> Path:
     return path
 
 
+def _read_bounded_artifact(path: Path, max_bytes: int, name: str) -> bytes:
+    """Read no more than the artifact's declared budget plus one sentinel byte."""
+    with path.open("rb") as handle:
+        data = handle.read(max_bytes + 1)
+    if len(data) > max_bytes:
+        raise ValueError(f"{name}_size_exceeded")
+    return data
+
+
 def _artifact(root: Path, value: Any, name: str, max_bytes: int) -> tuple[bytes, dict[str, str]]:
     if not isinstance(value, Mapping) or set(value) != {"path", "sha256"}:
         raise ValueError(f"{name}_descriptor_invalid")
@@ -68,9 +77,7 @@ def _artifact(root: Path, value: Any, name: str, max_bytes: int) -> tuple[bytes,
     if not isinstance(expected, str) or not _SHA256.fullmatch(expected):
         raise ValueError(f"{name}_sha256_invalid")
     path = _within(root, value.get("path"))
-    data = path.read_bytes()
-    if len(data) > max_bytes:
-        raise ValueError(f"{name}_size_exceeded")
+    data = _read_bounded_artifact(path, max_bytes, name)
     actual = _digest(data)
     if actual != expected:
         raise ValueError("artifact_hash_mismatch")
@@ -231,8 +238,22 @@ def run_behavioral_cases(
         return {"schema": _RUN_SCHEMA, "status": "refused", "original": [], "candidate": [], "errors": [_error("handoff_attestation_invalid")], "limitations": ["nenhum alvo foi executado"]}
 
     root = Path(artifact_root).resolve(strict=True)
-    original_binary = _within(root, candidate["original"]["binary"]["path"]).read_bytes()
-    candidate_binary = _within(root, candidate["candidate"]["binary"]["path"]).read_bytes()
+    try:
+        original_binary = _read_bounded_artifact(
+            _within(root, candidate["original"]["binary"]["path"]),
+            128 * 1024 * 1024,
+            "original_binary",
+        )
+        candidate_binary = _read_bounded_artifact(
+            _within(root, candidate["candidate"]["binary"]["path"]),
+            128 * 1024 * 1024,
+            "candidate_binary",
+        )
+    except (OSError, ValueError):
+        return {"schema": _RUN_SCHEMA, "status": "invalid", "original": [], "candidate": [], "errors": [_error("execution_artifact_unreadable")], "limitations": ["nenhum alvo foi executado"]}
+    for artifact_name, data in (("original_binary", original_binary), ("candidate_binary", candidate_binary)):
+        if _digest(data) != validation["hashes"].get(artifact_name):
+            return {"schema": _RUN_SCHEMA, "status": "invalid", "original": [], "candidate": [], "errors": [_error("execution_artifact_hash_changed", artifact=artifact_name)], "limitations": ["nenhum alvo foi executado"]}
     original_rows: list[dict[str, Any]] = []
     candidate_rows: list[dict[str, Any]] = []
     result_envelopes: list[dict[str, Any]] = []

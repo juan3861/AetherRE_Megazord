@@ -28,14 +28,16 @@ def test_provisioner_checks_host_features_privileges_space_and_source_hash():
         "Win32_ComputerSystem",
         "VirtualizationFirmwareEnabled",
         "AvailableFreeSpace",
-        "Get-FileHash -LiteralPath $sourceVhd -Algorithm SHA256",
+        "Get-FileSha256Fast -Path $sourceVhd",
         "Get-VHD -Path $sourceVhd -ComputerName localhost",
     ):
         assert required in PS1
     assert r"E:\AetherRE_DynamicLab\vm-images\ubuntu-noble-20260926\livecd.ubuntu-cpc.azure.vhd" in PS1
     assert r"E:\AetherRE_DynamicLab\ubuntu-noble-20260926\noble-server-cloudimg-amd64-azure.vhd.tar.gz" in PS1
     assert "3543723afd820d7a8a64ea7399376856a95ce15200439c38447170652a60a5f3" in PS1
-    assert "Get-FileHash -LiteralPath $sourceArchive -Algorithm SHA256" in PS1
+    assert "Get-FileSha256Fast -Path $sourceArchive" in PS1
+    assert "FileOptions]::SequentialScan" in PS1
+    assert "$bufferSize = 8MB" in PS1
 
 
 def test_active_hypervisor_does_not_fail_on_wmi_firmware_flag_masked_by_hypervisor():
@@ -44,7 +46,7 @@ def test_active_hypervisor_does_not_fail_on_wmi_firmware_flag_masked_by_hypervis
     assert "hypervisor_active_requirements_masked" in PS1
 
 
-def test_only_unique_private_network_and_differencing_gen2_vm_are_provisioned():
+def test_only_unique_private_network_and_native_generation_differencing_vm_are_provisioned():
     assert "$parentVhd.VhdFormat" in PS1
     assert "'VHD' { return '.vhd' }" in PS1
     assert "'VHDX' { return '.vhdx' }" in PS1
@@ -53,12 +55,16 @@ def test_only_unique_private_network_and_differencing_gen2_vm_are_provisioned():
     assert "$diffVhd = Join-Path $vmRoot (\"ubuntu-noble-diff{0}\" -f $diffExtension)" in PS1
     assert "$diffVhd = Join-Path $vmRoot 'ubuntu-noble-diff.vhdx'" not in PS1
     assert PS1.index("$parentVhd = Get-VHD") < PS1.index("$parentFormat = [string]$parentVhd.VhdFormat")
+    assert "Resolve-VMProvisionPlan -RequestedGeneration $VmGeneration -SourceFormat $parentFormat" in PS1
+    assert "if ($vmPlan.convert_to_vhdx)" in PS1
+    assert "native_vhd_uses_generation1_without_conversion" in PS1
+    assert "native_vhdx_uses_generation2_without_conversion" in PS1
     assert PS1.index("Resolve-Gen2CompatibleParent `") < PS1.index("New-VHD -ComputerName localhost")
     for required in (
         "New-VMSwitch -ComputerName localhost",
         "-SwitchType Private",
-        "New-VHD -ComputerName localhost -Path $diffVhd -ParentPath $selectedGen2Parent -Differencing",
-        "New-VM -ComputerName localhost -Name $vmName -Generation 2",
+        "New-VHD -ComputerName localhost -Path $diffVhd -ParentPath $selectedBootParent -Differencing",
+        "New-VM -ComputerName localhost -Name $vmName -Generation $vmPlan.generation",
         "Set-VMFirmware -ComputerName localhost",
         "MicrosoftUEFICertificateAuthority",
         "Checkpoint-VM -ComputerName localhost",
@@ -95,6 +101,85 @@ def test_report_distinguishes_extracted_vhd_hash_from_published_archive_hash():
     assert "published_archive_sha256_claim" in PS1
     assert "not an authenticity claim" in PS1
     assert "rollback_proven = $false" in PS1
+
+
+@pytest.mark.parametrize(
+    ("requested", "source_format", "expected_generation", "expected_conversion"),
+    (("Auto", "VHD", 1, False), ("Auto", "VHDX", 2, False), ("2", "VHD", 2, True)),
+)
+def test_vm_plan_chooses_native_generation_without_unneeded_conversion(
+    tmp_path, requested, source_format, expected_generation, expected_conversion
+):
+    result = _run_materialization_harness(
+        tmp_path,
+        rf"""
+$plan = Resolve-VMProvisionPlan -RequestedGeneration '{requested}' -SourceFormat '{source_format}'
+[ordered]@{{ generation=[int]$plan.generation; convert_to_vhdx=[bool]$plan.convert_to_vhdx; reason=[string]$plan.reason }} | ConvertTo-Json -Compress
+""",
+    )
+    assert result["generation"] == expected_generation
+    assert result["convert_to_vhdx"] is expected_conversion
+
+
+def test_vm_plan_refuses_generation1_for_vhdx_boot_image(tmp_path):
+    result = _run_materialization_harness(
+        tmp_path,
+        r"""
+$message = ''
+try { Resolve-VMProvisionPlan -RequestedGeneration '1' -SourceFormat 'VHDX' }
+catch { $message = $_.Exception.Message }
+[ordered]@{ refused=([string]::IsNullOrWhiteSpace($message) -eq $false); message=$message } | ConvertTo-Json -Compress
+""",
+    )
+    assert result["refused"] is True
+    assert "VHD" in result["message"]
+
+
+def test_large_file_sha256_helper_matches_builtin_hash_for_empty_and_multibuffer_inputs(tmp_path):
+    result = _run_materialization_harness(
+        tmp_path,
+        r"""
+$empty = Join-Path $testRoot 'empty.bin'
+$large = Join-Path $testRoot 'large.bin'
+[IO.File]::WriteAllBytes($empty, [byte[]]@())
+$bytes = New-Object byte[] (9MB + 17)
+[Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
+[IO.File]::WriteAllBytes($large, $bytes)
+$emptyFast = Get-FileSha256Fast -Path $empty
+$emptyBuiltin = Get-TestSha256 $empty
+$largeFast = Get-FileSha256Fast -Path $large
+$largeBuiltin = Get-TestSha256 $large
+[ordered]@{empty_match=($emptyFast -eq $emptyBuiltin);large_match=($largeFast -eq $largeBuiltin);length=(Get-Item -LiteralPath $large).Length} | ConvertTo-Json -Compress
+""",
+    )
+    assert result["empty_match"] is True
+    assert result["large_match"] is True
+    assert result["length"] == 9 * 1024 * 1024 + 17
+
+
+def test_validated_materialized_parent_reuse_does_not_reserve_a_second_full_copy(tmp_path):
+    result = _run_materialization_harness(
+        tmp_path,
+        r"""
+$source = Join-Path $testRoot 'source.vhd'
+[IO.File]::WriteAllBytes($source, [byte[]](1,2,3,4))
+$sourceHash = Get-TestSha256 $source
+$sourceLength = [Int64](32GB)
+$sourceVhd = [pscustomobject]@{ VhdFormat='VHD'; VhdType='Fixed'; Size=[Int64](32GB) }
+$attributes = [IO.FileAttributes]::SparseFile
+$materialized = Join-Path $testRoot 'materialized'
+$getVhd = { param($Path) [pscustomobject]@{ VhdFormat='VHD'; VhdType='Fixed'; Size=[Int64](32GB); ParentPath=$null } }
+$first = [ordered]@{}
+$selected1 = Resolve-ValidatedParentVhd -OriginalPath $source -OriginalSha256 $sourceHash -OriginalVhd $sourceVhd -OriginalAttributes $attributes -OriginalLengthBytes $sourceLength -MaterializedRoot $materialized -AvailableFreeBytes 100GB -Result $first -GetVhdAction $getVhd -GetHashAction { param($Path) Get-TestSha256 $Path }
+$second = [ordered]@{}
+$selected2 = Resolve-ValidatedParentVhd -OriginalPath $source -OriginalSha256 $sourceHash -OriginalVhd $sourceVhd -OriginalAttributes $attributes -OriginalLengthBytes $sourceLength -MaterializedRoot $materialized -AvailableFreeBytes 60GB -Result $second -CopyAction { throw 'copy_must_not_repeat' } -GetVhdAction $getVhd -GetHashAction { param($Path) Get-TestSha256 $Path }
+[ordered]@{ first_status=$first.status; second_status=$second.status; second_required=[Int64]$second.required_free_bytes; selected_same=($selected1 -eq $selected2) } | ConvertTo-Json -Compress
+""",
+    )
+    assert result["first_status"] == "created_validated_copy"
+    assert result["second_status"] == "reused_validated_copy"
+    assert result["selected_same"] is True
+    assert result["second_required"] < 60 * 1024**3
 
 
 

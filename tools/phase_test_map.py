@@ -24,13 +24,16 @@ MODULE_PHASE: dict[str, str] = {
     "custody": "F00", "custody_release": "F00", "doctor": "F00",
     "project_snapshot": "F00", "project_inventory": "F00", "repro_package": "F00",
     "safe_walk": "F00", "archive_intake": "F00", "test_runner": "F00",
-    "toolchain_lock": "F00",
+    "toolchain_lock": "F00", "unpackers": "F00", "dia_build": "F00",
+    "ghidra_runtime_lock": "F00",
+    "frame_relocation": "F05", "frame_arena_runtime": "F05", "frame_arena_program": "F05",
+    "native_leaf_data": "F05", "native_caller_data": "F05",
     # F01 -- corrigir a verdade do pipeline
     "pipeline": "F01", "models": "F01", "ir": "F01", "ir_graph": "F01",
     "static_profiles": "F01", "static_worker": "F01", "profile_router": "F01",
     "graph_store": "F01",
     # F02 -- contratos, custodia e runtime governado
-    "contracts": "F02", "evidence": "F02", "evidence_contract": "F02",
+    "contracts": "F02", "evidence": "F02", "evidence_contract": "F02", "native_memory_custody": "F02",
     "evidence_journal": "F02", "evidence_store": "F02", "kernel_contracts": "F02",
     "lock": "F02", "cache": "F02", "checkpoint": "F02", "process": "F02",
     "intake": "F02", "validation_campaign": "F02",
@@ -39,25 +42,31 @@ MODULE_PHASE: dict[str, str] = {
     # F04 -- leitura semantica de projetos
     "source": "F04", "c_source": "F04", "c_semantic": "F04",
     "build_audit": "F04", "project_audit": "F04", "language_profiles": "F04",
+    "rea_static": "F04",
     # F05 -- engenharia reversa estrutural de binarios
-    "pe_debug": "F05", "pdb_dia": "F05", "jar_worker": "F05",
+    "pe_debug": "F05", "pdb_dia": "F05", "jar_worker": "F05", "indirect_effects": "F05",
     "firmware_layout": "F05", "profile_comparison": "F05",
+    "capabilities": "F05", "graph_export": "F05", "pointer_provenance": "F05", "stack_parameters": "F05",
+    "frame_derivation": "F05", "frame_usage": "F05", "frame_conservation": "F05",
+    "frame_runtime": "F05", "frame_program": "F05",
+    "frame_request": "F05", "universal_frame": "F05", "native_frame_address": "F05", "native_frame_request": "F05",
     # F06 -- fonte <-> build <-> binario <-> comportamento
     "correlation": "F06", "build_link": "F06", "differential": "F06",
-    "behavioral_runner": "F06", "profile_scope": "F06",
+    "behavioral_runner": "F06", "profile_scope": "F06", "binary_diff": "F06",
     # F07 -- auditoria forense, riscos e dependencias
     "risk_audit": "F07", "taint_audit": "F07", "dependency_audit": "F07",
-    "project_dependencies": "F07", "sarif": "F07",
+    "project_dependencies": "F07", "sarif": "F07", "forensic_rules": "F07",
     # F08 -- laboratorio dinamico e traces
     "dynamic_effects": "F08", "dynamic_lab_contracts": "F08", "lab_policy": "F08",
     "trace": "F08", "trace_correlation": "F08", "windows_sandbox_guest": "F08",
-    "hyperv_preflight": "F08",
+    "hyperv_preflight": "F08", "hyperv_observation": "F08", "strace_import": "F08",
     # F09 -- fuzzing, simbolico e equivalencia limitada
-    "fuzz": "F09", "symbolic": "F09",
+    "fuzz": "F09", "symbolic": "F09", "ghidra_pcode_c": "F05", "native_memory": "F05", "observed_calls": "F05", "high_parameters": "F05", "call_closure": "F05", "call_runtime": "F05", "effect_trace": "F05", "stack_liveness": "F05",
     # F10 -- consenso calibrado e avaliacao cega
     "metrics": "F10", "benchmark": "F10",
     # F11 -- inteligencia assistida e revisao
     "assistant": "F11", "claims": "F11", "review_ui": "F11",
+    "mcp_server": "F11",
     # F12 -- homologacao independente e operacao
     "documentation": "F12", "external_attestations": "F12",
     "ghidra_provenance": "F12", "homologation": "F12",
@@ -67,7 +76,7 @@ MODULE_PHASE: dict[str, str] = {
     # adapters e engines (resolvidos pelo nome-folha do modulo)
     "adapters": "F01", "native_normalize": "F01", "triage": "F01",
     "strings_decode": "F01",
-    "ghidra": "F05", "ghidra_parse": "F05", "rizin": "F05", "angr": "F05",
+    "ghidra": "F05", "ghidra_parse": "F05", "ghidra_headless_bridge": "F05", "ghidra_pcode_ir": "F05", "rizin": "F05", "angr": "F05",
     "unicorn_emu": "F05", "binaryninja": "F05", "ilspy": "F05", "jvm": "F05",
     "android": "F05", "wasm": "F05", "macho": "F05", "firmware": "F05",
     "dwarf": "F05", "pe_elf": "F05", "disasm": "F05", "elf_calls": "F05",
@@ -75,6 +84,29 @@ MODULE_PHASE: dict[str, str] = {
     "reconstruct": "F06",
     "consensus": "F10", "comparative_report": "F10",
     "frida_dyn": "F08",
+    # Motores SOTA integrados (Reverse Engineering Graph)
+    "calling_convention": "F05",
+    "cfg_dominance": "F05",
+    "deobfuscator": "F05",
+    "function_simhash": "F06",
+    "graph_alignment": "F06",
+    "graph_analytics": "F05",
+    "operand_norm": "F01",
+    "packer_detect": "F05",
+    "pdg_taint": "F07",
+    "semantic_labeler": "F04",
+    "struct_recovery": "F05",
+    "symbolic_constraints": "F09",
+    "crypto_detect": "F05", "golang_recover": "F05",
+    "authenticode_audit": "F05", "dwarf_types": "F05",
+    "macho_forensics": "F05", "rust_recover": "F05",
+    "firmware_forensics": "F05", "python_forensics": "F05",
+    "cpp_rtti": "F05", "api_hash_resolve": "F05", "dotnet_forensics": "F05",
+    "floss_strings": "F05",
+    "ctree_structuring": "F05", "ssa_ir": "F05", "til_engine": "F05",
+    "memory_forensics": "F08", "minidump_parser": "F08",
+    "semantic_deobfuscator": "F05", "smt_solver": "F09",
+    "ground_truth_eval": "F10", "c_equivalence": "F09",
 }
 
 _IMPORT_RE = re.compile(r"^\s*(?:from|import)\s+aether_re(?:\.([A-Za-z_][\w.]*))?", re.M)

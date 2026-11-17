@@ -17,14 +17,10 @@ def main() -> int:
     megazord_py = Path("D:/AetherRE_Megazord/megazord.py")
     sample_dmp = Path("D:/AetherRE_Megazord/engineering_evidence/live_audited_process.dmp")
     sample_js = Path("D:/AetherRE_Megazord/engineering_evidence/acorn_verified_cli.js")
-    cpp_poly_report = Path("D:/AetherRE_Megazord/engineering_evidence/cpp_poly_all_exports_ground_truth_report.json")
-    multi_poly_report = Path("D:/AetherRE_Megazord/engineering_evidence/multi_poly_ground_truth_report.json")
 
     assert megazord_py.exists(), f"megazord.py not found: {megazord_py}"
     assert sample_dmp.exists(), f"sample_dmp not found: {sample_dmp}"
     assert sample_js.exists(), f"sample_js not found: {sample_js}"
-    assert cpp_poly_report.exists(), f"cpp_poly_report not found: {cpp_poly_report}"
-    assert multi_poly_report.exists(), f"multi_poly_report not found: {multi_poly_report}"
 
     sys.path.insert(0, "D:/AetherRE_Megazord")
 
@@ -105,15 +101,19 @@ def main() -> int:
             shutil.rmtree(tmp_out)
     print(" -> Unpackers verified: NSIS and InnoSetup decompressed with zero defects.")
 
-    # 4. Test C++ Ground-Truth Empirical Parity (Single & Multiple Inheritance)
-    print("[TEST 4/7] C++ Ground Truth Parity (Single & Multiple Inheritance)...")
-    c1 = json.loads(cpp_poly_report.read_text(encoding="utf-8"))
-    c2 = json.loads(multi_poly_report.read_text(encoding="utf-8"))
-    assert c1["average_library_fidelity_score_pct"] == 100.0
-    assert c1["perfect_fidelity_count_100pct"] == 4
-    assert c2["average_library_fidelity_score_pct"] == 100.0
-    assert c2["perfect_fidelity_count_100pct"] == 4
-    print(f" -> C++ Ground Truth verified: Single Poly = {c1['average_library_fidelity_score_pct']}%, Multi Poly = {c2['average_library_fidelity_score_pct']}%.")
+    # 4. Execute comparisons now; historical score JSON is not a live oracle.
+    print("[TEST 4/7] Behavioral counterexample and explicit C32 model...")
+    import tempfile
+    from aether_re.ground_truth_eval import evaluate_decompilation_against_ground_truth
+    with tempfile.TemporaryDirectory(prefix="aether-behavior-check-") as temp:
+        reference = Path(temp) / "reference.c"
+        reference.write_text("int add(int a,int b){return a+b;}", encoding="utf-8")
+        wrong = evaluate_decompilation_against_ground_truth(reference,"int add(int a,int b){return 0;}","add")
+        equivalent = evaluate_decompilation_against_ground_truth(reference,"int add(int a,int b){return b+a;}","add")
+        assert wrong["behavioral_comparison"]["status"] == "different"
+        assert equivalent["behavioral_comparison"]["status"] == "equivalent_in_model"
+        assert wrong["empirical_fidelity_score_pct"] is None
+    print(" -> Current evaluator produced a counterexample and scoped equivalence; no C++ universal certification.")
 
     # 5. Test MCP Server Dispatcher
     print("[TEST 5/7] MCP Server Dispatcher...")
@@ -142,7 +142,9 @@ def main() -> int:
             "void dummy(int *p) { if (p != 0) { *p = 1; } }",
             "dummy",
         )
-        assert gt_res["empirical_fidelity_score_pct"] > 80.0
+        assert gt_res["empirical_fidelity_score_pct"] is None
+        assert gt_res["structural_similarity_score_pct"] > 80.0
+        assert gt_res["behavioral_comparison"]["status"] == "unknown"
     finally:
         if src_tmp.exists():
             src_tmp.unlink()
@@ -215,7 +217,7 @@ def main() -> int:
             tmp_go.unlink()
 
     print(" -> Golang Recovery verified: pclntab parsed and 3/3 functions recovered via CLI & MCP.")
-    print("ALL 7/7 STRICT EMPIRICAL AUDITOR TESTS PASSED WITH ZERO DEBT.")
+    print("ALL 7/7 LOCAL SMOKE CHECKS PASSED WITHIN SCOPE. NO EXTERNAL CERTIFICATION IS INFERRED.")
     return 0
 
 

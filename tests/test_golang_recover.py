@@ -49,7 +49,8 @@ def _build_go116_test_blob(ptr_size: int = 8) -> bytes:
     pcs = [base_pc, base_pc + 0x100, base_pc + 0x250]
 
     for pc, name_off in zip(pcs, name_offsets):
-        struct_offsets.append(func_structs_offset + len(func_structs))
+        # Go 1.16+: _func offsets are relative to pcln/funcdata, not pcHeader.
+        struct_offsets.append(functab_size + len(func_structs))
         if ptr_size == 8:
             func_structs.extend(struct.pack("<QiI", pc, name_off, 0))
         else:
@@ -107,7 +108,7 @@ def _build_go118_test_blob(ptr_size: int = 8) -> bytes:
     offsets_pc = [0x1000, 0x1500, 0x2200]
 
     for off, name_off in zip(offsets_pc, name_offsets):
-        struct_offsets.append(func_structs_offset + len(func_structs))
+        struct_offsets.append(functab_size + len(func_structs))
         func_structs.extend(struct.pack("<II", off, name_off))
 
     fmt_ptr = "<Q" if ptr_size == 8 else "<I"

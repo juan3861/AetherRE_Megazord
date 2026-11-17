@@ -79,20 +79,32 @@ class RizinAdapter(Adapter):
                             "address": addr_hex,
                             "name": item.get("name", f"sub_{addr_hex.removeprefix('0x')}"),
                             "source": "rizin",
-                            "confidence": 0.85,
-                            "quality": 0.80,
-                            "coverage": 0.90,
+                            # Rizin emits no empirically calibrated confidence,
+                            # quality, or whole-program function-coverage score.
+                            # Keep neutral defaults and label the metrics instead
+                            # of turning unsupported constants into evidence.
+                            "confidence": 0.5,
+                            "quality": 0.5,
+                            "coverage": 0.0,
                             "calls": [],
                             "imports_used": [],
                             "strings_near": [],
                             "notes": f"Rizin function, size={item.get('size', 0)}",
-                            "warnings": [],
+                            "warnings": [
+                                "rizin_confidence_uncalibrated",
+                                "rizin_function_coverage_not_measured",
+                            ],
                             "raw": {
                                 "realsz": item.get("realsz"),
                                 "size": item.get("size"),
                                 "type": item.get("type"),
                                 "nbbs": item.get("nbbs"),
                                 "edges": item.get("edges"),
+                                "metric_status": {
+                                    "confidence": "unmeasured_default",
+                                    "quality": "unmeasured_default",
+                                    "coverage": "not_measured",
+                                },
                             }
                         })
         except json.JSONDecodeError:
@@ -119,10 +131,19 @@ class RizinAdapter(Adapter):
             str(target),
         ]
         try:
-            proc = run_bounded(cmd, timeout=timeout_from_env("AETHER_RIZIN_TIMEOUT", 180.0), memory_limit_mb=memory_limit_from_env("AETHER_RIZIN_MEMORY_MB"), cpu_time_limit_s=cpu_limit_from_env("AETHER_RIZIN_CPU_SECONDS"))
+            proc = run_bounded(
+                cmd,
+                timeout=timeout_from_env("AETHER_RIZIN_TIMEOUT", 180.0),
+                memory_limit_mb=memory_limit_from_env("AETHER_RIZIN_MEMORY_MB"),
+                cpu_time_limit_s=cpu_limit_from_env("AETHER_RIZIN_CPU_SECONDS"),
+                output_limit_bytes=self._MAX_OUTPUT_BYTES,
+            )
             raw = proc["stdout"]
             raw_bytes = raw.encode("utf-8", errors="replace")
-            output_limited = len(raw_bytes) > self._MAX_OUTPUT_BYTES
+            output_limited = bool(proc.get("output_limit_exceeded", False)) or len(raw_bytes) > self._MAX_OUTPUT_BYTES
+            output_bytes = proc.get("output_bytes", len(raw_bytes))
+            if not isinstance(output_bytes, int) or isinstance(output_bytes, bool) or output_bytes < 0:
+                output_bytes = len(raw_bytes)
             report_path = out_dir / "rizin_raw.txt"
             # Keep forensic provenance of the condition without allowing one
             # backend to exhaust the evidence budget or be promoted silently.
@@ -145,7 +166,7 @@ class RizinAdapter(Adapter):
                 "resource_exceeded": proc.get("resource_exceeded", False),
                 "resource_kind": proc.get("resource_kind"),
                 "output_limit_exceeded": output_limited,
-                "output_bytes": len(raw_bytes),
+                "output_bytes": output_bytes,
                 "functions": functions,
                 "report": str(report_path),
                 "stdout_tail": proc["stdout"][-3000:],

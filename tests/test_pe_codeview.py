@@ -24,6 +24,8 @@ def _pe_with_rsds_record() -> bytes:
 
     optional = 0x98
     struct.pack_into("<H", image, optional, 0x10B)
+    struct.pack_into("<I", image, optional + 56, 0x2000)  # SizeOfImage covers .rdata RVA
+    struct.pack_into("<I", image, optional + 60, 0x200)  # SizeOfHeaders, before section raw data
     struct.pack_into("<I", image, optional + 92, 16)
     struct.pack_into("<II", image, optional + 96 + 8 * 6, 0x1000, 28)
 

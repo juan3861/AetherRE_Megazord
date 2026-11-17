@@ -190,6 +190,23 @@ def test_mcp_dispatcher_yara_and_graph(tmp_path: Path):
     assert feas_res["status"] == "SAT"
 
 
+def test_instantiated_dispatcher_compares_behavior_like_stdio_server(tmp_path: Path):
+    source = tmp_path / "add.c"
+    source.write_text("int add(int a,int b){return a+b;}",encoding="utf-8")
+    result = AetherMcpDispatcher().handle_ground_truth_eval(str(source),"int add(int a,int b){return a-b;}","add")
+    assert result["behavioral_comparison"]["status"] == "different"
+    assert result["empirical_fidelity_score_pct"] is None
+
+
+def test_instantiated_dispatcher_detects_crypto_like_stdio_server(tmp_path: Path):
+    from aether_re.crypto_detect import AES_SBOX
+    target = tmp_path / "owned_crypto.bin"
+    target.write_bytes(b"\0"*64+AES_SBOX+b"\0"*64)
+    result = AetherMcpDispatcher().handle_detect_crypto(str(target))
+    assert "AES" in result["identified_algorithms"]
+    assert result["total_constants_detected"] >= 1
+
+
 def test_mcp_dispatcher_new_sota_tools(tmp_path: Path):
     # 1. Ground truth evaluation
     src_file = tmp_path / "foo.c"
@@ -211,7 +228,9 @@ def test_mcp_dispatcher_new_sota_tools(tmp_path: Path):
     """
     gt_res = AetherMcpDispatcher.handle_ground_truth_eval(str(src_file), dec_c, "foo")
     assert gt_res["function_name"] == "foo"
-    assert gt_res["empirical_fidelity_score_pct"] > 80.0
+    assert gt_res["empirical_fidelity_score_pct"] is None
+    assert gt_res["structural_similarity_score_pct"] > 80.0
+    assert gt_res["behavioral_comparison"]["status"] == "unknown"
 
     # 2. Webcrack tool
     js_file = tmp_path / "bundle.js"

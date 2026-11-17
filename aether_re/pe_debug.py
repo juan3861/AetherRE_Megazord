@@ -42,38 +42,48 @@ def parse_pe_codeview(data: bytes) -> dict[str, Any]:
         return {"schema": SCHEMA, "status": "complete", "machine": machine, "debug_directory": {"rva": 0, "size": 0}, "records": []}
     debug_rva, debug_size = struct.unpack_from("<II", blob, data_dir_off + 8 * 6)
     section_table = optional + optional_size
-    if section_table + section_count * 40 > len(blob):
+    if not 0<section_count<=96 or section_table + section_count * 40 > len(blob) or optional_size<64:
         return _invalid("section_table_invalid")
+    header_size=struct.unpack_from('<I',blob,optional+60)[0]
+    image_size=struct.unpack_from('<I',blob,optional+56)[0]
+    if not section_table+section_count*40<=header_size<=min(len(blob),image_size):return _invalid('headers_range_invalid')
     sections = []
-    for index in range(min(section_count, 96)):
+    for index in range(section_count):
         off = section_table + index * 40
         virtual_size, virtual_address, raw_size, raw_ptr = struct.unpack_from("<IIII", blob, off + 8)
         sections.append((virtual_address, max(virtual_size, raw_size), raw_ptr, raw_size))
 
-    def rva_to_raw(rva: int) -> int | None:
-        if rva == 0:
+    def rva_to_raw(rva: int, size: int = 1) -> int | None:
+        if rva == 0 or not 0<size<=len(blob) or rva+size>min(2**32,image_size):
             return None
+        candidates=[]
+        if rva+size<=header_size:candidates.append(rva)
         for va, span, raw_ptr, raw_size in sections:
-            if va <= rva < va + span and raw_ptr <= len(blob):
+            if va <= rva and rva+size <= va + span and raw_ptr <= len(blob):
                 delta = rva - va
-                if delta < raw_size and raw_ptr + delta <= len(blob):
-                    return raw_ptr + delta
-        return rva if rva < len(blob) else None
+                if delta+size<=raw_size and raw_ptr+delta+size<=len(blob):
+                    candidates.append(raw_ptr+delta)
+        return candidates[0] if len(candidates)==1 else None
 
-    directory_raw = rva_to_raw(debug_rva)
+    directory_raw = rva_to_raw(debug_rva,debug_size)
     records: list[dict[str, Any]] = []
-    if directory_raw is None or debug_size == 0:
+    if debug_rva==0 and debug_size==0:
         return {"schema": SCHEMA, "status": "complete", "machine": machine, "debug_directory": {"rva": debug_rva, "size": debug_size}, "records": records}
-    count = min(debug_size // 28, 4096)
+    if directory_raw is None or not 0<debug_size<=28*4096 or debug_size%28:
+        return _invalid('debug_directory_mapping_invalid')
+    count = debug_size // 28
     for index in range(count):
         off = directory_raw + index * 28
-        if off + 28 > len(blob):
-            break
         _, timestamp, major, minor, kind, size_data, address_data, pointer_data = struct.unpack_from("<IIHHIIII", blob, off)
         if kind != 2 or size_data < 24:
             continue
-        data_off = pointer_data if pointer_data and pointer_data + size_data <= len(blob) else rva_to_raw(address_data)
-        if data_off is None or data_off + 24 > len(blob) or blob[data_off:data_off + 4] != b"RSDS":
+        mapped=rva_to_raw(address_data,size_data) if address_data else None
+        if (pointer_data and pointer_data+size_data>len(blob)) or (address_data and mapped is None):
+            return _invalid('codeview_payload_mapping_invalid')
+        if pointer_data and mapped is not None and pointer_data!=mapped:return _invalid('codeview_rva_raw_disagreement')
+        data_off = pointer_data or mapped
+        if data_off is None or data_off+size_data>len(blob):return _invalid('codeview_payload_mapping_invalid')
+        if blob[data_off:data_off + 4] != b"RSDS":
             continue
         guid_bytes = blob[data_off + 4:data_off + 20]
         age = struct.unpack_from("<I", blob, data_off + 20)[0]

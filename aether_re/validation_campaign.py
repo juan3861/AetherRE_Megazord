@@ -55,8 +55,12 @@ def _tail(data: bytes, limit: int = 4096) -> str:
 
 def _kill_tree(process: subprocess.Popen[bytes]) -> None:
     if os.name == "nt":
-        subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"],
-                       capture_output=True, check=False)
+        try:
+            subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                           capture_output=True, check=False, timeout=5)
+        except (OSError, subprocess.TimeoutExpired):
+            # Still attempt to terminate the direct child if taskkill fails.
+            pass
     else:
         try:
             os.killpg(process.pid, 9)
@@ -177,16 +181,22 @@ def run_validation_campaign(cases: Sequence[CampaignCase], *, root: Path,
                                 shell=False, creationflags=flags, env=env,
                                 start_new_session=(os.name != "nt"))
         timed_out = False; exceeded = threading.Event(); captured: dict[str, Any] = {}
-        threads = [threading.Thread(target=_capture, args=(proc.stdout,), kwargs={"cap": max_output_bytes, "state": captured, "key": "stdout", "exceeded": exceeded}),
-                   threading.Thread(target=_capture, args=(proc.stderr,), kwargs={"cap": max_output_bytes, "state": captured, "key": "stderr", "exceeded": exceeded})]
+        threads = [threading.Thread(target=_capture, args=(proc.stdout,), kwargs={"cap": max_output_bytes, "state": captured, "key": "stdout", "exceeded": exceeded}, daemon=True),
+                   threading.Thread(target=_capture, args=(proc.stderr,), kwargs={"cap": max_output_bytes, "state": captured, "key": "stderr", "exceeded": exceeded}, daemon=True)]
         for thread in threads: thread.start()
         deadline = time.monotonic() + case.timeout_s
         while proc.poll() is None:
             if exceeded.is_set(): _kill_tree(proc); break
             if time.monotonic() >= deadline: timed_out = True; _kill_tree(proc); break
             time.sleep(0.01)
-        proc.wait()
+        cleanup_complete = True
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            cleanup_complete = False
         for thread in threads: thread.join(timeout=5)
+        capture_complete = not any(thread.is_alive() for thread in threads) and all(
+            key in captured for key in ("stdout", "stderr"))
         stdout_info = captured.get("stdout", {"data": b"", "bytes": 0, "sha256": hashlib.sha256(b"").hexdigest()})
         stderr_info = captured.get("stderr", {"data": b"", "bytes": 0, "sha256": hashlib.sha256(b"").hexdigest()})
         stdout, stderr = stdout_info["data"], stderr_info["data"]
@@ -194,12 +204,18 @@ def run_validation_campaign(cases: Sequence[CampaignCase], *, root: Path,
         matched = [code for code in case.expected_codes if code in combined]
         unavailable = "CAPABILITY_UNAVAILABLE" in combined
         evidence_hashes, evidence_errors = _evidence(case, root)
-        passed = not timed_out and not exceeded.is_set() and proc.returncode == case.expected_exit and len(matched) == len(case.expected_codes) and not evidence_errors
+        passed = cleanup_complete and capture_complete and not timed_out and not exceeded.is_set() and proc.returncode == case.expected_exit and len(matched) == len(case.expected_codes) and not evidence_errors
         state = "partial" if unavailable and case.capability_optional and passed else ("passed" if passed and not unavailable else "failed")
         outcome = "timeout" if timed_out else ("output_limit_exceeded" if exceeded.is_set() else ("capability_unavailable" if state == "partial" else ("matched" if passed else "expectation_mismatch")))
+        if not timed_out and not exceeded.is_set():
+            if not cleanup_complete:
+                outcome = "cleanup_incomplete"
+            elif not capture_complete:
+                outcome = "capture_incomplete"
         rows.append({
             "case_id": case.case_id, "category": case.category, "status": state,
             "outcome_code": outcome,
+            "cleanup_complete": cleanup_complete, "capture_complete": capture_complete,
             "expected_exit": case.expected_exit, "exit_code": proc.returncode,
             "expected_codes": list(case.expected_codes), "matched_codes": matched,
             "duration_ms": int((time.monotonic() - started) * 1000),
@@ -208,6 +224,10 @@ def run_validation_campaign(cases: Sequence[CampaignCase], *, root: Path,
             "stdout_tail": _tail(stdout), "stderr_tail": _tail(stderr),
             "evidence_hashes": evidence_hashes, "evidence_errors": evidence_errors,
         })
+        # An unreaped root or an inherited pipe can still belong to a live
+        # writer. Do not let that writer contaminate a subsequent case's files.
+        if not cleanup_complete or not capture_complete:
+            break
     failed = sum(row["status"] == "failed" for row in rows)
     partial = sum(row["status"] == "partial" for row in rows)
     status = "failed" if failed else ("partial" if partial else "passed")
@@ -217,7 +237,9 @@ def run_validation_campaign(cases: Sequence[CampaignCase], *, root: Path,
         "summary": {"total": len(rows), "passed": sum(r["status"] == "passed" for r in rows),
                     "failed": failed, "partial": partial,
                     "categories": sorted({r["category"] for r in rows})},
-        "execution": {"shell": False, "target_execution": False, "network_required": False},
+        "execution": {"shell": False, "target_execution": False, "network_required": False,
+                      "requested_cases": len(cases), "executed_cases": len(rows),
+                      "unexecuted_case_ids": [case.case_id for case in cases[len(rows):]]},
     }
     _atomic_json(output, report)
     return report

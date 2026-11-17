@@ -26,7 +26,7 @@ def merge_function_evidence(evidence_items:list[FunctionEvidence],successful_sou
   def weight(x:FunctionEvidence)->float:return max(0,min(1,float(rel.get(x.source,.25))))*max(0,min(1,x.confidence))*max(0,min(1,x.quality))
   ranked=sorted(items,key=lambda x:(-weight(x),x.source,x.name)); selected=ranked[0]; weights=[weight(x) for x in items];total=sum(weights) or 1
   quality=sum(x.quality*w for x,w in zip(items,weights))/total; confidence=sum(x.confidence*w for x,w in zip(items,weights))/total
-  agreements=[_source_agreement(x,y) for x,y in combinations(items,2)];agreement=sum(agreements)/len(agreements) if agreements else 1.
+  agreements=[_source_agreement(x,y) for x,y in combinations(items,2)];agreement=sum(agreements)/len(agreements) if agreements else 0.
   coverage=len({x.source for x in items})/len(universe); score=min(.80, .65*confidence+.25*agreement+.10*coverage)
   conflicts=[]; alternatives=[]
   for field in ('name','pseudocode','disassembly'):

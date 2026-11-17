@@ -1,0 +1,15 @@
+# Build local do helper DIA
+
+`tools/build_dia_extract.ps1` mantém os parâmetros `VsRoot`, `DiaSdkRoot`, `Source` e `Out`; aceita também `WorkDir`, `PythonExecutable` e `TimeoutSeconds`. O default Python usa `py -3.13`; um executável explícito dispensa o launcher. O wrapper passa argumentos ao módulo `aether_re.dia_build`, a partir da raiz do projeto, e restaura o diretório anterior.
+
+O build usa a versão em `VC/Auxiliary/Build/Microsoft.VCToolsVersion.default.txt`, validada como versão numérica instalada. A versão e seu hash vêm dos mesmos bytes limitados lidos. Compilador e linker são caminhos absolutos dessa versão. Não há fallback silencioso para um `cl` encontrado no PATH. VS, scripts e compilador são ferramentas explicitamente confiadas pelo operador; não se compila ou executa o PE analisado.
+
+Fonte, dia2.h, cvconst.h e diaguids.lib são capturados em job privado; snapshots do SDK exigem o hash observado antes da captura. Os hashes de ferramentas/SDK e snapshots são reconferidos após o worker. Alteração da fonte original depois da captura fica explícita e não muda a fonte privada compilada. Alteração do snapshot ou de entrada de ferramenta observada impede resultado completo.
+
+O job requer reserva de256MiB mais tamanhos dos inputs e tem worker contido com timeout1–600s, memória256–8192MiB e saída2MiB. TEMP/TMP apontam para o job. Sem WorkDir explícito, tenta o temporário corrente e depois `~/.aetherre/tmp`; não apaga dados para criar reserva. stdout/stderr, script e artefatos permanecem no job com hashes no receipt.
+
+CMD recebe `/d /v:off /c build.cmd`; o diretório é passado por CreateProcess, sem compor seu caminho no comando interpretado. Os caminhos interpolados dentro do batch são validados e cotados. NUL, CR/LF, aspas, `%`, `!` e `^` são recusados: em especial CALL tem segunda expansão e não preserva identidade de um path com caret. CL/_CL_/LINK/_LINK_/ERRORLEVEL herdados são removidos. Cada etapa verifica `if errorlevel 1` e normaliza falha para `exit /b 1` explícito; sucesso final usa `exit /b 0`. Não se preserva o código numérico específico de cada compilador, mas falha não vira sucesso por expansão de ERRORLEVEL ou por exit sem argumento.
+
+Falha de compilação, timeout, recurso excedido, captura incompleta, árvore não contida ou output inválido não produzem sucesso. O EXE e `<Out>.build.json` precisam ser destinos novos. Publicação usa create_verified_snapshot; evidência anterior nunca é sobrescrita. Publicação dos dois arquivos não é transação atômica: se o EXE já foi publicado e o receipt falha, o resultado é unavailable com `helper_published=true` e o EXE fica preservado para inspeção.
+
+O receipt registra versão, hashes de entradas observadas/snapshots, resultado do worker, logs e SHA-256 do helper. `hermetic_build_proved=false` e `certified=false`: dependências transitivas do Windows SDK/runtime não estão integralmente capturadas. Repetir o procedimento não implica identidade byte a byte de um linker com timestamps e paths variáveis. Esse build não quita replay integral de release, WORM, VM/restore, corpus externo, fonte original ou homologação F00–F12.
