@@ -700,6 +700,29 @@ TOOLS = [
             "required": ["target"]
         }
     },
+    {
+        "name": "aether_asar_audit",
+        "description": "Analisa arquivos Electron .asar nativamente (Chromium Pickle), extrai package.json, detecta bytecode V8 (.jsc) e audita falhas de segurança (nodeIntegration, contextIsolation).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "target": {"type": "string", "description": "Caminho absoluto para o arquivo .asar alvo."}
+            },
+            "required": ["target"]
+        }
+    },
+    {
+        "name": "aether_reconstruct_project",
+        "description": "Reconstrói um projeto C/C++ compilável (CMakeLists.txt, headers, .c, .def) a partir de PE64 ou árvore Electron a partir de .asar, validando congruência comportamental diferencial.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "target": {"type": "string", "description": "Caminho absoluto para o binário PE ou arquivo .asar alvo."},
+                "out_dir": {"type": "string", "description": "Diretório de saída para gerar o projeto reconstruído."}
+            },
+            "required": ["target", "out_dir"]
+        }
+    },
 {
         "name": "aether_ground_truth_eval",
         "description": "Compara características estruturais e procura contraprovas comportamentais num modelo explícito de C inteiro32 puro. Score estrutural não mede fidelidade semântica; memória/chamadas/controle não suportados retornam inconclusivo.",
@@ -988,6 +1011,16 @@ class AetherMcpDispatcher:
     def handle_omni_audit(target: str, *, all_gears: bool = False) -> dict[str, Any]:
         from aether_re.omni_audit import scan_file_omni_audit
         return scan_file_omni_audit(target, run_all_20_gears=all_gears).to_dict()
+
+    @staticmethod
+    def handle_asar_audit(target: str) -> dict[str, Any]:
+        from aether_re.electron_asar_forensics import scan_file_asar
+        return scan_file_asar(target).to_dict()
+
+    @staticmethod
+    def handle_reconstruct_project(target: str, out_dir: str) -> dict[str, Any]:
+        from aether_re.project_reconstructor import reconstruct_project
+        return reconstruct_project(target, out_dir).to_dict()
 
     @staticmethod
     def handle_ground_truth_eval(source_c: str, decompiled_c: str, function_name: str) -> dict[str, Any]:
@@ -1529,6 +1562,10 @@ def run_mcp_server() -> int:
                             args["target"],
                             all_gears=bool(args.get("all_gears", False)),
                         )
+                    elif tool_name == "aether_asar_audit":
+                        data = dispatcher.handle_asar_audit(args["target"])
+                    elif tool_name == "aether_reconstruct_project":
+                        data = dispatcher.handle_reconstruct_project(args["target"], args["out_dir"])
                     elif tool_name == "aether_ground_truth_eval":
                         data = dispatcher.handle_ground_truth_eval(
                             args["source_c"],

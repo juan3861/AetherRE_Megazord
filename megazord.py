@@ -3522,6 +3522,47 @@ def cmd_installer_audit(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_asar_audit(args: argparse.Namespace) -> int:
+    """Audita arquivos Electron .asar, extrai árvore de arquivos, package.json e riscos de segurança."""
+    from aether_re.electron_asar_forensics import scan_file_asar
+
+    target = Path(args.target)
+    if not target.exists() or not target.is_file():
+        print(json.dumps({"error": "target_not_found", "path": str(target)}))
+        return 1
+
+    report = scan_file_asar(target).to_dict()
+    if getattr(args, "out", None):
+        out_p = Path(args.out)
+        out_p.parent.mkdir(parents=True, exist_ok=True)
+        out_p.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        print(f"ASAR Audit: {out_p} | files={report.get('total_files', 0)}, risks={len(report.get('security_risks', []))}")
+    else:
+        print(json.dumps(report, indent=2, ensure_ascii=False))
+    return 0
+
+
+def cmd_reconstruct_project(args: argparse.Namespace) -> int:
+    """Reconstrói projeto C/C++ compilável (PE64) ou árvore Electron (.asar) com verificação de congruência comportamental."""
+    from aether_re.project_reconstructor import reconstruct_project
+
+    target = Path(args.target)
+    if not target.exists() or not target.is_file():
+        print(json.dumps({"error": "target_not_found", "path": str(target)}))
+        return 1
+
+    out_dir = Path(args.out_dir)
+    report = reconstruct_project(target, out_dir).to_dict()
+    if getattr(args, "out", None):
+        out_p = Path(args.out)
+        out_p.parent.mkdir(parents=True, exist_ok=True)
+        out_p.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        print(f"Project Reconstruct: {out_p} | kind={report.get('project_kind')}, congruence={report.get('overall_congruence_pct')}%")
+    else:
+        print(json.dumps(report, indent=2, ensure_ascii=False))
+    return 0
+
+
 def cmd_omni_audit(args: argparse.Namespace) -> int:
     """Orquestrador paralelo Zero-Copy das 21 engrenagens sobre um único buffer em memória."""
     from aether_re.omni_audit import scan_file_omni_audit
@@ -5349,6 +5390,17 @@ def main() -> int:
     omni_parser.add_argument("--all-gears", action="store_true", help="Força execução de todas as engrenagens independente do formato")
     omni_parser.add_argument("--out", help="Arquivo opcional de saída JSON")
     omni_parser.set_defaults(func=cmd_omni_audit)
+
+    asar_parser = sub.add_parser("asar-audit", help="Audita arquivos Electron .asar e riscos de segurança (nodeIntegration/contextIsolation)")
+    asar_parser.add_argument("target", help="Caminho do arquivo .asar alvo")
+    asar_parser.add_argument("--out", help="Arquivo opcional de saída JSON")
+    asar_parser.set_defaults(func=cmd_asar_audit)
+
+    rec_parser = sub.add_parser("reconstruct-project", help="Reconstrói projeto C/C++ compilável (PE64) ou Electron ASAR com congruência comportamental")
+    rec_parser.add_argument("target", help="Caminho do binário PE ou arquivo .asar alvo")
+    rec_parser.add_argument("--out-dir", required=True, help="Diretório de saída do projeto reconstruído")
+    rec_parser.add_argument("--out", help="Arquivo opcional de saída JSON")
+    rec_parser.set_defaults(func=cmd_reconstruct_project)
 
     args = p.parse_args()
 
