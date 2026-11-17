@@ -190,6 +190,7 @@ def _ps_quote(value: Path | str) -> str:
 
 def _run_materialization_harness(tmp_path: Path, body: str) -> dict:
     script = f"""
+$OutputEncoding = [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 . '{_ps_quote(ROOT / 'tools' / 'hyperv_provision.ps1')}'
 $ErrorActionPreference = 'Stop'
 $testRoot = '{_ps_quote(tmp_path)}'
@@ -204,6 +205,8 @@ function Get-TestSha256([string]$Path) {{
     proc = subprocess.run(
         ["powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script],
         text=True,
+        encoding="utf-8",
+        errors="replace",
         capture_output=True,
         timeout=30,
         check=False,

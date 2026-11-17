@@ -31,7 +31,7 @@ def test_cross_gear_correlation_improves_tampered_pe_detection(tmp_path: Path):
 
 def test_all_36_mcp_tools_registered_and_valid_schema():
     names = [t["name"] for t in TOOLS]
-    assert len(names) >= 36
+    assert len(names) >= 40
     for required in (
         "aether_detect_crypto",
         "aether_golang_recover",
@@ -45,6 +45,9 @@ def test_all_36_mcp_tools_registered_and_valid_schema():
         "aether_api_hash_resolve",
         "aether_dotnet_audit",
         "aether_floss_strings",
+        "aether_ole_macro",
+        "aether_driver_audit",
+        "aether_vmlinux_carve",
     ):
         assert required in names
         handler_name = "handle_" + required.removeprefix("aether_")
@@ -55,4 +58,4 @@ if __name__ == "__main__":
     with tempfile.TemporaryDirectory() as td:
         test_cross_gear_correlation_improves_tampered_pe_detection(Path(td))
     test_all_36_mcp_tools_registered_and_valid_schema()
-    print("CROSS-GEAR BENCHMARK & 36+ MCP TOOLS VERIFIED.")
+    print(f"CROSS-GEAR BENCHMARK & {len(TOOLS)} MCP TOOLS VERIFIED.")

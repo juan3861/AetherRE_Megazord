@@ -611,6 +611,39 @@ TOOLS = [
             "required": ["target"]
         }
     },
+    {
+        "name": "aether_ole_macro",
+        "description": "Extrai streams OLE2/CFB, descompacta macros VBA (MS-OVBA) e detecta gatilhos AutoExec e indicadores suspeitos (oletools).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "target": {"type": "string", "description": "Caminho absoluto para o documento/artefato OLE2 alvo."}
+            },
+            "required": ["target"]
+        }
+    },
+    {
+        "name": "aether_driver_audit",
+        "description": "Audita drivers de kernel Windows (.sys/PE), conformidade HVCI, violações W^X e primitivas BYOVD (MSRC/pe-sieve).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "target": {"type": "string", "description": "Caminho absoluto para o binário PE/driver alvo."}
+            },
+            "required": ["target"]
+        }
+    },
+    {
+        "name": "aether_vmlinux_carve",
+        "description": "Extrai imagens de kernel Linux compactadas (bzImage/vmlinuz/Image.xz), banners e símbolos kallsyms (vmlinux-to-elf).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "target": {"type": "string", "description": "Caminho absoluto para a imagem de kernel ou firmware alvo."}
+            },
+            "required": ["target"]
+        }
+    },
 {
         "name": "aether_ground_truth_eval",
         "description": "Compara características estruturais e procura contraprovas comportamentais num modelo explícito de C inteiro32 puro. Score estrutural não mede fidelidade semântica; memória/chamadas/controle não suportados retornam inconclusivo.",
@@ -859,6 +892,21 @@ class AetherMcpDispatcher:
     def handle_floss_strings(target: str) -> dict[str, Any]:
         from aether_re.floss_strings import scan_file_floss_strings
         return scan_file_floss_strings(target)
+
+    @staticmethod
+    def handle_ole_macro(target: str) -> dict[str, Any]:
+        from aether_re.ole_macro import scan_file_ole_macro
+        return scan_file_ole_macro(target).to_dict()
+
+    @staticmethod
+    def handle_driver_audit(target: str) -> dict[str, Any]:
+        from aether_re.kernel_driver_audit import scan_file_driver_audit
+        return scan_file_driver_audit(target).to_dict()
+
+    @staticmethod
+    def handle_vmlinux_carve(target: str) -> dict[str, Any]:
+        from aether_re.vmlinux_extract import scan_file_vmlinux
+        return scan_file_vmlinux(target).to_dict()
 
     @staticmethod
     def handle_ground_truth_eval(source_c: str, decompiled_c: str, function_name: str) -> dict[str, Any]:
@@ -1381,6 +1429,12 @@ def run_mcp_server() -> int:
                         data = dispatcher.handle_dotnet_audit(args["target"])
                     elif tool_name == "aether_floss_strings":
                         data = dispatcher.handle_floss_strings(args["target"])
+                    elif tool_name == "aether_ole_macro":
+                        data = dispatcher.handle_ole_macro(args["target"])
+                    elif tool_name == "aether_driver_audit":
+                        data = dispatcher.handle_driver_audit(args["target"])
+                    elif tool_name == "aether_vmlinux_carve":
+                        data = dispatcher.handle_vmlinux_carve(args["target"])
                     elif tool_name == "aether_ground_truth_eval":
                         data = dispatcher.handle_ground_truth_eval(
                             args["source_c"],

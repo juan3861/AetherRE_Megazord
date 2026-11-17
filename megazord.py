@@ -3382,6 +3382,66 @@ def cmd_ground_truth_bench(args: argparse.Namespace) -> int:
     return 0 if gt["behavioral_comparison"]["status"] == "equivalent_in_model" else 2
 
 
+def cmd_ole_macro(args: argparse.Namespace) -> int:
+    """Extrai streams OLE2 (MS-CFB), descompacta macros VBA (MS-OVBA) e detecta gatilhos AutoExec."""
+    from aether_re.ole_macro import scan_file_ole_macro
+
+    target = Path(args.target)
+    if not target.exists() or not target.is_file():
+        print(json.dumps({"error": "target_not_found", "path": str(target)}))
+        return 1
+
+    report = scan_file_ole_macro(target).to_dict()
+    if getattr(args, "out", None):
+        out_p = Path(args.out)
+        out_p.parent.mkdir(parents=True, exist_ok=True)
+        out_p.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        print(f"OLE Macro Audit: {out_p} | has_vba={report.get('has_vba')}, modules={len(report.get('vba_modules', []))}")
+    else:
+        print(json.dumps(report, indent=2, ensure_ascii=False))
+    return 0
+
+
+def cmd_driver_audit(args: argparse.Namespace) -> int:
+    """Audita drivers de kernel Windows (.sys/PE), conformidade HVCI, violações W^X e primitivas BYOVD."""
+    from aether_re.kernel_driver_audit import scan_file_driver_audit
+
+    target = Path(args.target)
+    if not target.exists() or not target.is_file():
+        print(json.dumps({"error": "target_not_found", "path": str(target)}))
+        return 1
+
+    report = scan_file_driver_audit(target).to_dict()
+    if getattr(args, "out", None):
+        out_p = Path(args.out)
+        out_p.parent.mkdir(parents=True, exist_ok=True)
+        out_p.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        print(f"Driver Audit: {out_p} | hvci={report.get('hvci_compatible')}, risk_score={report.get('byovd_risk_score', 0)}")
+    else:
+        print(json.dumps(report, indent=2, ensure_ascii=False))
+    return 0
+
+
+def cmd_vmlinux_carve(args: argparse.Namespace) -> int:
+    """Extrai e descompacta imagens de kernel Linux (bzImage/vmlinuz) e reconstrói símbolos kallsyms."""
+    from aether_re.vmlinux_extract import scan_file_vmlinux
+
+    target = Path(args.target)
+    if not target.exists() or not target.is_file():
+        print(json.dumps({"error": "target_not_found", "path": str(target)}))
+        return 1
+
+    report = scan_file_vmlinux(target).to_dict()
+    if getattr(args, "out", None):
+        out_p = Path(args.out)
+        out_p.parent.mkdir(parents=True, exist_ok=True)
+        out_p.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        print(f"vmlinux Carve: {out_p} | streams={len(report.get('carved_streams', []))}, kallsyms={report.get('has_kallsyms_markers')}")
+    else:
+        print(json.dumps(report, indent=2, ensure_ascii=False))
+    return 0
+
+
 def cmd_floss_strings(args: argparse.Namespace) -> int:
     """Reconstrói stack strings x86/x64, decodifica strings XOR e extrai payloads Base64 (FLOSS)."""
     from aether_re.floss_strings import scan_file_floss_strings
@@ -5145,6 +5205,21 @@ def main() -> int:
     floss_parser.add_argument("target", help="Caminho do binário alvo")
     floss_parser.add_argument("--out", help="Arquivo opcional de saída JSON")
     floss_parser.set_defaults(func=cmd_floss_strings)
+
+    ole_parser = sub.add_parser("ole-macro", help="Extrai streams OLE2/CFB, descompacta macros VBA (MS-OVBA) e detecta AutoExec")
+    ole_parser.add_argument("target", help="Caminho do documento/artefato OLE2 alvo")
+    ole_parser.add_argument("--out", help="Arquivo opcional de saída JSON")
+    ole_parser.set_defaults(func=cmd_ole_macro)
+
+    drv_parser = sub.add_parser("driver-audit", help="Audita drivers de kernel Windows (.sys), conformidade HVCI, W^X e primitivas BYOVD")
+    drv_parser.add_argument("target", help="Caminho do binário PE/driver alvo")
+    drv_parser.add_argument("--out", help="Arquivo opcional de saída JSON")
+    drv_parser.set_defaults(func=cmd_driver_audit)
+
+    vmlinux_parser = sub.add_parser("vmlinux-carve", help="Extrai kernels Linux compactados (bzImage/vmlinuz) e reconstrói símbolos kallsyms")
+    vmlinux_parser.add_argument("target", help="Caminho da imagem de kernel alvo")
+    vmlinux_parser.add_argument("--out", help="Arquivo opcional de saída JSON")
+    vmlinux_parser.set_defaults(func=cmd_vmlinux_carve)
 
     args = p.parse_args()
 
