@@ -3522,6 +3522,29 @@ def cmd_installer_audit(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_omni_audit(args: argparse.Namespace) -> int:
+    """Orquestrador paralelo Zero-Copy das 21 engrenagens sobre um único buffer em memória."""
+    from aether_re.omni_audit import scan_file_omni_audit
+
+    target = Path(args.target)
+    if not target.exists() or not target.is_file():
+        print(json.dumps({"error": "target_not_found", "path": str(target)}))
+        return 1
+
+    report = scan_file_omni_audit(target, run_all_20_gears=getattr(args, "all_gears", False)).to_dict()
+    if getattr(args, "out", None):
+        out_p = Path(args.out)
+        out_p.parent.mkdir(parents=True, exist_ok=True)
+        out_p.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        print(
+            f"Omni Audit: {out_p} | gears={report.get('gears_executed_count')}, "
+            f"wall_ms={report.get('wall_clock_ms')}, mib_s={report.get('throughput_mib_s')}"
+        )
+    else:
+        print(json.dumps(report, indent=2, ensure_ascii=False))
+    return 0
+
+
 def cmd_floss_strings(args: argparse.Namespace) -> int:
     """Reconstrói stack strings x86/x64, decodifica strings XOR e extrai payloads Base64 (FLOSS)."""
     from aether_re.floss_strings import scan_file_floss_strings
@@ -5320,6 +5343,12 @@ def main() -> int:
     inst_parser.add_argument("target", help="Caminho do instalador ou binário alvo")
     inst_parser.add_argument("--out", help="Arquivo opcional de saída JSON")
     inst_parser.set_defaults(func=cmd_installer_audit)
+
+    omni_parser = sub.add_parser("omni-audit", help="Orquestrador paralelo Zero-Copy das engrenagens forenses sobre um único buffer em memória")
+    omni_parser.add_argument("target", help="Caminho do binário ou artefato alvo")
+    omni_parser.add_argument("--all-gears", action="store_true", help="Força execução de todas as engrenagens independente do formato")
+    omni_parser.add_argument("--out", help="Arquivo opcional de saída JSON")
+    omni_parser.set_defaults(func=cmd_omni_audit)
 
     args = p.parse_args()
 

@@ -41,10 +41,11 @@ def _entropy(chunk: bytes) -> float:
         counts[b] += 1
     n = len(chunk)
     ent = 0.0
+    log2_fn = math.log2
     for c in counts:
         if c:
             p = c / n
-            ent -= p * math.log2(p)
+            ent -= p * log2_fn(p)
     return round(ent, 4)
 
 
@@ -158,15 +159,45 @@ def analyze_firmware(data: bytes, *, chunk_size: int = 4096) -> dict[str, Any]:
 
     carved.sort(key=lambda x: x["offset"])
 
-    # Entropy profile
+    # Entropy profile (single-pass accumulation for both chunk and global entropy)
     step = max(256, chunk_size)
     high_entropy_regions: list[dict[str, Any]] = []
     entropies: list[float] = []
-    for off in range(0, min(len(blob), 16 * 1024 * 1024), step):
-        ent = _entropy(blob[off:off + step])
+    global_counts = [0] * 256
+    global_bytes = 0
+    log2_fn = math.log2
+    limit = min(len(blob), 16 * 1024 * 1024)
+    for off in range(0, limit, step):
+        chunk = blob[off:off + step]
+        counts = [0] * 256
+        for b in chunk:
+            counts[b] += 1
+        n = len(chunk)
+        ent = 0.0
+        if off < 1024 * 1024:
+            global_bytes += n
+            for idx_b, c in enumerate(counts):
+                if c:
+                    global_counts[idx_b] += c
+                    p = c / n
+                    ent -= p * log2_fn(p)
+        else:
+            for c in counts:
+                if c:
+                    p = c / n
+                    ent -= p * log2_fn(p)
+        ent = round(ent, 4)
         entropies.append(ent)
         if ent >= 7.2:
-            high_entropy_regions.append({"offset": off, "size": min(step, len(blob) - off), "entropy": ent})
+            high_entropy_regions.append({"offset": off, "size": n, "entropy": ent})
+
+    global_ent = 0.0
+    if global_bytes > 0:
+        for c in global_counts:
+            if c:
+                p = c / global_bytes
+                global_ent -= p * log2_fn(p)
+        global_ent = round(global_ent, 4)
 
     uefi_info = _inspect_uefi(blob) if b"_FVH" in blob else {"detected": False, "modules": []}
 
@@ -174,7 +205,7 @@ def analyze_firmware(data: bytes, *, chunk_size: int = 4096) -> dict[str, Any]:
         "schema": SCHEMA,
         "status": "complete",
         "size_bytes": len(blob),
-        "global_entropy": _entropy(blob[:1024 * 1024]),
+        "global_entropy": global_ent,
         "high_entropy_chunk_count": len(high_entropy_regions),
         "high_entropy_regions": high_entropy_regions[:100],
         "total_signatures": len(carved),

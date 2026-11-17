@@ -688,6 +688,18 @@ TOOLS = [
             "required": ["target"]
         }
     },
+    {
+        "name": "aether_omni_audit",
+        "description": "Orquestrador paralelo Zero-Copy que executa simultaneamente todas as engrenagens forenses aplicáveis sobre uma única leitura de memória, reportando latências por engrenagem e vazão em MiB/s.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "target": {"type": "string", "description": "Caminho absoluto para o binário ou artefato alvo."},
+                "all_gears": {"type": "boolean", "description": "Se verdadeiro, força a execução de todas as engrenagens independente do formato.", "default": False}
+            },
+            "required": ["target"]
+        }
+    },
 {
         "name": "aether_ground_truth_eval",
         "description": "Compara características estruturais e procura contraprovas comportamentais num modelo explícito de C inteiro32 puro. Score estrutural não mede fidelidade semântica; memória/chamadas/controle não suportados retornam inconclusivo.",
@@ -971,6 +983,11 @@ class AetherMcpDispatcher:
     def handle_installer_audit(target: str) -> dict[str, Any]:
         from aether_re.installer_forensics import scan_file_installer
         return scan_file_installer(target).to_dict()
+
+    @staticmethod
+    def handle_omni_audit(target: str, *, all_gears: bool = False) -> dict[str, Any]:
+        from aether_re.omni_audit import scan_file_omni_audit
+        return scan_file_omni_audit(target, run_all_20_gears=all_gears).to_dict()
 
     @staticmethod
     def handle_ground_truth_eval(source_c: str, decompiled_c: str, function_name: str) -> dict[str, Any]:
@@ -1507,6 +1524,11 @@ def run_mcp_server() -> int:
                         data = dispatcher.handle_cfi_audit(args["target"])
                     elif tool_name == "aether_installer_audit":
                         data = dispatcher.handle_installer_audit(args["target"])
+                    elif tool_name == "aether_omni_audit":
+                        data = dispatcher.handle_omni_audit(
+                            args["target"],
+                            all_gears=bool(args.get("all_gears", False)),
+                        )
                     elif tool_name == "aether_ground_truth_eval":
                         data = dispatcher.handle_ground_truth_eval(
                             args["source_c"],

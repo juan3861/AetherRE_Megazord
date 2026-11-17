@@ -105,7 +105,7 @@ MODULE_PHASE: dict[str, str] = {
     "floss_strings": "F05",
     "ole_macro": "F05", "kernel_driver_audit": "F05", "vmlinux_extract": "F05",
     "dex_forensics": "F05", "wasm_forensics": "F05",
-    "cfi_gadget_audit": "F05", "installer_forensics": "F05",
+    "cfi_gadget_audit": "F05", "installer_forensics": "F05", "omni_audit": "F05",
     "ctree_structuring": "F05", "ssa_ir": "F05", "til_engine": "F05",
     "memory_forensics": "F08", "minidump_parser": "F08",
     "semantic_deobfuscator": "F05", "smt_solver": "F09",

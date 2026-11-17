@@ -1,0 +1,146 @@
+{
+  "schema": "aether-re-supremacy-benchmark.v1",
+  "total_mcp_tools": 45,
+  "total_specialized_gears": 21,
+  "bottleneck_elimination_512kib": {
+    "floss_single_byte_xor": {
+      "algorithm": "XOR Differential Invariant D[i] = B[i] ^ B[i+1] via 64-bit C Limb XOR",
+      "before_ms": 14447.19,
+      "after_p50_ms": 6.63,
+      "speedup_factor": "2179.1x",
+      "hits_verified": 1
+    },
+    "api_hash_resolver": {
+      "algorithm": "4-Alignment C memoryview.cast('I') + frozenset.intersection",
+      "before_ms": 393.5,
+      "after_p50_ms": 32.13,
+      "speedup_factor": "12.2x",
+      "hits_verified": 1
+    },
+    "firmware_entropy_carver": {
+      "algorithm": "Single-pass sliding window + global histogram accumulation",
+      "before_ms": 196.44,
+      "after_p50_ms": 38.97,
+      "speedup_factor": "5.0x",
+      "global_entropy": 7.9997
+    },
+    "omni_parallel_orchestrator": {
+      "algorithm": "Zero-copy single buffer read + ThreadPoolExecutor concurrent dispatch",
+      "wall_clock_p50_ms": 211.51,
+      "throughput_mib_s": 2.449
+    }
+  },
+  "real_binary_benchmarks": {
+    "kernel32.dll": {
+      "size_bytes": 862016,
+      "wall_clock_ms": 750.365,
+      "throughput_mib_s": 1.096,
+      "gears_executed": 12,
+      "gear_latencies_ms": {
+        "crypto_detect": 7.579,
+        "installer_forensics": 2.734,
+        "cpp_rtti": 0.695,
+        "api_hash_resolve": 52.665,
+        "floss_strings": 230.669,
+        "firmware_entropy": 78.259,
+        "dotnet_forensics": 0.218,
+        "golang_recover": 3.334,
+        "rust_recover": 172.859,
+        "kernel_driver_audit": 437.441,
+        "authenticode_audit": 486.589,
+        "cfi_gadget_audit": 449.16
+      }
+    },
+    "poly_test.dll": {
+      "size_bytes": 104960,
+      "wall_clock_ms": 345.267,
+      "throughput_mib_s": 0.29,
+      "gears_executed": 12,
+      "rtti_classes_recovered": [
+        {
+          "mangled": ".?AVbad_alloc@std@@",
+          "demangled": "class std::bad_alloc `RTTI Type Descriptor Name'",
+          "rva": "0x19a60",
+          "base_classes": [
+            "class std::exception `RTTI Type Descriptor Name'"
+          ],
+          "vtable_rvas": [
+            "0xf3b0"
+          ]
+        },
+        {
+          "mangled": ".?AVexception@std@@",
+          "demangled": "class std::exception `RTTI Type Descriptor Name'",
+          "rva": "0x19a88",
+          "base_classes": [],
+          "vtable_rvas": [
+            "0xf380"
+          ]
+        },
+        {
+          "mangled": ".?AVbad_array_new_length@std@@",
+          "demangled": "class std::bad_array_new_length `RTTI Type Descriptor Name'",
+          "rva": "0x19ab0",
+          "base_classes": [
+            "class std::bad_alloc `RTTI Type Descriptor Name'",
+            "class std::exception `RTTI Type Descriptor Name'"
+          ],
+          "vtable_rvas": [
+            "0xf3d8"
+          ]
+        },
+        {
+          "mangled": ".?AVbad_exception@std@@",
+          "demangled": "class std::bad_exception `RTTI Type Descriptor Name'",
+          "rva": "0x19ae0",
+          "base_classes": [
+            "class std::exception `RTTI Type Descriptor Name'"
+          ],
+          "vtable_rvas": [
+            "0x103e0"
+          ]
+        },
+        {
+          "mangled": ".?AVIProcessor@@",
+          "demangled": "class IProcessor `RTTI Type Descriptor Name'",
+          "rva": "0x19b08",
+          "base_classes": [],
+          "vtable_rvas": [
+            "0xf308"
+          ]
+        },
+        {
+          "mangled": ".?AVFastProcessor@@",
+          "demangled": "class FastProcessor `RTTI Type Descriptor Name'",
+          "rva": "0x19b30",
+          "base_classes": [
+            "class IProcessor `RTTI Type Descriptor Name'"
+          ],
+          "vtable_rvas": [
+            "0xf328"
+          ]
+        },
+        {
+          "mangled": ".?AVCryptoProcessor@@",
+          "demangled": "class CryptoProcessor `RTTI Type Descriptor Name'",
+          "rva": "0x19b58",
+          "base_classes": [
+            "class IProcessor `RTTI Type Descriptor Name'"
+          ],
+          "vtable_rvas": [
+            "0xf348"
+          ]
+        },
+        {
+          "mangled": ".?AVtype_info@@",
+          "demangled": "class type_info `RTTI Type Descriptor Name'",
+          "rva": "0x19b80",
+          "base_classes": [],
+          "vtable_rvas": [
+            "0xf368"
+          ]
+        }
+      ]
+    }
+  }
+}

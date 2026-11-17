@@ -83,6 +83,7 @@ def _build_lookup_table() -> dict[int, list[tuple[str, str]]]:
 
 
 _LOOKUP_TABLE = _build_lookup_table()
+_LOOKUP_KEYS_SET = frozenset(_LOOKUP_TABLE.keys())
 
 
 def resolve_api_hash(hash_value: int) -> list[dict[str, str]]:
@@ -104,27 +105,43 @@ def scan_bytes_for_api_hashes(data: bytes, *, max_hits: int = 500) -> dict[str, 
 
     hits: list[dict[str, Any]] = []
     seen: set[tuple[int, int]] = set()
-    # Unpack 4-byte uint32 across all alignments (instructions like `mov edx, imm32` are unaligned)
+    # 4-alignment C-level memoryview.cast('I') + frozenset.intersection()
     mv = memoryview(blob)
-    for offset in range(0, len(blob) - 3):
-        val = int.from_bytes(mv[offset:offset + 4], "little")
-        if val in _LOOKUP_TABLE:
-            for alg, api in _LOOKUP_TABLE[val]:
+    n = len(blob)
+    matched_vals: set[int] = set()
+    for align in range(4):
+        end = align + ((n - align) // 4) * 4
+        if end > align:
+            common = _LOOKUP_KEYS_SET.intersection(mv[align:end].cast("I"))
+            if common:
+                matched_vals.update(common)
+
+    for val in matched_vals:
+        needle = val.to_bytes(4, "little")
+        entries = _LOOKUP_TABLE[val]
+        start = 0
+        while len(hits) < max_hits:
+            offset = blob.find(needle, start)
+            if offset == -1:
+                break
+            for alg, api in entries:
                 key = (val, offset)
-                if key in seen:
-                    continue
-                seen.add(key)
-                hits.append({
-                    "offset": offset,
-                    "offset_hex": hex(offset),
-                    "hash_hex": hex(val),
-                    "algorithm": alg,
-                    "api_name": api,
-                })
-                if len(hits) >= max_hits:
-                    break
+                if key not in seen:
+                    seen.add(key)
+                    hits.append({
+                        "offset": offset,
+                        "offset_hex": hex(offset),
+                        "hash_hex": hex(val),
+                        "algorithm": alg,
+                        "api_name": api,
+                    })
+                    if len(hits) >= max_hits:
+                        break
+            start = offset + 1
         if len(hits) >= max_hits:
             break
+
+    hits.sort(key=lambda h: (h["offset"], h["algorithm"], h["api_name"]))
 
     return {
         "schema": SCHEMA,
