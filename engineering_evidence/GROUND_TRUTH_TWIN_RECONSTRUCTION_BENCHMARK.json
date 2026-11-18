@@ -8,28 +8,55 @@
       "ground_truth": "cJSON.c (78 exports)",
       "status": "complete",
       "total_targets_analyzed": 78,
-      "fully_lifted_congruent_functions": 31,
-      "ctree_structured_functions": 31,
-      "avg_goto_elimination_pct": 74.19,
+      "fully_lifted_congruent_functions": 62,
+      "ctree_structured_functions": 62,
+      "avg_goto_elimination_pct": 50.0,
       "ghidra_enriched_functions": 78,
       "lifted_function_names": [
+        "cJSON_AddArrayToObject",
+        "cJSON_AddBoolToObject",
+        "cJSON_AddFalseToObject",
+        "cJSON_AddItemReferenceToArray",
+        "cJSON_AddItemReferenceToObject",
         "cJSON_AddItemToArray",
+        "cJSON_AddItemToObject",
+        "cJSON_AddItemToObjectCS",
+        "cJSON_AddNullToObject",
+        "cJSON_AddNumberToObject",
+        "cJSON_AddObjectToObject",
+        "cJSON_AddRawToObject",
+        "cJSON_AddStringToObject",
+        "cJSON_AddTrueToObject",
         "cJSON_CreateArray",
         "cJSON_CreateArrayReference",
         "cJSON_CreateBool",
+        "cJSON_CreateDoubleArray",
         "cJSON_CreateFalse",
         "cJSON_CreateNull",
         "cJSON_CreateNumber",
         "cJSON_CreateObject",
         "cJSON_CreateObjectReference",
+        "cJSON_CreateRaw",
+        "cJSON_CreateString",
+        "cJSON_CreateStringArray",
         "cJSON_CreateStringReference",
         "cJSON_CreateTrue",
+        "cJSON_Delete",
+        "cJSON_DeleteItemFromArray",
+        "cJSON_DeleteItemFromObject",
+        "cJSON_DeleteItemFromObjectCaseSensitive",
         "cJSON_DetachItemFromArray",
+        "cJSON_DetachItemFromObject",
+        "cJSON_DetachItemFromObjectCaseSensitive",
         "cJSON_DetachItemViaPointer",
+        "cJSON_Duplicate",
         "cJSON_GetArrayItem",
         "cJSON_GetArraySize",
         "cJSON_GetNumberValue",
+        "cJSON_GetObjectItem",
+        "cJSON_GetObjectItemCaseSensitive",
         "cJSON_GetStringValue",
+        "cJSON_HasObjectItem",
         "cJSON_InsertItemInArray",
         "cJSON_IsArray",
         "cJSON_IsBool",
@@ -41,6 +68,10 @@
         "cJSON_IsRaw",
         "cJSON_IsString",
         "cJSON_IsTrue",
+        "cJSON_ReplaceItemInArray",
+        "cJSON_ReplaceItemInObject",
+        "cJSON_ReplaceItemInObjectCaseSensitive",
+        "cJSON_ReplaceItemViaPointer",
         "cJSON_SetNumberHelper",
         "cJSON_free",
         "cJSON_malloc"
@@ -52,13 +83,13 @@
       "imported_dlls": [
         "KERNEL32.dll"
       ],
-      "reconstruct_ms": 1936.84,
+      "reconstruct_ms": 8683.43,
       "msvc_compiled": true,
       "compiler": "msvc_cl_x64",
-      "compiled_twin_dll_bytes": 127488,
-      "compiled_twin_dll_sha256": "cab2b188e540ac9a2589643e78c7a69e8bec87f7d9d5362eccd2137aa9811077",
-      "omni_elapsed_ms": 209.821,
-      "omni_throughput_mb_s": 0.831,
+      "compiled_twin_dll_bytes": 125952,
+      "compiled_twin_dll_sha256": "094a3e6729444e5709f275b903b92fcd1c1cb60b8b55dbf48324cefc8c160d42",
+      "omni_elapsed_ms": 202.396,
+      "omni_throughput_mb_s": 0.861,
       "omni_gears_executed": 12,
       "missing_or_empty_files": []
     },
@@ -80,13 +111,13 @@
       "imported_dlls": [
         "KERNEL32.dll"
       ],
-      "reconstruct_ms": 395.49,
+      "reconstruct_ms": 386.33,
       "msvc_compiled": true,
       "compiler": "msvc_cl_x64",
-      "compiled_twin_dll_bytes": 108544,
-      "compiled_twin_dll_sha256": "1d7aaec99801b3a8909c04d245dd04fba2a090d1af001cde9af529a90c7a280e",
-      "omni_elapsed_ms": 215.429,
-      "omni_throughput_mb_s": 0.936,
+      "compiled_twin_dll_bytes": 113152,
+      "compiled_twin_dll_sha256": "64b2b84530d7530f0844c6cc3d56684aad2b7727a4fa1bc34f617f5278cdc4eb",
+      "omni_elapsed_ms": 231.274,
+      "omni_throughput_mb_s": 0.872,
       "omni_gears_executed": 12,
       "missing_or_empty_files": []
     },
@@ -116,13 +147,13 @@
       "imported_dlls": [
         "KERNEL32.dll"
       ],
-      "reconstruct_ms": 238.66,
+      "reconstruct_ms": 356.31,
       "msvc_compiled": true,
       "compiler": "msvc_cl_x64",
-      "compiled_twin_dll_bytes": 104960,
-      "compiled_twin_dll_sha256": "09937a581befeb291e12a4f09118a31d0382baad01b6f130711647a6597db1a5",
-      "omni_elapsed_ms": 154.411,
-      "omni_throughput_mb_s": 0.648,
+      "compiled_twin_dll_bytes": 105472,
+      "compiled_twin_dll_sha256": "27702a3767f8d1bbb4783ef2c8e10ead60247186501db2dc7a55050a5f5b426e",
+      "omni_elapsed_ms": 183.538,
+      "omni_throughput_mb_s": 0.545,
       "omni_gears_executed": 12,
       "missing_or_empty_files": []
     },
@@ -151,13 +182,13 @@
       "imported_dlls": [
         "KERNEL32.dll"
       ],
-      "reconstruct_ms": 238.2,
+      "reconstruct_ms": 230.04,
       "msvc_compiled": true,
       "compiler": "msvc_cl_x64",
-      "compiled_twin_dll_bytes": 104448,
-      "compiled_twin_dll_sha256": "a49c1a139c2dfd5aa2d96ae526b61222ed1e801d74ed4adb6e72a171f8c47017",
-      "omni_elapsed_ms": 172.681,
-      "omni_throughput_mb_s": 0.58,
+      "compiled_twin_dll_bytes": 104960,
+      "compiled_twin_dll_sha256": "b3c89fd6fdc72a58fc54b0430bb6cece64c09a4fcd02b4e1d93592a9be2a4d3c",
+      "omni_elapsed_ms": 177.698,
+      "omni_throughput_mb_s": 0.563,
       "omni_gears_executed": 12,
       "missing_or_empty_files": []
     }
@@ -208,7 +239,7 @@
         1,
         1,
         1,
-        2545782810224,
+        2536641196784,
         0
       ],
       "compiled_twin_outputs": [
@@ -216,7 +247,7 @@
         1,
         1,
         1,
-        2545782810224,
+        2536641196784,
         0
       ],
       "match": true
@@ -244,6 +275,18 @@
       "compiled_twin_outputs": [
         "[42.5,true,false,null]",
         4
+      ],
+      "match": true
+    },
+    {
+      "target": "compiled twin -> orig cjson.dll :: Live Object+String+AddTrue+GetObjectItemCS+Delete",
+      "original_dll_outputs": [
+        "aether_v39",
+        "{\"msg\":\"aether_v39\",\"ok\":true}"
+      ],
+      "compiled_twin_outputs": [
+        "aether_v39",
+        "{\"msg\":\"aether_v39\",\"ok\":true}"
       ],
       "match": true
     },

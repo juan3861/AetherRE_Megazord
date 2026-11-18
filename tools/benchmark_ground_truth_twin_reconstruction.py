@@ -266,6 +266,36 @@ def _run_compiled_twin_interop_checks(reconstructed_dir: Path) -> List[Dict[str,
         "match": orig_serialized == "[42.5,true,false,null]" and orig_built_sz == 4,
     })
 
+    twin_cj.cJSON_CreateObject.restype = ctypes.c_void_p
+    twin_cj.cJSON_CreateString.argtypes = [ctypes.c_char_p]
+    twin_cj.cJSON_CreateString.restype = ctypes.c_void_p
+    twin_cj.cJSON_AddItemToObject.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_void_p]
+    twin_cj.cJSON_AddItemToObject.restype = ctypes.c_int
+    twin_cj.cJSON_AddTrueToObject.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+    twin_cj.cJSON_AddTrueToObject.restype = ctypes.c_void_p
+    twin_cj.cJSON_GetObjectItemCaseSensitive.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+    twin_cj.cJSON_GetObjectItemCaseSensitive.restype = ctypes.c_void_p
+    twin_cj.cJSON_GetStringValue.argtypes = [ctypes.c_void_p]
+    twin_cj.cJSON_GetStringValue.restype = ctypes.c_char_p
+    twin_cj.cJSON_Delete.argtypes = [ctypes.c_void_p]
+
+    twin_obj = twin_cj.cJSON_CreateObject()
+    twin_cj.cJSON_AddItemToObject(twin_obj, b"msg", twin_cj.cJSON_CreateString(b"aether_v39"))
+    twin_cj.cJSON_AddTrueToObject(twin_obj, b"ok")
+    got_msg = twin_cj.cJSON_GetObjectItemCaseSensitive(twin_obj, b"msg")
+    got_str_ptr = twin_cj.cJSON_GetStringValue(got_msg)
+    got_str = got_str_ptr.decode("utf-8") if got_str_ptr else ""
+    orig_obj_ptr = orig_cj.cJSON_PrintUnformatted(twin_obj)
+    orig_obj_json = orig_obj_ptr.decode("utf-8") if orig_obj_ptr else ""
+    twin_cj.cJSON_Delete(twin_obj)
+
+    checks.append({
+        "target": "compiled twin -> orig cjson.dll :: Live Object+String+AddTrue+GetObjectItemCS+Delete",
+        "original_dll_outputs": ["aether_v39", '{"msg":"aether_v39","ok":true}'],
+        "compiled_twin_outputs": [got_str, orig_obj_json],
+        "match": got_str == "aether_v39" and orig_obj_json == '{"msg":"aether_v39","ok":true}',
+    })
+
     # Also verify compiled twin cJSON_AddItemToArray on _MemoryArena / AST matches expected behavior
     cj_rep = json.loads((reconstructed_dir / "cjson" / "twin_congruence_report.json").read_text(encoding="utf-8"))
     cj_fns = {f["name"]: f["lifted_c_code"] for f in cj_rep["functions"]}
@@ -442,7 +472,7 @@ def main() -> int:
         "## 4. Limitações Reais Observadas (Verdade Radical)",
         "",
         "- Todos os 4 projetos C gêmeos gerados (`cjson`, `tinyexpr`, `poly_test`, `multi_poly`) compilam nativamente em MSVC x64 `/O2` sem erros (incluindo resolução de até 64 sub-rotinas internas `.text`).",
-        f"- Em `cjson.dll`, **{cj_lifted}/{cj_total}** exports são 100% elevados (incluindo alocadores/construtores `cJSON_CreateArray`, `cJSON_CreateObject`, `cJSON_CreateNumber` via XMM0/128-bit `movups` + hooks CRT `.data`, `cJSON_CreateTrue`/`False`/`Bool`/`Null`/`*Reference`, `cJSON_malloc`/`cJSON_free`, `cJSON_GetNumberValue`/`cJSON_SetNumberHelper`, `cJSON_AddItemToArray`, `cJSON_GetArraySize`/`Item`, `cJSON_DetachItem*`, `cJSON_InsertItemInArray`), com **{cj_ghidra}/{cj_total}** exports enriquecidos via cache tipado do Ghidra (`reconstructed_ghidra_reference.c`). Os {cj_rem} exports restantes (`cJSON_Parse*`/`Print*`/`Delete`/chamadas internas múltiplas/CRT `sprintf`/`strtod`) mantêm esqueleto compilável + structs recuperadas; o mesmo vale para os 5 exports de `tinyexpr.dll` (onde `te_free` resolve `sub_3410` + `aether_free`).",
+        f"- Em `cjson.dll`, **{cj_lifted}/{cj_total}** exports são 100% elevados (cobrindo construtores, strings, inserção/remoção em arrays e objetos, `cJSON_Delete` recursivo, `cJSON_Duplicate`, `cJSON_GetObjectItem*`, `cJSON_ReplaceItem*`, CRT `malloc`/`free`/`strlen`/`strcmp`/`tolower`/`memcpy`, XMM0/128-bit `movups` e ABI `double`), com **{cj_ghidra}/{cj_total}** exports enriquecidos via cache tipado do Ghidra (`reconstructed_ghidra_reference.c`). Os {cj_rem} exports restantes (`cJSON_Parse*`/`Print*`/`Compare`/`Minify`/`CreateIntArray`/`CreateFloatArray`/`InitHooks`/`GetErrorPtr`/`Version` — dependentes de switch/jump-tables RVA, `.data` mutável ou SIMD `movd`/`cvtps2pd`) e os 5 exports de `tinyexpr.dll` mantêm esqueleto compilável + structs recuperadas.",
         "",
     ])
     md_out.write_text("\n".join(md_lines), encoding="utf-8")
