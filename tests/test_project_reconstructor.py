@@ -190,11 +190,19 @@ def test_real_cpp_rtti_and_cjson_memory_twin_reconstruction(tmp_path: Path):
     cjson_rep = reconstruct_project(cjson_dll, tmp_path / "cjson_twin")
     assert cjson_rep.status == "complete"
     assert cjson_rep.total_exports_reconstructed == 78
-    assert cjson_rep.fully_lifted_functions >= 19
-    assert cjson_rep.ctree_structured_functions >= 19
+    assert cjson_rep.fully_lifted_functions >= 31
+    assert cjson_rep.ctree_structured_functions >= 31
     assert cjson_rep.ghidra_enriched_functions == 78
     assert cjson_rep.overall_congruence_pct == 100.0
     assert cjson_rep.struct_layouts_count >= 5
+    lifted_map = {f["name"]: f for f in cjson_rep.functions}
+    assert lifted_map["cJSON_CreateArray"]["is_fully_lifted"] is True
+    assert lifted_map["cJSON_CreateArray"]["returns_double"] is False
+    assert lifted_map["cJSON_CreateNumber"]["is_fully_lifted"] is True
+    assert lifted_map["cJSON_CreateNumber"]["takes_double_arg0"] is True
+    assert lifted_map["cJSON_CreateTrue"]["is_fully_lifted"] is True
+    assert lifted_map["cJSON_malloc"]["is_fully_lifted"] is True
+    assert lifted_map["cJSON_free"]["is_fully_lifted"] is True
     structured_c = (tmp_path / "cjson_twin" / "src" / "reconstructed_structured.c").read_text(encoding="utf-8")
     assert "while (1)" in structured_c
 

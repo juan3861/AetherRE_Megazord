@@ -28,6 +28,7 @@ from __future__ import annotations
 import ctypes
 import hashlib
 import json
+import math
 import re
 import shutil
 import struct
@@ -68,6 +69,7 @@ class ReconstructedFunction:
     goto_elimination_rate_pct: Optional[float] = None
     natural_loops_structured: int = 0
     returns_double: bool = False
+    takes_double_arg0: bool = False
     ghidra_reference_c: Optional[str] = None
 
 
@@ -121,7 +123,8 @@ _ALL_CANON_REGS = (
     "rax", "rbx", "rcx", "rdx", "rsp", "rbp", "rsi", "rdi",
     "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15",
 )
-_XMM_REGS = ("xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "xmm6", "xmm7")
+_XMM_REGS = tuple(f"xmm{i}" for i in range(16))
+_XMM_HI_REGS = tuple(f"xmm{i}_hi" for i in range(16))
 _REG_MAP: Dict[str, str] = {k: v[0] for k, v in _REG_INFO.items()}
 _VALID_C_REGS = set(_REG_MAP.values())
 _SIZE_PREFIX_MAP = {"byte": 1, "word": 2, "dword": 4, "qword": 8, "xmmword": 8}
@@ -138,15 +141,44 @@ _RIP_REL_RE = re.compile(
 class _MemoryArena:
     """Bounded deterministic sandbox memory arena for behavioral congruence verification."""
 
-    def __init__(self, base: int = 0x10000, size: int = 0x10000) -> None:
+    def __init__(self, base: int = 0x10000, size: int = 0x10000, heap_ptr: int = 0x14000) -> None:
         self.base = base
         self.size = size
+        self.heap_ptr = heap_ptr
         self.buf = bytearray(size)
 
     def clone(self) -> "_MemoryArena":
-        cp = _MemoryArena(self.base, self.size)
+        cp = _MemoryArena(self.base, self.size, self.heap_ptr)
         cp.buf[:] = self.buf
         return cp
+
+    def alloc(self, size: int) -> int:
+        n = max(1, int(size))
+        aligned = (n + 15) & ~15
+        heap_limit = self.base + 0xC000
+        if self.heap_ptr + aligned > heap_limit:
+            return 0
+        ptr = self.heap_ptr
+        self.heap_ptr += aligned
+        off = ptr - self.base
+        self.buf[off : off + aligned] = b"\x00" * aligned
+        return ptr
+
+    def free(self, ptr: int) -> int:
+        return 0
+
+    def realloc(self, ptr: int, size: int) -> int:
+        new_ptr = self.alloc(size)
+        if not new_ptr:
+            return 0
+        heap_limit = self.base + 0xC000
+        if self.base <= ptr < heap_limit:
+            src_off = ptr - self.base
+            dst_off = new_ptr - self.base
+            copy_len = min(max(0, int(size)), heap_limit - ptr)
+            if copy_len > 0:
+                self.buf[dst_off : dst_off + copy_len] = self.buf[src_off : src_off + copy_len]
+        return new_ptr
 
     def read(self, addr: int, width: int) -> int:
         if addr < self.base or width not in (1, 2, 4, 8):
@@ -216,7 +248,161 @@ def _f64_comisd(a_bits: int, b_bits: int) -> int:
 
 
 def _f64_to_i32(bits: int) -> int:
-    return _u32(int(_bits_to_f64(bits)))
+    d = _bits_to_f64(bits)
+    if not math.isfinite(d) or d >= 2147483648.0 or d < -2147483648.0:
+        return 0x80000000
+    return _u32(int(d))
+
+
+def _uses_xmm_before_write(insns: List[Tuple[int, str, str]], target_xmm: str) -> bool:
+    """Returns True if target_xmm (e.g. xmm0/xmm1) is read before any instruction writes it (Win64 float arg ABI)."""
+    pure_write_mnems = ("movsd", "movaps", "movapd", "movups", "xorps", "xorpd", "cvtsi2sd")
+    for _, mnem, op_str in insns:
+        parts = [p.strip().lower() for p in op_str.split(",")] if op_str else []
+        if not parts:
+            continue
+        if mnem in ("comisd", "ucomisd"):
+            if any(p == target_xmm for p in parts):
+                return True
+        elif mnem in ("addsd", "subsd", "mulsd", "divsd"):
+            if any(p == target_xmm for p in parts):
+                return True
+        elif mnem == "cvttsd2si" and len(parts) == 2 and parts[1] == target_xmm:
+            return True
+        elif mnem in ("movsd", "movaps", "movapd", "movups") and len(parts) == 2:
+            if parts[1] == target_xmm:
+                return True
+            if parts[0] == target_xmm:
+                return False
+        elif mnem in pure_write_mnems and len(parts) >= 1 and parts[0] == target_xmm:
+            return False
+    return False
+
+
+def _discover_crt_allocator_map(
+    pe: Any,
+    pe_data: bytes,
+    exec_ranges: List[Tuple[int, int]],
+) -> Dict[int, str]:
+    """Maps IAT slots, MSVC CRT wrappers, multi-hop jmp thunks, and .data hooks to 'malloc'/'free'/'realloc'."""
+    alloc_map: Dict[int, str] = {}
+    if pe is None or not pe_data:
+        return alloc_map
+
+    image_base = pe.OPTIONAL_HEADER.ImageBase
+    heap_iat_kind: Dict[int, str] = {}
+    direct_names = {"malloc": "malloc", "free": "free", "realloc": "realloc"}
+    heap_names = {"HeapAlloc": "malloc", "HeapFree": "free", "HeapReAlloc": "realloc"}
+
+    for imp in getattr(pe, "DIRECTORY_ENTRY_IMPORT", []):
+        for entry in getattr(imp, "imports", []):
+            if not getattr(entry, "name", None):
+                continue
+            sym = entry.name.decode("utf-8", errors="ignore")
+            slot_rva = int(entry.address) - image_base
+            if sym in direct_names:
+                alloc_map[slot_rva] = direct_names[sym]
+            elif sym in heap_names:
+                heap_iat_kind[slot_rva] = heap_names[sym]
+
+    if heap_iat_kind:
+        md = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_64)
+        text_crt_map: Dict[int, str] = {}
+        for sec in pe.sections:
+            if not (sec.Characteristics & 0x20000000):
+                continue
+            sec_rva = sec.VirtualAddress
+            sec_raw = sec.PointerToRawData
+            sec_size = min(sec.Misc_VirtualSize, len(pe_data) - sec_raw)
+            if sec_size <= 0:
+                continue
+            sec_bytes = pe_data[sec_raw : sec_raw + sec_size]
+            pos = 0
+            while pos < len(sec_bytes):
+                chunk_insns = list(md.disasm(sec_bytes[pos:], sec_rva + pos))
+                if not chunk_insns:
+                    pos += 1
+                    continue
+                for ins in chunk_insns:
+                    m_rip = _RIP_REL_RE.search(ins.op_str)
+                    if not m_rip:
+                        continue
+                    sign, disp_raw = m_rip.group(2), m_rip.group(3)
+                    disp = int(disp_raw, 16) if disp_raw.lower().startswith("0x") else int(disp_raw, 10)
+                    if sign == "-":
+                        disp = -disp
+                    target_rva = ins.address + ins.size + disp
+                    if target_rva not in heap_iat_kind:
+                        continue
+                    kind = heap_iat_kind[target_rva]
+                    # Locate containing function entry on 16-byte boundary before call site
+                    call_off = ins.address - sec_rva
+                    best_entry: Optional[int] = None
+                    min_scan = max(0, (call_off - 0x100) & ~0xF)
+                    for cand_off in range(min_scan, call_off + 1, 16):
+                        if cand_off > 0 and sec_bytes[cand_off - 1] not in (0xCC, 0xC3, 0x90):
+                            continue
+                        cand_rva = sec_rva + cand_off
+                        body = list(md.disasm(sec_bytes[cand_off : call_off + ins.size], cand_rva))
+                        if not body or body[-1].address != ins.address:
+                            continue
+                        if any(bi.mnemonic.lower() == "int3" for bi in body):
+                            continue
+                        # Distinguish MSVC _malloc_base (xor edx, edx) vs _calloc_base (mov edx, 8)
+                        if kind == "malloc" and any(
+                            bi.mnemonic.lower() == "mov" and bi.op_str.lower() in ("edx, 8", "edx, 0x8")
+                            for bi in body
+                        ):
+                            best_entry = None
+                            break
+                        best_entry = cand_rva
+                    if best_entry is not None:
+                        text_crt_map[best_entry] = kind
+                pos = (chunk_insns[-1].address - sec_rva) + chunk_insns[-1].size
+
+        # Propagate across up to 3 hops of direct unconditional jmp thunks in executable sections
+        for _ in range(3):
+            added = 0
+            for sec in pe.sections:
+                if not (sec.Characteristics & 0x20000000):
+                    continue
+                sec_rva = sec.VirtualAddress
+                sec_raw = sec.PointerToRawData
+                sec_size = min(sec.Misc_VirtualSize, len(pe_data) - sec_raw)
+                if sec_size <= 0:
+                    continue
+                sec_bytes = pe_data[sec_raw : sec_raw + sec_size]
+                for cand_off in range(0, max(0, sec_size - 5), 16):
+                    if sec_bytes[cand_off] not in (0xE9, 0xEB):
+                        continue
+                    stub = list(md.disasm(sec_bytes[cand_off : cand_off + 8], sec_rva + cand_off))
+                    if not stub or stub[0].mnemonic.lower() != "jmp":
+                        continue
+                    tgt = _parse_int_literal(stub[0].op_str)
+                    if tgt is not None and tgt in text_crt_map and stub[0].address not in text_crt_map:
+                        text_crt_map[stub[0].address] = text_crt_map[tgt]
+                        added += 1
+            if added == 0:
+                break
+
+        alloc_map.update(text_crt_map)
+
+        # Scan writable sections (.data) for initialized pointer slots targeting resolved CRT allocators
+        for sec in pe.sections:
+            if not (sec.Characteristics & 0x80000000) or (sec.Characteristics & 0x20000000):
+                continue
+            sec_rva = sec.VirtualAddress
+            sec_raw = sec.PointerToRawData
+            sec_size = min(sec.SizeOfRawData, len(pe_data) - sec_raw)
+            if sec_size < 8:
+                continue
+            for rel_off in range(0, sec_size - 7, 8):
+                va = struct.unpack_from("<Q", pe_data, sec_raw + rel_off)[0]
+                tgt_rva = va - image_base
+                if tgt_rva in text_crt_map:
+                    alloc_map[sec_rva + rel_off] = text_crt_map[tgt_rva]
+
+    return alloc_map
 
 
 def _i32_to_f64(i_val: int) -> int:
@@ -376,8 +562,10 @@ def _lift_x64_function_full(
     ro_ranges: Optional[List[Tuple[int, int]]] = None,
     exec_ranges: Optional[List[Tuple[int, int]]] = None,
     rva_to_symbol: Optional[Dict[int, str]] = None,
+    crt_alloc_map: Optional[Dict[int, str]] = None,
+    meta_out: Optional[Dict[str, Any]] = None,
 ) -> Tuple[str, List[Tuple[int, str, str]], bool, bool, Dict[int, int], bool, List[int]]:
-    """Lifts an x86_64 function byte slice into compilable C code, IR, ro-constants, and discovered internal callees."""
+    """Lifts an x86_64 function byte slice into compilable C code, IR, ro-constants, CRT calls, and internal callees."""
     c_ident = _sanitize_c_ident(fn_name, f"sub_{base_rva:x}")
     md = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_64)
     insns: List[Tuple[int, str, str]] = []
@@ -387,6 +575,7 @@ def _lift_x64_function_full(
     has_calls_or_memory = False
     ro_rip_values: Dict[int, int] = {}
     discovered_internal_rvas: List[int] = []
+    crt_call_sites: Dict[int, str] = {}
 
     for insn in md.disasm(code_bytes, base_rva):
         mnem = insn.mnemonic.lower()
@@ -408,12 +597,25 @@ def _lift_x64_function_full(
         if mnem in ("ret", "jmp") and insn.address >= max_branch_target:
             break
 
-    # Detect whether this function returns a double in XMM0 (Win64 ABI)
+    # Detect Win64 XMM ABI (return double in XMM0, double param0 in XMM0, double param1 in XMM1)
+    takes_double_arg0 = _uses_xmm_before_write(insns, "xmm0")
+    takes_double_arg1 = _uses_xmm_before_write(insns, "xmm1")
+    xmm0_used_for_zero_fill = any(
+        mn_i in ("movups", "movaps", "movapd")
+        and len(op_i.split(",")) == 2
+        and op_i.split(",")[1].strip().lower() == "xmm0"
+        and "[" in op_i.split(",")[0]
+        for _, mn_i, op_i in insns
+    )
     last_xmm0_idx = -1
     last_rax_idx = -1
     for idx_i, (_, mn_i, op_i) in enumerate(insns):
         first_op = op_i.split(",")[0].strip().lower() if op_i else ""
-        if first_op == "xmm0" and mn_i in ("movsd", "movaps", "movapd", "xorps", "xorpd", "addsd", "subsd", "mulsd", "divsd", "cvtsi2sd"):
+        if mn_i == "call":
+            last_rax_idx = idx_i
+        elif first_op == "xmm0" and mn_i in ("movsd", "movaps", "movapd", "addsd", "subsd", "mulsd", "divsd", "cvtsi2sd"):
+            last_xmm0_idx = idx_i
+        elif first_op == "xmm0" and mn_i in ("xorps", "xorpd") and not xmm0_used_for_zero_fill and last_rax_idx == -1:
             last_xmm0_idx = idx_i
         elif first_op in ("rax", "eax", "ax", "al") and mn_i not in ("cmp", "test"):
             last_rax_idx = idx_i
@@ -421,15 +623,15 @@ def _lift_x64_function_full(
             last_rax_idx = idx_i
     returns_double = last_xmm0_idx > last_rax_idx
 
-    uses_xmm = any("xmm" in op_i.lower() for _, _, op_i in insns)
-    sig_line = (
-        f"double {c_ident}(int64_t rcx, double xmm1_arg, int64_t r8, int64_t r9) {{"
-        if returns_double
-        else f"int64_t {c_ident}(int64_t rcx, int64_t rdx, int64_t r8, int64_t r9) {{"
-    )
+    uses_xmm = any("xmm" in op_i.lower() for _, _, op_i in insns) or takes_double_arg0 or takes_double_arg1
+    ret_type_c = "double" if returns_double else "int64_t"
+    p0_c = "double xmm0_arg" if takes_double_arg0 else "int64_t rcx"
+    p1_c = "double xmm1_arg" if takes_double_arg1 else "int64_t rdx"
+    sig_line = f"{ret_type_c} {c_ident}({p0_c}, {p1_c}, int64_t r8, int64_t r9) {{"
     c_lines = [
         sig_line,
-        "    int64_t rdx = 0;" if returns_double else "",
+        "    int64_t rcx = 0;" if takes_double_arg0 else "",
+        "    int64_t rdx = 0;" if takes_double_arg1 else "",
         "    int64_t rax = 0, rbx = 0, rbp = 0, rsi = 0, rdi = 0;",
         "    int64_t r10 = 0, r11 = 0, r12 = 0, r13 = 0, r14 = 0, r15 = 0;",
         "    int64_t rsp = aether_stack_base();",
@@ -437,8 +639,10 @@ def _lift_x64_function_full(
     ]
     c_lines = [ln for ln in c_lines if ln]
     if uses_xmm or returns_double:
-        c_lines.append("    int64_t xmm0 = 0, xmm1 = 0, xmm2 = 0, xmm3 = 0, xmm4 = 0, xmm5 = 0, xmm6 = 0, xmm7 = 0;")
-        if returns_double:
+        c_lines.append("    int64_t " + ", ".join(f"{xr} = 0, {xr}_hi = 0" for xr in _XMM_REGS) + ";")
+        if takes_double_arg0:
+            c_lines.append("    xmm0 = aether_f64_to_bits(xmm0_arg);")
+        if takes_double_arg1:
             c_lines.append("    xmm1 = aether_f64_to_bits(xmm1_arg);")
 
     ret_stmt = "    return aether_bits_to_f64(xmm0);" if returns_double else "    return rax;"
@@ -484,6 +688,23 @@ def _lift_x64_function_full(
             return f"((int64_t)0x{ro_val:x}ULL)", ro_w
         return _resolve_read_expr(op_raw, default_mem_width=default_w)
 
+    def _resolve_rip_target_rva(op_raw: str, addr_i: int) -> Optional[int]:
+        m_rip = _RIP_REL_RE.match(op_raw.strip())
+        if not m_rip:
+            return None
+        sign, disp_raw = m_rip.group(2), m_rip.group(3)
+        disp = int(disp_raw, 16) if disp_raw.lower().startswith("0x") else int(disp_raw, 10)
+        if sign == "-":
+            disp = -disp
+        return addr_i + insn_sizes.get(addr_i, 0) + disp
+
+    def _emit_crt_call_stmt(kind: str) -> str:
+        if kind == "malloc":
+            return "    rax = aether_malloc(rcx);"
+        if kind == "free":
+            return "    rax = aether_free(rcx);"
+        return "    rax = aether_realloc(rcx, rdx);"
+
     for addr, mnem, op_str in insns:
         c_lines.append(f"L_{addr:x}: ; /* {mnem} {op_str} */")
         parts = [p.strip() for p in op_str.split(",")] if op_str else []
@@ -497,25 +718,46 @@ def _lift_x64_function_full(
             c_lines.append("    rax = aether_i32(rax);")
             continue
 
-        # XMM scalar floating-point instructions
-        if mnem in ("movsd", "movaps", "movapd") and len(parts) == 2:
+        # XMM scalar & 128-bit floating-point instructions (xmm0..xmm15 + upper 64-bit halves)
+        if mnem in ("movsd", "movaps", "movapd", "movups") and len(parts) == 2:
             dst_low = parts[0].lower()
             src_low = parts[1].lower()
+            is_128 = mnem in ("movups", "movaps", "movapd")
             if dst_low in _XMM_REGS:
+                if src_low in _XMM_REGS:
+                    if is_128:
+                        c_lines.append(f"    {dst_low} = {src_low}; {dst_low}_hi = {src_low}_hi;")
+                    else:
+                        c_lines.append(f"    {dst_low} = {src_low};")
+                    continue
+                if is_128:
+                    mem_src = _parse_mem_operand(parts[1], default_width=8)
+                    if mem_src is not None:
+                        c_lines.append(
+                            f"    {dst_low} = (int64_t)aether_mem_read({mem_src[0]}, 8); "
+                            f"{dst_low}_hi = (int64_t)aether_mem_read(({mem_src[0]}) + 8, 8);"
+                        )
+                        continue
                 src_res = _resolve_read_with_rip(parts[1], addr, default_w=8)
                 if src_res is not None:
-                    c_lines.append(f"    {dst_low} = (int64_t)({src_res[0]});")
+                    c_lines.append(f"    {dst_low} = (int64_t)({src_res[0]}); {dst_low}_hi = 0;")
                     continue
             elif src_low in _XMM_REGS:
                 mem_dst = _parse_mem_operand(parts[0], default_width=8)
                 if mem_dst is not None:
-                    c_lines.append(f"    aether_mem_write({mem_dst[0]}, {mem_dst[1]}, {src_low});")
+                    if is_128:
+                        c_lines.append(
+                            f"    aether_mem_write({mem_dst[0]}, 8, {src_low}); "
+                            f"aether_mem_write(({mem_dst[0]}) + 8, 8, {src_low}_hi);"
+                        )
+                    else:
+                        c_lines.append(f"    aether_mem_write({mem_dst[0]}, 8, {src_low});")
                     continue
 
         if mnem in ("xorps", "xorpd") and len(parts) == 2:
             d_low, s_low = parts[0].lower(), parts[1].lower()
             if d_low in _XMM_REGS and d_low == s_low:
-                c_lines.append(f"    {d_low} = 0;")
+                c_lines.append(f"    {d_low} = 0; {d_low}_hi = 0;")
                 continue
 
         if mnem in ("comisd", "ucomisd") and len(parts) == 2:
@@ -699,24 +941,37 @@ def _lift_x64_function_full(
             if target_addr is not None and target_addr in addrs:
                 c_lines.append(f"    if ({_cond_expr(mnem, last_cmp_width)}) goto L_{target_addr:x};")
                 continue
-            if (
-                mnem == "jmp"
-                and target_addr is not None
-                and exec_ranges
-                and any(lo <= target_addr < hi for lo, hi in exec_ranges)
-            ):
-                callee_sym = (rva_to_symbol or {}).get(target_addr, f"sub_{target_addr:x}")
-                discovered_internal_rvas.append(target_addr)
-                if returns_double:
-                    c_lines.append(f"    xmm0 = aether_f64_to_bits((double){callee_sym}(rcx, rdx, r8, r9));")
-                    c_lines.append("    return aether_bits_to_f64(xmm0);")
-                else:
-                    c_lines.append(f"    return {callee_sym}(rcx, rdx, r8, r9);")
-                fully_lifted = False
-                continue
+            if mnem == "jmp":
+                crt_tgt = target_addr if target_addr is not None else _resolve_rip_target_rva(parts[0], addr)
+                if crt_alloc_map and crt_tgt is not None and crt_tgt in crt_alloc_map:
+                    crt_kind = crt_alloc_map[crt_tgt]
+                    crt_call_sites[addr] = crt_kind
+                    c_lines.append(_emit_crt_call_stmt(crt_kind))
+                    c_lines.append(ret_stmt)
+                    continue
+                if (
+                    target_addr is not None
+                    and exec_ranges
+                    and any(lo <= target_addr < hi for lo, hi in exec_ranges)
+                ):
+                    callee_sym = (rva_to_symbol or {}).get(target_addr, f"sub_{target_addr:x}")
+                    discovered_internal_rvas.append(target_addr)
+                    if returns_double:
+                        c_lines.append(f"    xmm0 = aether_f64_to_bits((double){callee_sym}(rcx, rdx, r8, r9));")
+                        c_lines.append("    return aether_bits_to_f64(xmm0);")
+                    else:
+                        c_lines.append(f"    return {callee_sym}(rcx, rdx, r8, r9);")
+                    fully_lifted = False
+                    continue
 
         if mnem == "call" and len(parts) == 1:
             target_addr = _parse_int_literal(parts[0])
+            crt_tgt = target_addr if target_addr is not None else _resolve_rip_target_rva(parts[0], addr)
+            if crt_alloc_map and crt_tgt is not None and crt_tgt in crt_alloc_map:
+                crt_kind = crt_alloc_map[crt_tgt]
+                crt_call_sites[addr] = crt_kind
+                c_lines.append(_emit_crt_call_stmt(crt_kind))
+                continue
             if (
                 target_addr is not None
                 and exec_ranges
@@ -733,6 +988,10 @@ def _lift_x64_function_full(
 
     c_lines.append(ret_stmt)
     c_lines.append("}")
+    if meta_out is not None:
+        meta_out["takes_double_arg0"] = takes_double_arg0
+        meta_out["takes_double_arg1"] = takes_double_arg1
+        meta_out["crt_call_sites"] = crt_call_sites
     return "\n".join(c_lines), insns, fully_lifted, has_calls_or_memory, ro_rip_values, returns_double, discovered_internal_rvas
 
 
@@ -758,7 +1017,9 @@ def _simulate_x64_insns(
     *,
     ro_rip_values: Optional[Dict[int, int]] = None,
     returns_double: bool = False,
+    xmm0_bits: int = 0,
     xmm1_bits: int = 0,
+    crt_call_sites: Optional[Dict[int, str]] = None,
 ) -> int:
     """Reference x86_64 instruction-level emulator for differential verification."""
     arena = mem_arena if mem_arena is not None else _MemoryArena()
@@ -769,8 +1030,11 @@ def _simulate_x64_insns(
     regs["r9"] = _to_int64(r9)
     regs["rsp"] = 0x1F800
     xmms: Dict[str, int] = {x: 0 for x in _XMM_REGS}
+    xmms_hi: Dict[str, int] = {x: 0 for x in _XMM_REGS}
+    xmms["xmm0"] = _to_int64(xmm0_bits)
     xmms["xmm1"] = _to_int64(xmm1_bits)
     ro_map = ro_rip_values or {}
+    crt_map = crt_call_sites or {}
 
     addr_to_idx = {addr: i for i, (addr, _, _) in enumerate(insns)}
     cmp_lhs, cmp_rhs, cmp_width = 0, 0, 8
@@ -862,21 +1126,37 @@ def _simulate_x64_insns(
             regs["rax"] = _to_int64(_i32(regs["rax"]))
             pc += 1
             continue
-        if mnem in ("movsd", "movaps", "movapd") and len(parts) == 2:
+        if mnem in ("movsd", "movaps", "movapd", "movups") and len(parts) == 2:
             dl, sl = parts[0].lower(), parts[1].lower()
+            is_128 = mnem in ("movups", "movaps", "movapd")
             if dl in _XMM_REGS:
-                val = _eval_op(parts[1], 8, addr_cur)
-                if val is not None:
-                    xmms[dl] = _to_int64(val)
+                if sl in _XMM_REGS:
+                    xmms[dl] = xmms[sl]
+                    if is_128:
+                        xmms_hi[dl] = xmms_hi[sl]
+                else:
+                    mem_src = _parse_mem_operand(parts[1], default_width=8) if is_128 else None
+                    if mem_src is not None:
+                        m_addr = int(eval(mem_src[0], {"__builtins__": {}}, regs))
+                        xmms[dl] = _to_int64(arena.read(m_addr, 8))
+                        xmms_hi[dl] = _to_int64(arena.read(m_addr + 8, 8))
+                    else:
+                        val = _eval_op(parts[1], 8, addr_cur)
+                        if val is not None:
+                            xmms[dl] = _to_int64(val)
+                            xmms_hi[dl] = 0
             elif sl in _XMM_REGS:
                 mem_dst = _parse_mem_operand(parts[0], default_width=8)
                 if mem_dst is not None:
                     m_addr = int(eval(mem_dst[0], {"__builtins__": {}}, regs))
-                    arena.write(m_addr, mem_dst[1], xmms[sl])
+                    arena.write(m_addr, 8, xmms[sl])
+                    if is_128:
+                        arena.write(m_addr + 8, 8, xmms_hi[sl])
         elif mnem in ("xorps", "xorpd") and len(parts) == 2:
             dl, sl = parts[0].lower(), parts[1].lower()
             if dl in _XMM_REGS and dl == sl:
                 xmms[dl] = 0
+                xmms_hi[dl] = 0
         elif mnem in ("comisd", "ucomisd") and len(parts) == 2:
             lv = _eval_op(parts[0], 8, addr_cur)
             rv = _eval_op(parts[1], 8, addr_cur)
@@ -996,6 +1276,16 @@ def _simulate_x64_insns(
             dst_info = _REG_INFO.get(parts[0].lower())
             if dst_info and dst_info[1] == 1:
                 _write_reg(parts[0], 1 if _eval_cond(j_equiv) else 0)
+        elif mnem in ("call", "jmp") and addr_cur in crt_map:
+            crt_kind = crt_map[addr_cur]
+            if crt_kind == "malloc":
+                regs["rax"] = _to_int64(arena.alloc(regs["rcx"]))
+            elif crt_kind == "free":
+                regs["rax"] = _to_int64(arena.free(regs["rcx"]))
+            elif crt_kind == "realloc":
+                regs["rax"] = _to_int64(arena.realloc(regs["rcx"], regs["rdx"]))
+            if mnem == "jmp":
+                return _to_int64(xmms["xmm0"] if returns_double else regs["rax"])
         elif mnem in (
             "jmp", "je", "jz", "jne", "jnz", "jg", "jge", "jl", "jle",
             "ja", "jae", "jb", "jbe", "js", "jns",
@@ -1017,6 +1307,7 @@ def _execute_lifted_c_ast(
     r9: int,
     mem_arena: Optional[_MemoryArena] = None,
     *,
+    xmm0_bits: int = 0,
     xmm1_bits: int = 0,
 ) -> int:
     """Executes the generated C statements directly in a deterministic state machine to verify C-to-ASM congruence."""
@@ -1029,11 +1320,18 @@ def _execute_lifted_c_ast(
             label_to_idx[lbl] = idx
 
     returns_double = any(ln.startswith("double ") for ln in lines[:4])
+    sig_line = lines[0] if lines else ""
+    takes_double_arg0 = "double xmm0_arg" in sig_line
     env: Dict[str, Any] = {r: 0 for r in _ALL_CANON_REGS}
     for xr in _XMM_REGS:
         env[xr] = 0
+    for xh in _XMM_HI_REGS:
+        env[xh] = 0
     env.update({
-        "rcx": _to_int64(rcx), "rdx": _to_int64(rdx), "r8": _to_int64(r8), "r9": _to_int64(r9),
+        "rcx": 0 if takes_double_arg0 else _to_int64(rcx),
+        "rdx": _to_int64(rdx), "r8": _to_int64(r8), "r9": _to_int64(r9),
+        "xmm0_arg": _bits_to_f64(xmm0_bits),
+        "xmm0": _to_int64(xmm0_bits),
         "xmm1_arg": _bits_to_f64(xmm1_bits),
         "xmm1": _to_int64(xmm1_bits),
         "rsp": 0x1F800,
@@ -1044,6 +1342,9 @@ def _execute_lifted_c_ast(
         "aether_set_byte": lambda reg, cond: _to_int64((int(reg) & ~0xFF) | (1 if cond else 0)),
         "aether_mem_read": lambda addr, width: arena.read(int(addr), int(width)),
         "aether_mem_write": lambda addr, width, val: arena.write(int(addr), int(width), int(val)),
+        "aether_malloc": lambda sz: _to_int64(arena.alloc(int(sz))),
+        "aether_free": lambda ptr: _to_int64(arena.free(int(ptr))),
+        "aether_realloc": lambda ptr, sz: _to_int64(arena.realloc(int(ptr), int(sz))),
         "aether_f64_to_bits": _f64_to_bits,
         "aether_bits_to_f64": _bits_to_f64,
         "aether_f64_comisd": _f64_comisd,
@@ -1093,6 +1394,8 @@ def _execute_lifted_c_ast(
                 env[reg] = _to_int64(int(env[reg]))
             for xr in _XMM_REGS:
                 env[xr] = _to_int64(int(env[xr]))
+            for xh in _XMM_HI_REGS:
+                env[xh] = _to_int64(int(env[xh]))
         pc += 1
     return _to_int64(int(env["xmm0"] if returns_double else env["rax"]))
 
@@ -1100,8 +1403,11 @@ def _execute_lifted_c_ast(
 def _structure_lifted_c_to_ctree(c_ident: str, c_code: str) -> Dict[str, Any]:
     """Converts flat labeled C output into structured C-Tree (if/else/while) via ctree_structuring."""
     raw_lines = [ln.strip() for ln in c_code.splitlines()]
+    sig_line = raw_lines[0] if raw_lines else ""
     returns_double = any(ln.startswith("double ") for ln in raw_lines[:4])
-    uses_xmm = any("xmm0" in ln for ln in raw_lines[:10])
+    takes_double_arg0 = "double xmm0_arg" in sig_line
+    takes_double_arg1 = "double xmm1_arg" in sig_line
+    uses_xmm = any("xmm0" in ln for ln in raw_lines[:10]) or takes_double_arg0 or takes_double_arg1
     # Collect branch targets so we split basic blocks at jump destinations
     branch_targets: set[str] = set()
     for ln in raw_lines:
@@ -1213,20 +1519,24 @@ def _structure_lifted_c_to_ctree(c_ident: str, c_code: str) -> Dict[str, Any]:
         "long long rsp = aether_stack_base();",
         "long long cmp_lhs = 0;", "long long cmp_rhs = 0;",
     ]
-    if returns_double:
+    if takes_double_arg0:
+        declarations.append("long long rcx = 0;")
+    if takes_double_arg1:
         declarations.append("long long rdx = 0;")
     if uses_xmm or returns_double:
         for xr in _XMM_REGS:
-            if xr == "xmm1" and returns_double:
+            if xr == "xmm0" and takes_double_arg0:
+                declarations.append("long long xmm0 = aether_f64_to_bits(xmm0_arg);")
+            elif xr == "xmm1" and takes_double_arg1:
                 declarations.append("long long xmm1 = aether_f64_to_bits(xmm1_arg);")
             else:
                 declarations.append(f"long long {xr} = 0;")
+            declarations.append(f"long long {xr}_hi = 0;")
 
-    sig = (
-        f"double {c_ident}(long long rcx, double xmm1_arg, long long r8, long long r9)"
-        if returns_double
-        else f"long long {c_ident}(long long rcx, long long rdx, long long r8, long long r9)"
-    )
+    ret_t_s = "double" if returns_double else "long long"
+    p0_s = "double xmm0_arg" if takes_double_arg0 else "long long rcx"
+    p1_s = "double xmm1_arg" if takes_double_arg1 else "long long rdx"
+    sig = f"{ret_t_s} {c_ident}({p0_s}, {p1_s}, long long r8, long long r9)"
     return structure_control_flow(
         nodes,
         edges,
@@ -1291,7 +1601,7 @@ def compile_reconstructed_project(
                 text=True,
                 encoding="utf-8",
                 errors="replace",
-                timeout=60,
+                timeout=120,
             )
         finally:
             bat_path.unlink(missing_ok=True)
@@ -1428,12 +1738,23 @@ def reconstruct_project(
             "#pragma once",
             "#include <stdint.h>",
             "#include <stddef.h>",
+            "#include <stdlib.h>",
             "#include <string.h>",
             "",
             "#ifdef __cplusplus",
             'extern "C" {',
             "#endif",
             "",
+            "static inline int64_t aether_malloc(int64_t size) {",
+            "    return (int64_t)(uintptr_t)malloc((size_t)(size > 0 ? size : 1));",
+            "}",
+            "static inline int64_t aether_free(int64_t ptr) {",
+            "    free((void*)(uintptr_t)ptr);",
+            "    return 0LL;",
+            "}",
+            "static inline int64_t aether_realloc(int64_t ptr, int64_t size) {",
+            "    return (int64_t)(uintptr_t)realloc((void*)(uintptr_t)ptr, (size_t)(size > 0 ? size : 1));",
+            "}",
             "static inline int64_t aether_u32(uint64_t v) {",
             "    return (int64_t)(uint32_t)v;",
             "}",
@@ -1515,6 +1836,7 @@ def reconstruct_project(
             for sec in pe.sections
             if sec.Characteristics & 0x20000000  # IMAGE_SCN_MEM_EXECUTE
         ]
+        crt_alloc_map = _discover_crt_allocator_map(pe, data, exec_ranges)
         ro_ranges = [
             (
                 sec.VirtualAddress,
@@ -1600,8 +1922,8 @@ def reconstruct_project(
             (7, 7, 7, 7),
         ]
 
-        def _make_structured_scenarios() -> List[Tuple[int, int, int, int, int, _MemoryArena]]:
-            scenarios: List[Tuple[int, int, int, int, int, _MemoryArena]] = []
+        def _make_structured_scenarios() -> List[Tuple[int, int, int, int, int, int, _MemoryArena]]:
+            scenarios: List[Tuple[int, int, int, int, int, int, _MemoryArena]] = []
             # Arena 1: cJSON Array + 3-node child linked list + FastProcessor fields
             a1 = _MemoryArena()
             a1.write(0x10000 + 0x08, 4, 0)         # FastProcessor::counter = 0
@@ -1612,7 +1934,7 @@ def reconstruct_project(
             a1.write(0x10100, 8, 0x10200)          # node1.next -> node2
             a1.write(0x10200, 8, 0x10300)          # node2.next -> node3
             a1.write(0x10300, 8, 0)                # node3.next -> NULL
-            scenarios.append((0x10000, 10, 1, 0, _f64_to_bits(42.5), a1))
+            scenarios.append((0x10000, 10, 1, 0, _f64_to_bits(42.5), _f64_to_bits(42.5), a1))
 
             # Arena 2: cJSON Number (0x08) & String (0x10) + CryptoProcessor state/mask
             a2 = _MemoryArena()
@@ -1621,16 +1943,16 @@ def reconstruct_project(
             a2.write(0x10000 + 0x18, 1, 0x08)      # cJSON_Number (0x08)
             a2.write(0x10000 + 0x20, 8, 0x10500)
             a2.write(0x10000 + 0x30, 8, _f64_to_bits(3.14159))
-            scenarios.append((0x10000, 10, 2, 0, _f64_to_bits(-123.75), a2))
+            scenarios.append((0x10000, 10, 2, 0, _f64_to_bits(-123.75), _f64_to_bits(-123.75), a2))
 
             # Arena 3: cJSON Object (0x40) / DualDevice + large positive double (> INT_MAX)
             a3 = _MemoryArena()
             a3.write(0x10000 + 0x10, 4, 99)
             a3.write(0x10000 + 0x18, 1, 0x40)
-            scenarios.append((0x10000, 77, 0, 0, _f64_to_bits(1e12), a3))
+            scenarios.append((0x10000, 77, 0, 0, _f64_to_bits(1e12), _f64_to_bits(1e12), a3))
 
             # Arena 4: Null pointer guard case + large negative double (< INT_MIN)
-            scenarios.append((0, 10, 0, 0, _f64_to_bits(-1e12), _MemoryArena()))
+            scenarios.append((0, 10, 0, 0, _f64_to_bits(-1e12), _f64_to_bits(-1e12), _MemoryArena()))
             return scenarios
 
         total_congruence_passed = 0
@@ -1670,6 +1992,7 @@ def reconstruct_project(
 
             defined_rvas.add(rva)
             code_slice = data[file_off : file_off + 512]
+            lift_meta: Dict[str, Any] = {}
             (
                 c_code,
                 insns,
@@ -1687,7 +2010,12 @@ def reconstruct_project(
                 ro_ranges=ro_ranges,
                 exec_ranges=exec_ranges,
                 rva_to_symbol=rva_to_symbol,
+                crt_alloc_map=crt_alloc_map,
+                meta_out=lift_meta,
             )
+            takes_double_arg0 = bool(lift_meta.get("takes_double_arg0", False))
+            takes_double_arg1 = bool(lift_meta.get("takes_double_arg1", False))
+            crt_call_sites: Dict[int, str] = lift_meta.get("crt_call_sites", {})
             c_ident = _sanitize_c_ident(fn_name, f"sub_{rva:x}")
 
             for irva in discovered_internal_rvas:
@@ -1706,14 +2034,10 @@ def reconstruct_project(
                     "op_str": op_str,
                 })
 
-            if returns_double:
-                fn_decls.append(
-                    f"double {c_ident}(int64_t rcx, double xmm1_arg, int64_t r8, int64_t r9);"
-                )
-            else:
-                fn_decls.append(
-                    f"int64_t {c_ident}(int64_t rcx, int64_t rdx, int64_t r8, int64_t r9);"
-                )
+            ret_decl = "double" if returns_double else "int64_t"
+            p0_decl = "double xmm0_arg" if takes_double_arg0 else "int64_t rcx"
+            p1_decl = "double xmm1_arg" if takes_double_arg1 else "int64_t rdx"
+            fn_decls.append(f"{ret_decl} {c_ident}({p0_decl}, {p1_decl}, int64_t r8, int64_t r9);")
             c_source_lines.append(c_code)
             c_source_lines.append("")
             if is_exported:
@@ -1738,14 +2062,14 @@ def reconstruct_project(
                 continue
 
             if is_lifted and insns:
-                cases: List[Tuple[int, int, int, int, int, _MemoryArena]] = [
-                    (vx, vy, vz, vw, _f64_to_bits(float(vy)), _MemoryArena())
+                cases: List[Tuple[int, int, int, int, int, int, _MemoryArena]] = [
+                    (vx, vy, vz, vw, _f64_to_bits(float(vx)), _f64_to_bits(float(vy)), _MemoryArena())
                     for (vx, vy, vz, vw) in scalar_vectors
                 ]
-                if has_mem_or_calls or returns_double:
+                if has_mem_or_calls or returns_double or takes_double_arg0 or takes_double_arg1:
                     cases.extend(_make_structured_scenarios())
                 total_vecs = len(cases)
-                for v_rcx, v_rdx, v_r8, v_r9, v_xmm1, base_arena in cases:
+                for v_rcx, v_rdx, v_r8, v_r9, v_xmm0, v_xmm1, base_arena in cases:
                     a_asm = base_arena.clone()
                     a_c = base_arena.clone()
                     asm_out = _simulate_x64_insns(
@@ -1757,7 +2081,9 @@ def reconstruct_project(
                         mem_arena=a_asm,
                         ro_rip_values=ro_rip_values,
                         returns_double=returns_double,
+                        xmm0_bits=v_xmm0,
                         xmm1_bits=v_xmm1,
+                        crt_call_sites=crt_call_sites,
                     )
                     c_out = _execute_lifted_c_ast(
                         c_code,
@@ -1766,6 +2092,7 @@ def reconstruct_project(
                         v_r8,
                         v_r9,
                         mem_arena=a_c,
+                        xmm0_bits=v_xmm0,
                         xmm1_bits=v_xmm1,
                     )
                     if asm_out == c_out and a_asm.digest() == a_c.digest():
@@ -1821,6 +2148,7 @@ def reconstruct_project(
                 goto_elimination_rate_pct=goto_elim_pct,
                 natural_loops_structured=loops_structured,
                 returns_double=returns_double,
+                takes_double_arg0=takes_double_arg0,
                 ghidra_reference_c=ghidra_ref_c,
             )
             report.functions.append(asdict(rec_fn))
