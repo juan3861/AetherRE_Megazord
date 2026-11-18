@@ -19,6 +19,7 @@ from __future__ import annotations
 import ctypes
 import hashlib
 import json
+import math
 import shutil
 import struct
 import sys
@@ -172,11 +173,18 @@ def _run_compiled_twin_interop_checks(reconstructed_dir: Path) -> List[Dict[str,
     for fn in ("cJSON_GetArraySize", "cJSON_GetArrayItem", "cJSON_IsArray", "cJSON_IsTrue", "cJSON_IsString"):
         getattr(twin_cj, fn).argtypes = [ctypes.c_int64, ctypes.c_int64, ctypes.c_int64, ctypes.c_int64]
         getattr(twin_cj, fn).restype = ctypes.c_int64
+    orig_cj.cJSON_GetNumberValue.argtypes = [ctypes.c_void_p]
+    orig_cj.cJSON_GetNumberValue.restype = ctypes.c_double
+    twin_cj.cJSON_GetNumberValue.argtypes = [ctypes.c_int64, ctypes.c_double, ctypes.c_int64, ctypes.c_int64]
+    twin_cj.cJSON_GetNumberValue.restype = ctypes.c_double
+    twin_cj.cJSON_SetNumberHelper.argtypes = [ctypes.c_int64, ctypes.c_double, ctypes.c_int64, ctypes.c_int64]
+    twin_cj.cJSON_SetNumberHelper.restype = ctypes.c_double
 
-    root = orig_cj.cJSON_Parse(b'{"arr":[10,20,30],"flag":true,"name":"aether"}')
+    root = orig_cj.cJSON_Parse(b'{"arr":[10,20,30],"flag":true,"name":"aether","pi":3.14159}')
     arr = orig_cj.cJSON_GetObjectItem(root, b"arr")
     flag = orig_cj.cJSON_GetObjectItem(root, b"flag")
     name = orig_cj.cJSON_GetObjectItem(root, b"name")
+    pi_node = orig_cj.cJSON_GetObjectItem(root, b"pi")
 
     orig_cj_vals = [
         orig_cj.cJSON_GetArraySize(arr),
@@ -194,6 +202,14 @@ def _run_compiled_twin_interop_checks(reconstructed_dir: Path) -> List[Dict[str,
         twin_cj.cJSON_GetArrayItem(arr, 1, 0, 0),
         twin_cj.cJSON_GetArrayItem(arr, -1, 0, 0),
     ]
+
+    orig_pi = orig_cj.cJSON_GetNumberValue(pi_node)
+    twin_pi = twin_cj.cJSON_GetNumberValue(pi_node, 0.0, 0, 0)
+    orig_null_nan = math.isnan(orig_cj.cJSON_GetNumberValue(0))
+    twin_null_nan = math.isnan(twin_cj.cJSON_GetNumberValue(0, 0.0, 0, 0))
+    twin_set_ret = twin_cj.cJSON_SetNumberHelper(pi_node, 99.75, 0, 0)
+    orig_sees_99 = orig_cj.cJSON_GetNumberValue(pi_node)
+
     orig_cj.cJSON_Delete(root)
 
     checks.append({
@@ -201,6 +217,17 @@ def _run_compiled_twin_interop_checks(reconstructed_dir: Path) -> List[Dict[str,
         "original_dll_outputs": orig_cj_vals,
         "compiled_twin_outputs": twin_cj_vals,
         "match": orig_cj_vals == twin_cj_vals,
+    })
+    checks.append({
+        "target": "cjson.dll <-> compiled twin :: IEEE-754 XMM GetNumberValue(3.14159/NULL) & SetNumberHelper(99.75)",
+        "original_dll_outputs": [orig_pi, orig_null_nan, 99.75],
+        "compiled_twin_outputs": [twin_pi, twin_null_nan, orig_sees_99],
+        "match": (
+            orig_pi == twin_pi == 3.14159
+            and orig_null_nan is True
+            and twin_null_nan is True
+            and twin_set_ret == orig_sees_99 == 99.75
+        ),
     })
 
     # Also verify compiled twin cJSON_AddItemToArray on _MemoryArena / AST matches expected behavior
@@ -268,6 +295,7 @@ def main() -> int:
             "fully_lifted_congruent_functions": rep.fully_lifted_functions,
             "ctree_structured_functions": rep.ctree_structured_functions,
             "avg_goto_elimination_pct": rep.avg_goto_elimination_pct,
+            "ghidra_enriched_functions": rep.ghidra_enriched_functions,
             "lifted_function_names": [f["name"] for f in rep.functions if f["is_fully_lifted"]],
             "differential_congruence_pct_on_lifted": rep.overall_congruence_pct,
             "rtti_total_classes": len(rep.rtti_classes),
@@ -340,13 +368,13 @@ def main() -> int:
         "",
         "## 1. Reconstrução + C-Tree + Compilação Nativa MSVC (`GEAR-23` + `ctree_structuring`)",
         "",
-        "| Binário Real | Alvos | 100% Lifted | C-Tree Structured | Goto Elim. | Congruência | Twin DLL Compilada (MSVC) | Structs | Tempo (ms) |",
+        "| Binário Real | Alvos | 100% Lifted | C-Tree | Ghidra Ref. | Congruência | Twin DLL Compilada (MSVC) | Structs | Tempo (ms) |",
         "|---|---:|---:|---:|---:|---:|---|---:|---:|",
     ]
     for r in native_results:
         dll_info = f"PASS ({r['compiled_twin_dll_bytes']} B)" if r["msvc_compiled"] else "FAIL"
         md_lines.append(
-            f"| `{r['binary']}` | {r['total_targets_analyzed']} | {r['fully_lifted_congruent_functions']} | {r['ctree_structured_functions']} | {r['avg_goto_elimination_pct']}% | **{r['differential_congruence_pct_on_lifted']}%** | {dll_info} | {r['struct_layouts_recovered']} | {r['reconstruct_ms']} |"
+            f"| `{r['binary']}` | {r['total_targets_analyzed']} | {r['fully_lifted_congruent_functions']} | {r['ctree_structured_functions']} | {r['ghidra_enriched_functions']} | **{r['differential_congruence_pct_on_lifted']}%** | {dll_info} | {r['struct_layouts_recovered']} | {r['reconstruct_ms']} |"
         )
 
     md_lines.extend([
@@ -370,8 +398,8 @@ def main() -> int:
         "",
         "## 4. Limitações Reais Observadas (Verdade Radical)",
         "",
-        "- Todos os 4 projetos C gêmeos gerados (`cjson`, `tinyexpr`, `poly_test`, `multi_poly`) compilam nativamente em MSVC x64 `/O2` sem erros.",
-        "- Em `cjson.dll`, 17/78 exports são 100% elevados (incluindo `cJSON_AddItemToArray`, `cJSON_GetArraySize`, `cJSON_GetArrayItem`, `cJSON_DetachItemFromArray`, `cJSON_InsertItemInArray`), com estruturação C-Tree completa (e laços `while` recuperados sem `goto`). Os 61 exports restantes e os 5 exports de `tinyexpr.dll` mantêm esqueleto compilável + structs recuperadas por utilizarem instruções SIMD/FPU (`movaps`/`movsd`/`movups`) e chamadas CRT (`malloc`/`free`/`sprintf`).",
+        "- Todos os 4 projetos C gêmeos gerados (`cjson`, `tinyexpr`, `poly_test`, `multi_poly`) compilam nativamente em MSVC x64 `/O2` sem erros (incluindo resolução de até 64 sub-rotinas internas `.text`).",
+        "- Em `cjson.dll`, **19/78** exports são 100% elevados (incluindo `cJSON_GetNumberValue` e `cJSON_SetNumberHelper` via XMM IEEE-754 + constantes `.rdata`, `cJSON_AddItemToArray`, `cJSON_GetArraySize`, `cJSON_GetArrayItem`, `cJSON_DetachItemFromArray`, `cJSON_InsertItemInArray`), com **78/78** exports enriquecidos com referência tipada do cache Ghidra (`reconstructed_ghidra_reference.c`). Os 59 exports restantes com `malloc`/`free`/`sprintf` mantêm esqueleto compilável + structs recuperadas; o mesmo vale para os 5 exports de `tinyexpr.dll`.",
         "",
     ])
     md_out.write_text("\n".join(md_lines), encoding="utf-8")

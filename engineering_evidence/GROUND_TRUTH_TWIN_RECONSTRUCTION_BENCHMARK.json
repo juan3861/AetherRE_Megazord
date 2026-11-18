@@ -8,15 +8,17 @@
       "ground_truth": "cJSON.c (78 exports)",
       "status": "complete",
       "total_targets_analyzed": 78,
-      "fully_lifted_congruent_functions": 17,
-      "ctree_structured_functions": 17,
-      "avg_goto_elimination_pct": 64.71,
+      "fully_lifted_congruent_functions": 19,
+      "ctree_structured_functions": 19,
+      "avg_goto_elimination_pct": 63.16,
+      "ghidra_enriched_functions": 78,
       "lifted_function_names": [
         "cJSON_AddItemToArray",
         "cJSON_DetachItemFromArray",
         "cJSON_DetachItemViaPointer",
         "cJSON_GetArrayItem",
         "cJSON_GetArraySize",
+        "cJSON_GetNumberValue",
         "cJSON_GetStringValue",
         "cJSON_InsertItemInArray",
         "cJSON_IsArray",
@@ -28,7 +30,8 @@
         "cJSON_IsObject",
         "cJSON_IsRaw",
         "cJSON_IsString",
-        "cJSON_IsTrue"
+        "cJSON_IsTrue",
+        "cJSON_SetNumberHelper"
       ],
       "differential_congruence_pct_on_lifted": 100.0,
       "rtti_total_classes": 3,
@@ -37,13 +40,13 @@
       "imported_dlls": [
         "KERNEL32.dll"
       ],
-      "reconstruct_ms": 653.81,
+      "reconstruct_ms": 1190.72,
       "msvc_compiled": true,
       "compiler": "msvc_cl_x64",
-      "compiled_twin_dll_bytes": 108544,
-      "compiled_twin_dll_sha256": "80c72c346951a3de9d778e7804ea34954c1ca630ddff407f14f7501b302d6ea9",
-      "omni_elapsed_ms": 274.886,
-      "omni_throughput_mb_s": 0.634,
+      "compiled_twin_dll_bytes": 116224,
+      "compiled_twin_dll_sha256": "d0462f79eaefc9a71fd0a2efbb7e290615900e46bd1dec279673c9586429849f",
+      "omni_elapsed_ms": 257.546,
+      "omni_throughput_mb_s": 0.677,
       "omni_gears_executed": 12,
       "missing_or_empty_files": []
     },
@@ -56,21 +59,22 @@
       "fully_lifted_congruent_functions": 0,
       "ctree_structured_functions": 0,
       "avg_goto_elimination_pct": 0.0,
+      "ghidra_enriched_functions": 0,
       "lifted_function_names": [],
       "differential_congruence_pct_on_lifted": 0.0,
       "rtti_total_classes": 3,
       "rtti_user_classes": [],
-      "struct_layouts_recovered": 2,
+      "struct_layouts_recovered": 7,
       "imported_dlls": [
         "KERNEL32.dll"
       ],
-      "reconstruct_ms": 98.92,
+      "reconstruct_ms": 193.38,
       "msvc_compiled": true,
       "compiler": "msvc_cl_x64",
-      "compiled_twin_dll_bytes": 102912,
-      "compiled_twin_dll_sha256": "15a20d553370adf41abc3728c08eb8f9f8efc7a2e4d7b77a682b0e17f6e2bd98",
-      "omni_elapsed_ms": 304.304,
-      "omni_throughput_mb_s": 0.663,
+      "compiled_twin_dll_bytes": 111104,
+      "compiled_twin_dll_sha256": "b4bf78a767f901a09a686b40ca662ad2c833865369e858b050bd307f520a63f5",
+      "omni_elapsed_ms": 217.859,
+      "omni_throughput_mb_s": 0.926,
       "omni_gears_executed": 12,
       "missing_or_empty_files": []
     },
@@ -83,6 +87,7 @@
       "fully_lifted_congruent_functions": 3,
       "ctree_structured_functions": 3,
       "avg_goto_elimination_pct": 100.0,
+      "ghidra_enriched_functions": 0,
       "lifted_function_names": [
         "FastProcessor_v0_slot1",
         "FastProcessor_v0_slot2",
@@ -95,17 +100,17 @@
         "class FastProcessor `RTTI Type Descriptor Name'",
         "class CryptoProcessor `RTTI Type Descriptor Name'"
       ],
-      "struct_layouts_recovered": 1,
+      "struct_layouts_recovered": 6,
       "imported_dlls": [
         "KERNEL32.dll"
       ],
-      "reconstruct_ms": 152.05,
+      "reconstruct_ms": 203.63,
       "msvc_compiled": true,
       "compiler": "msvc_cl_x64",
-      "compiled_twin_dll_bytes": 103424,
-      "compiled_twin_dll_sha256": "d54bfa808edfd29389ba305beb5b20f99603eb55a408be6ba5fc2345c33acef3",
-      "omni_elapsed_ms": 184.223,
-      "omni_throughput_mb_s": 0.543,
+      "compiled_twin_dll_bytes": 105472,
+      "compiled_twin_dll_sha256": "b2a0a8793ddd43399078bd8839bae698d9a6930044875e66c4f0bbf9d8a84e31",
+      "omni_elapsed_ms": 162.58,
+      "omni_throughput_mb_s": 0.616,
       "omni_gears_executed": 12,
       "missing_or_empty_files": []
     },
@@ -118,6 +123,7 @@
       "fully_lifted_congruent_functions": 2,
       "ctree_structured_functions": 2,
       "avg_goto_elimination_pct": 100.0,
+      "ghidra_enriched_functions": 0,
       "lifted_function_names": [
         "DualDevice_v0_slot1",
         "DualDevice_v1_slot1"
@@ -129,17 +135,17 @@
         "class IWriter `RTTI Type Descriptor Name'",
         "class DualDevice `RTTI Type Descriptor Name'"
       ],
-      "struct_layouts_recovered": 1,
+      "struct_layouts_recovered": 6,
       "imported_dlls": [
         "KERNEL32.dll"
       ],
-      "reconstruct_ms": 99.29,
+      "reconstruct_ms": 187.44,
       "msvc_compiled": true,
       "compiler": "msvc_cl_x64",
-      "compiled_twin_dll_bytes": 103424,
-      "compiled_twin_dll_sha256": "c15dd4fecf8bb1776f3952c7d429e99e4e953dfcab8f57a11363e8fabdecc854",
-      "omni_elapsed_ms": 193.367,
-      "omni_throughput_mb_s": 0.518,
+      "compiled_twin_dll_bytes": 104960,
+      "compiled_twin_dll_sha256": "00e54ad58f92c89818d732fc1fb057956920eb73a4898b96b76e295c0f60b464",
+      "omni_elapsed_ms": 162.661,
+      "omni_throughput_mb_s": 0.615,
       "omni_gears_executed": 12,
       "missing_or_empty_files": []
     }
@@ -190,7 +196,7 @@
         1,
         1,
         1,
-        1578087011200,
+        1403636356288,
         0
       ],
       "compiled_twin_outputs": [
@@ -198,8 +204,22 @@
         1,
         1,
         1,
-        1578087011200,
+        1403636356288,
         0
+      ],
+      "match": true
+    },
+    {
+      "target": "cjson.dll <-> compiled twin :: IEEE-754 XMM GetNumberValue(3.14159/NULL) & SetNumberHelper(99.75)",
+      "original_dll_outputs": [
+        3.14159,
+        true,
+        99.75
+      ],
+      "compiled_twin_outputs": [
+        3.14159,
+        true,
+        99.75
       ],
       "match": true
     },

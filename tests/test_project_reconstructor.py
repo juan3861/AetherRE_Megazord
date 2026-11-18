@@ -190,13 +190,18 @@ def test_real_cpp_rtti_and_cjson_memory_twin_reconstruction(tmp_path: Path):
     cjson_rep = reconstruct_project(cjson_dll, tmp_path / "cjson_twin")
     assert cjson_rep.status == "complete"
     assert cjson_rep.total_exports_reconstructed == 78
-    assert cjson_rep.fully_lifted_functions >= 17
-    assert cjson_rep.ctree_structured_functions >= 17
+    assert cjson_rep.fully_lifted_functions >= 19
+    assert cjson_rep.ctree_structured_functions >= 19
+    assert cjson_rep.ghidra_enriched_functions == 78
     assert cjson_rep.overall_congruence_pct == 100.0
     assert cjson_rep.struct_layouts_count >= 5
     structured_c = (tmp_path / "cjson_twin" / "src" / "reconstructed_structured.c").read_text(encoding="utf-8")
     assert "while (1)" in structured_c
 
-    build = compile_reconstructed_project(tmp_path / "poly_twin")
-    assert build["compiled"] is True
-    assert Path(build["dll_path"]).is_file()
+    build_poly = compile_reconstructed_project(tmp_path / "poly_twin")
+    assert build_poly["compiled"] is True
+    assert Path(build_poly["dll_path"]).is_file()
+
+    build_cj = compile_reconstructed_project(tmp_path / "cjson_twin")
+    assert build_cj["compiled"] is True
+    assert Path(build_cj["dll_path"]).is_file()
