@@ -29,7 +29,10 @@ import ctypes
 import hashlib
 import json
 import re
+import shutil
 import struct
+import subprocess
+import tempfile
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -38,6 +41,7 @@ import capstone
 import pefile
 
 from aether_re.cpp_rtti import recover_cpp_rtti
+from aether_re.ctree_structuring import structure_control_flow
 from aether_re.electron_asar_forensics import analyze_asar_bytes
 from aether_re.struct_recovery import recover_struct_layouts
 
@@ -59,6 +63,10 @@ class ReconstructedFunction:
     lift_tier: str = "partial"
     has_calls_or_memory: bool = False
     disasm_preview: List[str] = field(default_factory=list)
+    structured_c_code: Optional[str] = None
+    ctree_strategy: Optional[str] = None
+    goto_elimination_rate_pct: Optional[float] = None
+    natural_loops_structured: int = 0
 
 
 @dataclass
@@ -73,6 +81,8 @@ class ProjectReconstructionReport:
     total_exports_reconstructed: int = 0
     fully_lifted_functions: int = 0
     overall_congruence_pct: float = 0.0
+    ctree_structured_functions: int = 0
+    avg_goto_elimination_pct: float = 0.0
     functions: List[Dict[str, Any]] = field(default_factory=list)
     rtti_classes: List[str] = field(default_factory=list)
     rtti_details: List[Dict[str, Any]] = field(default_factory=list)
@@ -91,13 +101,23 @@ _REG_INFO: Dict[str, Tuple[str, int]] = {
     "rcx": ("rcx", 8), "ecx": ("rcx", 4), "cx": ("rcx", 2), "cl": ("rcx", 1),
     "rdx": ("rdx", 8), "edx": ("rdx", 4), "dx": ("rdx", 2), "dl": ("rdx", 1),
     "rbx": ("rbx", 8), "ebx": ("rbx", 4), "bx": ("rbx", 2), "bl": ("rbx", 1),
+    "rsp": ("rsp", 8), "esp": ("rsp", 4), "sp": ("rsp", 2), "spl": ("rsp", 1),
+    "rbp": ("rbp", 8), "ebp": ("rbp", 4), "bp": ("rbp", 2), "bpl": ("rbp", 1),
     "rsi": ("rsi", 8), "esi": ("rsi", 4), "si": ("rsi", 2), "sil": ("rsi", 1),
     "rdi": ("rdi", 8), "edi": ("rdi", 4), "di": ("rdi", 2), "dil": ("rdi", 1),
     "r8": ("r8", 8), "r8d": ("r8", 4), "r8w": ("r8", 2), "r8b": ("r8", 1),
     "r9": ("r9", 8), "r9d": ("r9", 4), "r9w": ("r9", 2), "r9b": ("r9", 1),
     "r10": ("r10", 8), "r10d": ("r10", 4), "r10w": ("r10", 2), "r10b": ("r10", 1),
     "r11": ("r11", 8), "r11d": ("r11", 4), "r11w": ("r11", 2), "r11b": ("r11", 1),
+    "r12": ("r12", 8), "r12d": ("r12", 4), "r12w": ("r12", 2), "r12b": ("r12", 1),
+    "r13": ("r13", 8), "r13d": ("r13", 4), "r13w": ("r13", 2), "r13b": ("r13", 1),
+    "r14": ("r14", 8), "r14d": ("r14", 4), "r14w": ("r14", 2), "r14b": ("r14", 1),
+    "r15": ("r15", 8), "r15d": ("r15", 4), "r15w": ("r15", 2), "r15b": ("r15", 1),
 }
+_ALL_CANON_REGS = (
+    "rax", "rbx", "rcx", "rdx", "rsp", "rbp", "rsi", "rdi",
+    "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15",
+)
 _REG_MAP: Dict[str, str] = {k: v[0] for k, v in _REG_INFO.items()}
 _VALID_C_REGS = set(_REG_MAP.values())
 _SIZE_PREFIX_MAP = {"byte": 1, "word": 2, "dword": 4, "qword": 8}
@@ -155,6 +175,10 @@ class _MemoryArena:
 
 def _to_int64(val: int) -> int:
     return ctypes.c_int64(val).value
+
+
+def _i32(val: int) -> int:
+    return ctypes.c_int32(int(val)).value
 
 
 def _u32(val: int) -> int:
@@ -271,7 +295,10 @@ def _lift_x64_function_to_c_and_ir(
         insns.append((insn.address, mnem, op_str))
         if "[" in op_str or mnem == "call":
             has_calls_or_memory = True
-        if mnem in ("jmp", "je", "jz", "jne", "jnz", "jg", "jge", "jl", "jle", "ja", "jae", "jb", "jbe"):
+        if mnem in (
+            "jmp", "je", "jz", "jne", "jnz", "jg", "jge", "jl", "jle",
+            "ja", "jae", "jb", "jbe", "js", "jns",
+        ):
             t_val = _parse_int_literal(op_str)
             if t_val is not None and base_rva <= t_val < end_rva:
                 if t_val > max_branch_target:
@@ -281,28 +308,40 @@ def _lift_x64_function_to_c_and_ir(
 
     c_lines = [
         f"int64_t {c_ident}(int64_t rcx, int64_t rdx, int64_t r8, int64_t r9) {{",
-        "    int64_t rax = 0, rbx = 0, rsi = 0, rdi = 0, r10 = 0, r11 = 0;",
+        "    int64_t rax = 0, rbx = 0, rbp = 0, rsi = 0, rdi = 0;",
+        "    int64_t r10 = 0, r11 = 0, r12 = 0, r13 = 0, r14 = 0, r15 = 0;",
+        "    int64_t rsp = aether_stack_base();",
         "    int64_t cmp_lhs = 0, cmp_rhs = 0;",
     ]
 
     fully_lifted = len(insns) > 0
     addrs = {addr for addr, _, _ in insns}
+    last_cmp_width = 8
 
-    _COND_MAP = {
-        "jmp": "1",
-        "je": "cmp_lhs == cmp_rhs",
-        "jz": "cmp_lhs == cmp_rhs",
-        "jne": "cmp_lhs != cmp_rhs",
-        "jnz": "cmp_lhs != cmp_rhs",
-        "jg": "cmp_lhs > cmp_rhs",
-        "jge": "cmp_lhs >= cmp_rhs",
-        "jl": "cmp_lhs < cmp_rhs",
-        "jle": "cmp_lhs <= cmp_rhs",
-        "ja": "((cmp_lhs & 0xffffffffffffffff) > (cmp_rhs & 0xffffffffffffffff))",
-        "jae": "((cmp_lhs & 0xffffffffffffffff) >= (cmp_rhs & 0xffffffffffffffff))",
-        "jb": "((cmp_lhs & 0xffffffffffffffff) < (cmp_rhs & 0xffffffffffffffff))",
-        "jbe": "((cmp_lhs & 0xffffffffffffffff) <= (cmp_rhs & 0xffffffffffffffff))",
-    }
+    def _cond_expr(key: str, width_hint: int) -> str:
+        base_map = {
+            "jmp": "1",
+            "je": "cmp_lhs == cmp_rhs",
+            "jz": "cmp_lhs == cmp_rhs",
+            "jne": "cmp_lhs != cmp_rhs",
+            "jnz": "cmp_lhs != cmp_rhs",
+            "jg": "cmp_lhs > cmp_rhs",
+            "jge": "cmp_lhs >= cmp_rhs",
+            "jl": "cmp_lhs < cmp_rhs",
+            "jle": "cmp_lhs <= cmp_rhs",
+            "ja": "((cmp_lhs & 0xffffffffffffffff) > (cmp_rhs & 0xffffffffffffffff))",
+            "jae": "((cmp_lhs & 0xffffffffffffffff) >= (cmp_rhs & 0xffffffffffffffff))",
+            "jb": "((cmp_lhs & 0xffffffffffffffff) < (cmp_rhs & 0xffffffffffffffff))",
+            "jbe": "((cmp_lhs & 0xffffffffffffffff) <= (cmp_rhs & 0xffffffffffffffff))",
+        }
+        if key in base_map:
+            return base_map[key]
+        diff_expr = "aether_i32(cmp_lhs - cmp_rhs)" if width_hint == 4 else "(cmp_lhs - cmp_rhs)"
+        if key == "js":
+            return f"({diff_expr} < 0)"
+        if key == "jns":
+            return f"({diff_expr} >= 0)"
+        return "0"
 
     for addr, mnem, op_str in insns:
         c_lines.append(f"L_{addr:x}: ; /* {mnem} {op_str} */")
@@ -313,13 +352,32 @@ def _lift_x64_function_to_c_and_ir(
             continue
         if mnem in ("nop", "endbr64"):
             continue
+        if mnem == "cdqe":
+            c_lines.append("    rax = aether_i32(rax);")
+            continue
+
+        if mnem == "push" and len(parts) == 1:
+            r_res = _resolve_read_expr(parts[0], default_mem_width=8)
+            if r_res is not None:
+                c_lines.append(f"    rsp -= 8; aether_mem_write(rsp, 8, {r_res[0]});")
+                continue
+
+        if mnem == "pop" and len(parts) == 1:
+            dst_info = _REG_INFO.get(parts[0].lower())
+            if dst_info:
+                stmt = _emit_reg_write_stmt(parts[0], "aether_mem_read(rsp, 8)")
+                if stmt:
+                    c_lines.append(f"{stmt} rsp += 8;")
+                    continue
 
         if mnem in ("mov", "movsxd", "movzx") and len(parts) == 2:
             dst_info = _REG_INFO.get(parts[0].lower())
             if dst_info:
-                src_res = _resolve_read_expr(parts[1], default_mem_width=dst_info[1])
+                default_w = 4 if mnem == "movsxd" else dst_info[1]
+                src_res = _resolve_read_expr(parts[1], default_mem_width=default_w)
                 if src_res is not None:
-                    stmt = _emit_reg_write_stmt(parts[0], src_res[0])
+                    rhs_val = f"aether_i32({src_res[0]})" if mnem == "movsxd" else src_res[0]
+                    stmt = _emit_reg_write_stmt(parts[0], rhs_val)
                     if stmt:
                         c_lines.append(stmt)
                         continue
@@ -330,6 +388,18 @@ def _lift_x64_function_to_c_and_ir(
                 if mem_dst and src_res is not None:
                     w = mem_dst[1] if mem_dst[1] else (src_info[1] if src_info else 8)
                     c_lines.append(f"    aether_mem_write({mem_dst[0]}, {w}, {src_res[0]});")
+                    continue
+
+        if mnem.startswith("cmov") and len(parts) == 2:
+            j_equiv = "j" + mnem[4:]
+            dst_info = _REG_INFO.get(parts[0].lower())
+            if dst_info and j_equiv in (
+                "je", "jz", "jne", "jnz", "jg", "jge", "jl", "jle", "ja", "jae", "jb", "jbe", "js", "jns"
+            ):
+                src_res = _resolve_read_expr(parts[1], default_mem_width=dst_info[1])
+                stmt = _emit_reg_write_stmt(parts[0], src_res[0]) if src_res is not None else None
+                if stmt:
+                    c_lines.append(f"    if ({_cond_expr(j_equiv, last_cmp_width)}) {{ {stmt.strip()} }}")
                     continue
 
         if mnem == "lea" and len(parts) == 2:
@@ -401,6 +471,7 @@ def _lift_x64_function_to_c_and_ir(
             lhs = _resolve_read_expr(parts[0], default_mem_width=w_hint)
             rhs = _resolve_read_expr(parts[1], default_mem_width=w_hint)
             if lhs is not None and rhs is not None:
+                last_cmp_width = w_hint
                 c_lines.append(f"    cmp_lhs = (int64_t)({lhs[0]}); cmp_rhs = (int64_t)({rhs[0]});")
                 continue
 
@@ -411,26 +482,28 @@ def _lift_x64_function_to_c_and_ir(
             lhs = _resolve_read_expr(parts[0], default_mem_width=w_hint)
             rhs = _resolve_read_expr(parts[1], default_mem_width=w_hint)
             if lhs is not None and rhs is not None:
+                last_cmp_width = w_hint
                 c_lines.append(f"    cmp_lhs = ((int64_t)({lhs[0]}) & (int64_t)({rhs[0]})); cmp_rhs = 0;")
                 continue
 
         if mnem.startswith("set") and len(parts) == 1:
-            set_cond_key = {
-                "sete": "je", "setz": "jz", "setne": "jne", "setnz": "jnz",
-                "setg": "jg", "setge": "jge", "setl": "jl", "setle": "jle",
-                "seta": "ja", "setae": "jae", "setb": "jb", "setbe": "jbe",
-            }.get(mnem)
+            j_equiv = "j" + mnem[3:]
             dst_info = _REG_INFO.get(parts[0].lower())
-            if set_cond_key and dst_info and dst_info[1] == 1:
+            if dst_info and dst_info[1] == 1 and j_equiv in (
+                "je", "jz", "jne", "jnz", "jg", "jge", "jl", "jle", "ja", "jae", "jb", "jbe", "js", "jns"
+            ):
                 c_lines.append(
-                    f"    {dst_info[0]} = aether_set_byte({dst_info[0]}, {_COND_MAP[set_cond_key]});"
+                    f"    {dst_info[0]} = aether_set_byte({dst_info[0]}, {_cond_expr(j_equiv, last_cmp_width)});"
                 )
                 continue
 
-        if mnem in _COND_MAP and len(parts) == 1:
+        if mnem in (
+            "jmp", "je", "jz", "jne", "jnz", "jg", "jge", "jl", "jle",
+            "ja", "jae", "jb", "jbe", "js", "jns",
+        ) and len(parts) == 1:
             target_addr = _parse_int_literal(parts[0])
             if target_addr is not None and target_addr in addrs:
-                c_lines.append(f"    if ({_COND_MAP[mnem]}) goto L_{target_addr:x};")
+                c_lines.append(f"    if ({_cond_expr(mnem, last_cmp_width)}) goto L_{target_addr:x};")
                 continue
 
         fully_lifted = False
@@ -451,12 +524,15 @@ def _simulate_x64_insns(
 ) -> int:
     """Reference x86_64 instruction-level emulator for differential verification."""
     arena = mem_arena if mem_arena is not None else _MemoryArena()
-    regs: Dict[str, int] = {
-        "rax": 0, "rcx": _to_int64(rcx), "rdx": _to_int64(rdx), "rbx": 0,
-        "rsi": 0, "rdi": 0, "r8": _to_int64(r8), "r9": _to_int64(r9), "r10": 0, "r11": 0,
-    }
+    regs: Dict[str, int] = {r: 0 for r in _ALL_CANON_REGS}
+    regs["rcx"] = _to_int64(rcx)
+    regs["rdx"] = _to_int64(rdx)
+    regs["r8"] = _to_int64(r8)
+    regs["r9"] = _to_int64(r9)
+    regs["rsp"] = 0x1F800
+
     addr_to_idx = {addr: i for i, (addr, _, _) in enumerate(insns)}
-    cmp_lhs, cmp_rhs = 0, 0
+    cmp_lhs, cmp_rhs, cmp_width = 0, 0, 8
     pc = 0
     steps = 0
 
@@ -520,6 +596,11 @@ def _simulate_x64_insns(
             return u_l < u_r
         if key == "jbe":
             return u_l <= u_r
+        diff = _i32(cmp_lhs - cmp_rhs) if cmp_width == 4 else _to_int64(cmp_lhs - cmp_rhs)
+        if key == "js":
+            return diff < 0
+        if key == "jns":
+            return diff >= 0
         return False
 
     while 0 <= pc < len(insns) and steps < 2000:
@@ -532,12 +613,26 @@ def _simulate_x64_insns(
         if mnem in ("nop", "endbr64"):
             pc += 1
             continue
-        if mnem in ("mov", "movsxd", "movzx") and len(parts) == 2:
+        if mnem == "cdqe":
+            regs["rax"] = _to_int64(_i32(regs["rax"]))
+            pc += 1
+            continue
+        if mnem == "push" and len(parts) == 1:
+            val = _eval_op(parts[0], default_mem_w=8)
+            if val is not None:
+                regs["rsp"] = _to_int64(regs["rsp"] - 8)
+                arena.write(regs["rsp"], 8, val)
+        elif mnem == "pop" and len(parts) == 1:
+            if parts[0].lower() in _REG_INFO:
+                _write_reg(parts[0], arena.read(regs["rsp"], 8))
+                regs["rsp"] = _to_int64(regs["rsp"] + 8)
+        elif mnem in ("mov", "movsxd", "movzx") and len(parts) == 2:
             dst_info = _REG_INFO.get(parts[0].lower())
             if dst_info:
-                val = _eval_op(parts[1], default_mem_w=dst_info[1])
+                dw = 4 if mnem == "movsxd" else dst_info[1]
+                val = _eval_op(parts[1], default_mem_w=dw)
                 if val is not None:
-                    _write_reg(parts[0], val)
+                    _write_reg(parts[0], _i32(val) if mnem == "movsxd" else val)
             else:
                 mem_dst = _parse_mem_operand(parts[0], default_width=8)
                 if mem_dst:
@@ -545,6 +640,13 @@ def _simulate_x64_insns(
                     if val is not None:
                         addr = int(eval(mem_dst[0], {"__builtins__": {}}, regs))
                         arena.write(addr, mem_dst[1], val)
+        elif mnem.startswith("cmov") and len(parts) == 2:
+            j_equiv = "j" + mnem[4:]
+            dst_info = _REG_INFO.get(parts[0].lower())
+            if dst_info and _eval_cond(j_equiv):
+                val = _eval_op(parts[1], default_mem_w=dst_info[1])
+                if val is not None:
+                    _write_reg(parts[0], val)
         elif mnem == "lea" and len(parts) == 2:
             dst_info = _REG_INFO.get(parts[0].lower())
             mem_src = _parse_mem_operand(parts[1], default_width=8)
@@ -602,20 +704,23 @@ def _simulate_x64_insns(
             wh = l_info[1] if l_info else (r_info[1] if r_info else 8)
             v1, v2 = _eval_op(parts[0], wh), _eval_op(parts[1], wh)
             if v1 is not None and v2 is not None:
-                cmp_lhs, cmp_rhs = _to_int64(v1), _to_int64(v2)
+                cmp_lhs, cmp_rhs, cmp_width = _to_int64(v1), _to_int64(v2), wh
         elif mnem == "test" and len(parts) == 2:
             l_info = _REG_INFO.get(parts[0].lower())
             r_info = _REG_INFO.get(parts[1].lower())
             wh = l_info[1] if l_info else (r_info[1] if r_info else 8)
             v1, v2 = _eval_op(parts[0], wh), _eval_op(parts[1], wh)
             if v1 is not None and v2 is not None:
-                cmp_lhs, cmp_rhs = _to_int64(v1 & v2), 0
+                cmp_lhs, cmp_rhs, cmp_width = _to_int64(v1 & v2), 0, wh
         elif mnem.startswith("set") and len(parts) == 1:
             j_equiv = "j" + mnem[3:]
             dst_info = _REG_INFO.get(parts[0].lower())
             if dst_info and dst_info[1] == 1:
                 _write_reg(parts[0], 1 if _eval_cond(j_equiv) else 0)
-        elif mnem in ("jmp", "je", "jz", "jne", "jnz", "jg", "jge", "jl", "jle", "ja", "jae", "jb", "jbe") and len(parts) == 1:
+        elif mnem in (
+            "jmp", "je", "jz", "jne", "jnz", "jg", "jge", "jl", "jle",
+            "ja", "jae", "jb", "jbe", "js", "jns",
+        ) and len(parts) == 1:
             t_addr = _eval_op(parts[0])
             if _eval_cond(mnem) and t_addr is not None and t_addr in addr_to_idx:
                 pc = addr_to_idx[t_addr]
@@ -642,15 +747,18 @@ def _execute_lifted_c_ast(
             lbl = ln.split(":", 1)[0].strip()
             label_to_idx[lbl] = idx
 
-    env: Dict[str, Any] = {
+    env: Dict[str, Any] = {r: 0 for r in _ALL_CANON_REGS}
+    env.update({
         "rcx": _to_int64(rcx), "rdx": _to_int64(rdx), "r8": _to_int64(r8), "r9": _to_int64(r9),
-        "rax": 0, "rbx": 0, "rsi": 0, "rdi": 0, "r10": 0, "r11": 0,
+        "rsp": 0x1F800,
         "cmp_lhs": 0, "cmp_rhs": 0,
         "aether_u32": _u32,
+        "aether_i32": _i32,
+        "aether_stack_base": lambda: 0x1F800,
         "aether_set_byte": lambda reg, cond: _to_int64((int(reg) & ~0xFF) | (1 if cond else 0)),
         "aether_mem_read": lambda addr, width: arena.read(int(addr), int(width)),
         "aether_mem_write": lambda addr, width, val: arena.write(int(addr), int(width), int(val)),
-    }
+    })
     pc = 0
     steps = 0
     while pc < len(lines) and steps < 2000:
@@ -662,21 +770,244 @@ def _execute_lifted_c_ast(
         if ln == "return rax;":
             return _to_int64(int(env["rax"]))
         if ln.startswith("if (") and "goto " in ln:
-            cond_str = ln[4 : ln.index(") goto")].strip()
-            target_lbl = ln[ln.index("goto ") + 5 : ln.rindex(";")].strip()
-            if eval(cond_str, {"__builtins__": {}}, env):
-                pc = label_to_idx[target_lbl]
-                continue
+            if ") goto " in ln:
+                cond_str = ln[4 : ln.index(") goto")].strip()
+                target_lbl = ln[ln.index("goto ") + 5 : ln.rindex(";")].strip()
+                if eval(cond_str, {"__builtins__": {}}, env):
+                    pc = label_to_idx[target_lbl]
+                    continue
+            elif ") {" in ln and ln.endswith("}"):
+                cond_str = ln[4 : ln.index(") {")].strip()
+                body_str = ln[ln.index(") {") + 3 : -1].strip()
+                if eval(cond_str, {"__builtins__": {}}, env):
+                    for st in [s.strip() for s in body_str.split(";") if s.strip()]:
+                        cleaned = st.replace("(int64_t)", "").replace("~0xffLL", "~0xff").replace("~0xffffLL", "~0xffff")
+                        exec(cleaned, {"__builtins__": {}}, env)
             pc += 1
             continue
         stmts = [s.strip() for s in ln.split(";") if s.strip()]
         for st in stmts:
             cleaned = st.replace("(int64_t)", "").replace("~0xffLL", "~0xff").replace("~0xffffLL", "~0xffff")
             exec(cleaned, {"__builtins__": {}}, env)
-            for reg in ("rax", "rbx", "rcx", "rdx", "rsi", "rdi", "r8", "r9", "r10", "r11"):
+            for reg in _ALL_CANON_REGS:
                 env[reg] = _to_int64(int(env[reg]))
         pc += 1
     return _to_int64(int(env["rax"]))
+
+
+def _structure_lifted_c_to_ctree(c_ident: str, c_code: str) -> Dict[str, Any]:
+    """Converts flat labeled C output into structured C-Tree (if/else/while) via ctree_structuring."""
+    raw_lines = [ln.strip() for ln in c_code.splitlines()]
+    # Collect branch targets so we split basic blocks at jump destinations
+    branch_targets: set[str] = set()
+    for ln in raw_lines:
+        if ln.startswith("if (") and ") goto " in ln:
+            tgt = ln[ln.index("goto ") + 5 : ln.rindex(";")].strip()
+            branch_targets.add(tgt)
+
+    # First pass: sequence of (label, statements, cond_jump_or_return)
+    steps: List[Tuple[Optional[str], List[str], Optional[Tuple[str, str]]]] = []
+    cur_lbl: Optional[str] = None
+    for ln in raw_lines:
+        if not ln or ln.startswith("int64_t ") or ln == "}":
+            continue
+        if ln.startswith("L_") and ":" in ln:
+            cur_lbl = ln.split(":", 1)[0].strip()
+            steps.append((cur_lbl, [], None))
+            continue
+        if ln.startswith("/*"):
+            continue
+        if not steps:
+            steps.append(("entry", [], None))
+        lbl_s, stmts_s, term_s = steps[-1]
+        if ln == "return rax;":
+            steps[-1] = (lbl_s, stmts_s, ("return", "rax"))
+        elif ln.startswith("if (") and ") goto " in ln:
+            cond_str = ln[4 : ln.index(") goto")].strip()
+            tgt = ln[ln.index("goto ") + 5 : ln.rindex(";")].strip()
+            steps[-1] = (lbl_s, stmts_s, ("goto", f"{cond_str}::{tgt}"))
+        elif ln.startswith("if (") and ") {" in ln and ln.endswith("}"):
+            # pycparser allows inline single if-statements only as control nodes; keep explicit fallback if needed
+            return {"status": "skipped", "reason": "inline_cmov"}
+        else:
+            for st in [s.strip() for s in ln.split(";") if s.strip()]:
+                c_stmt = (
+                    st.replace("(int64_t)", "(long long)")
+                    .replace("0xffLL", "0xff")
+                    .replace("0xffffLL", "0xffff")
+                    + ";"
+                )
+                stmts_s.append(c_stmt)
+
+    if not steps:
+        return {"status": "skipped", "reason": "empty"}
+
+    # Group into basic blocks
+    blocks: List[Dict[str, Any]] = []
+    lbl_to_bb: Dict[str, str] = {}
+
+    def _new_bb(name: str) -> Dict[str, Any]:
+        return {"name": name, "statements": [], "terminator": None}
+
+    cur_bb = _new_bb(f"bb_{steps[0][0] or '0'}")
+    for idx, (lbl, stmts, term) in enumerate(steps):
+        if idx > 0 and ((lbl and lbl in branch_targets) or cur_bb["terminator"] is not None):
+            if cur_bb["terminator"] is None:
+                next_name = f"bb_{lbl or idx}"
+                cur_bb["terminator"] = {"kind": "jump", "target": next_name}
+            blocks.append(cur_bb)
+            cur_bb = _new_bb(f"bb_{lbl or idx}")
+        if lbl and lbl not in lbl_to_bb:
+            lbl_to_bb[lbl] = cur_bb["name"]
+        if cur_bb["terminator"] is None:
+            cur_bb["statements"].extend(stmts)
+            if term is not None:
+                kind, payload = term
+                if kind == "return":
+                    cur_bb["terminator"] = {"kind": "return", "value": "rax"}
+                elif kind == "goto":
+                    cond_str, tgt = payload.split("::", 1)
+                    cur_bb["terminator"] = {"kind": "pending_goto", "cond": cond_str, "tgt": tgt}
+    if cur_bb["terminator"] is None:
+        cur_bb["terminator"] = {"kind": "return", "value": "rax"}
+    blocks.append(cur_bb)
+
+    # Resolve pending_goto fallthroughs
+    nodes = [b["name"] for b in blocks]
+    edges: List[Tuple[str, str]] = []
+    block_semantics: Dict[str, Any] = {}
+    for idx, b in enumerate(blocks):
+        t = b["terminator"]
+        if t["kind"] == "pending_goto":
+            tgt_bb = lbl_to_bb.get(t["tgt"])
+            if not tgt_bb:
+                return {"status": "skipped", "reason": "unresolved_target"}
+            if t["cond"] == "1":
+                t = {"kind": "jump", "target": tgt_bb}
+            else:
+                if idx + 1 >= len(blocks):
+                    return {"status": "skipped", "reason": "missing_fallthrough"}
+                fall_bb = blocks[idx + 1]["name"]
+                if fall_bb == tgt_bb:
+                    t = {"kind": "jump", "target": tgt_bb}
+                else:
+                    t = {"kind": "branch", "condition": t["cond"], "true": tgt_bb, "false": fall_bb}
+        if t["kind"] == "jump":
+            edges.append((b["name"], t["target"]))
+        elif t["kind"] == "branch":
+            edges.append((b["name"], t["true"]))
+            edges.append((b["name"], t["false"]))
+        block_semantics[b["name"]] = {"statements": b["statements"], "terminator": t}
+
+    declarations = [
+        "long long rax = 0;", "long long rbx = 0;", "long long rbp = 0;",
+        "long long rsi = 0;", "long long rdi = 0;", "long long r10 = 0;",
+        "long long r11 = 0;", "long long r12 = 0;", "long long r13 = 0;",
+        "long long r14 = 0;", "long long r15 = 0;",
+        "long long rsp = aether_stack_base();",
+        "long long cmp_lhs = 0;", "long long cmp_rhs = 0;",
+    ]
+    sig = f"long long {c_ident}(long long rcx, long long rdx, long long r8, long long r9)"
+    return structure_control_flow(
+        nodes,
+        edges,
+        {},
+        [],
+        nodes[0],
+        block_semantics=block_semantics,
+        function_signature=sig,
+        declarations=declarations,
+        node_budget=max(256, min(512, len(nodes) + 16)),
+    )
+
+
+def compile_reconstructed_project(
+    project_dir: str | Path,
+    output_dll_name: str = "reconstructed_twin.dll",
+) -> Dict[str, Any]:
+    """Compiles a reconstructed twin C project into a native shared library (.dll/.so) when a compiler is available."""
+    proj = Path(project_dir).resolve()
+    c_src = proj / "src" / "reconstructed_project.c"
+    def_file = proj / "src" / "exports.def"
+    out_dll = proj / output_dll_name
+    if not c_src.is_file():
+        return {"compiled": False, "status": "missing_source", "error": f"Not found: {c_src}"}
+
+    # 1. Windows MSVC via vswhere.exe + vcvars64.bat + cl.exe
+    vswhere = Path(r"C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe")
+    vcvars_candidates: List[Path] = []
+    if vswhere.is_file():
+        try:
+            vs_paths = subprocess.check_output(
+                [str(vswhere), "-all", "-products", "*", "-property", "installationPath"],
+                text=True,
+                timeout=10,
+            ).splitlines()
+            for vp in vs_paths:
+                cand = Path(vp.strip()) / "VC" / "Auxiliary" / "Build" / "vcvars64.bat"
+                if cand.is_file():
+                    vcvars_candidates.append(cand)
+        except Exception:
+            pass
+    default_vc = Path(r"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat")
+    if default_vc.is_file() and default_vc not in vcvars_candidates:
+        vcvars_candidates.append(default_vc)
+
+    if vcvars_candidates:
+        vc = vcvars_candidates[0]
+        def_arg = f'/link /DEF:"{def_file}"' if def_file.is_file() else ""
+        bat_body = (
+            "@echo off\n"
+            f'call "{vc}" >nul\n'
+            f'cd /d "{proj}"\n'
+            f'cl /nologo /LD /O2 "{c_src}" /Fe:"{out_dll}" {def_arg}\n'
+        )
+        with tempfile.NamedTemporaryFile("w", suffix=".bat", delete=False, encoding="utf-8") as tf:
+            tf.write(bat_body)
+            bat_path = Path(tf.name)
+        try:
+            proc = subprocess.run(
+                ["cmd", "/c", str(bat_path)],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=60,
+            )
+        finally:
+            bat_path.unlink(missing_ok=True)
+        ok = proc.returncode == 0 and out_dll.is_file() and out_dll.stat().st_size > 0
+        return {
+            "compiled": ok,
+            "status": "compiled" if ok else "compile_failed",
+            "compiler": "msvc_cl_x64",
+            "dll_path": str(out_dll) if ok else None,
+            "dll_size_bytes": out_dll.stat().st_size if ok else 0,
+            "dll_sha256": hashlib.sha256(out_dll.read_bytes()).hexdigest() if ok else None,
+            "returncode": proc.returncode,
+            "build_output": (proc.stdout + "\n" + proc.stderr).strip()[:1000],
+        }
+
+    # 2. Fallback: clang or gcc in PATH
+    cc = shutil.which("clang") or shutil.which("gcc")
+    if cc:
+        cmd = [cc, "-shared", "-O2", str(c_src), "-o", str(out_dll)]
+        if def_file.is_file():
+            cmd.append(str(def_file))
+        proc = subprocess.run(cmd, cwd=str(proj), capture_output=True, text=True, timeout=60)
+        ok = proc.returncode == 0 and out_dll.is_file() and out_dll.stat().st_size > 0
+        return {
+            "compiled": ok,
+            "status": "compiled" if ok else "compile_failed",
+            "compiler": Path(cc).name,
+            "dll_path": str(out_dll) if ok else None,
+            "dll_size_bytes": out_dll.stat().st_size if ok else 0,
+            "dll_sha256": hashlib.sha256(out_dll.read_bytes()).hexdigest() if ok else None,
+            "returncode": proc.returncode,
+            "build_output": (proc.stdout + "\n" + proc.stderr).strip()[:1000],
+        }
+
+    return {"compiled": False, "status": "no_compiler_found", "error": "Neither MSVC cl.exe nor clang/gcc found"}
 
 
 def reconstruct_project(
@@ -785,6 +1116,13 @@ def reconstruct_project(
             "",
             "static inline int64_t aether_u32(uint64_t v) {",
             "    return (int64_t)(uint32_t)v;",
+            "}",
+            "static inline int64_t aether_i32(int64_t v) {",
+            "    return (int64_t)(int32_t)v;",
+            "}",
+            "static inline int64_t aether_stack_base(void) {",
+            "    static uint8_t aether_stack[4096];",
+            "    return (int64_t)(uintptr_t)(aether_stack + 3840);",
             "}",
             "static inline int64_t aether_set_byte(int64_t reg, int cond) {",
             "    return (reg & ~0xffLL) | (cond ? 1LL : 0LL);",
@@ -908,6 +1246,12 @@ def reconstruct_project(
         total_congruence_checks = 0
         all_disasm_insns: List[Dict[str, Any]] = []
         fn_decls: List[str] = []
+        structured_source_lines = [
+            "/* Auto-Reconstructed C-Tree Structured Implementation by AetherRE Megazord (GEAR-23 + C-Tree) */",
+            '#include "../include/reconstructed_api.h"',
+            "",
+        ]
+        goto_elim_rates: List[float] = []
 
         for fn_name, ordinal, rva in all_targets:
             try:
@@ -935,14 +1279,18 @@ def reconstruct_project(
             )
             c_source_lines.append(c_code)
             c_source_lines.append("")
-            if ordinal <= next_vt_ord - len(vtable_targets) - 1 or not vtable_targets:
-                if c_ident != fn_name:
-                    def_lines.append(f'    "{fn_name}" = {c_ident} @{ordinal}')
-                else:
-                    def_lines.append(f"    {fn_name} @{ordinal}")
+            if c_ident != fn_name:
+                def_lines.append(f'    "{fn_name}" = {c_ident} @{ordinal}')
+            else:
+                def_lines.append(f"    {fn_name} @{ordinal}")
 
             passed_vecs = 0
             total_vecs = 0
+            structured_src: Optional[str] = None
+            ctree_strategy: Optional[str] = None
+            goto_elim_pct: Optional[float] = None
+            loops_structured = 0
+
             if is_lifted and insns:
                 cases: List[Tuple[int, int, int, int, _MemoryArena]] = [
                     (vx, vy, vz, vw, _MemoryArena()) for (vx, vy, vz, vw) in scalar_vectors
@@ -959,6 +1307,19 @@ def reconstruct_project(
                         passed_vecs += 1
                 total_congruence_passed += passed_vecs
                 total_congruence_checks += total_vecs
+
+                ctree_res = _structure_lifted_c_to_ctree(c_ident, c_code)
+                if ctree_res.get("status") == "complete":
+                    structured_src = ctree_res.get("structured_c_source")
+                    ctree_strategy = ctree_res.get("strategy")
+                    goto_elim_pct = ctree_res.get("goto_elimination_rate_pct")
+                    loops_structured = int(ctree_res.get("natural_loops_structured", 0))
+                    report.ctree_structured_functions += 1
+                    if goto_elim_pct is not None:
+                        goto_elim_rates.append(float(goto_elim_pct))
+                    if structured_src:
+                        structured_source_lines.append(structured_src)
+                        structured_source_lines.append("")
 
             cong_pct = (
                 round((passed_vecs / total_vecs) * 100.0, 2)
@@ -990,6 +1351,10 @@ def reconstruct_project(
                 lift_tier=lift_tier,
                 has_calls_or_memory=has_mem_or_calls,
                 disasm_preview=[f"0x{a:x}: {m} {o}".strip() for a, m, o in insns[:12]],
+                structured_c_code=structured_src,
+                ctree_strategy=ctree_strategy,
+                goto_elimination_rate_pct=goto_elim_pct,
+                natural_loops_structured=loops_structured,
             )
             report.functions.append(asdict(rec_fn))
             if is_lifted:
@@ -1018,12 +1383,14 @@ def reconstruct_project(
 
         (inc_dir / "reconstructed_api.h").write_text("\n".join(header_lines), encoding="utf-8")
         (src_dir / "reconstructed_project.c").write_text("\n".join(c_source_lines), encoding="utf-8")
+        (src_dir / "reconstructed_structured.c").write_text("\n".join(structured_source_lines), encoding="utf-8")
         (src_dir / "exports.def").write_text("\n".join(def_lines) + "\n", encoding="utf-8")
         (out_root / "CMakeLists.txt").write_text(cmake_content, encoding="utf-8")
 
         report.generated_files = [
             "include/reconstructed_api.h",
             "src/reconstructed_project.c",
+            "src/reconstructed_structured.c",
             "src/exports.def",
             "CMakeLists.txt",
             "twin_congruence_report.json",
@@ -1032,6 +1399,10 @@ def reconstruct_project(
         if total_congruence_checks > 0:
             report.overall_congruence_pct = round(
                 (total_congruence_passed / total_congruence_checks) * 100.0, 2
+            )
+        if goto_elim_rates:
+            report.avg_goto_elimination_pct = round(
+                sum(goto_elim_rates) / len(goto_elim_rates), 2
             )
 
         (out_root / "twin_congruence_report.json").write_text(

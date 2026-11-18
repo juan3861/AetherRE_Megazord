@@ -1,5 +1,5 @@
 {
-  "schema": "aetherre-ground-truth-twin-benchmark.v1",
+  "schema": "aetherre-ground-truth-twin-benchmark.v2",
   "overall_passed": true,
   "native_binaries": [
     {
@@ -8,12 +8,17 @@
       "ground_truth": "cJSON.c (78 exports)",
       "status": "complete",
       "total_targets_analyzed": 78,
-      "fully_lifted_congruent_functions": 14,
+      "fully_lifted_congruent_functions": 17,
+      "ctree_structured_functions": 17,
+      "avg_goto_elimination_pct": 64.71,
       "lifted_function_names": [
         "cJSON_AddItemToArray",
+        "cJSON_DetachItemFromArray",
         "cJSON_DetachItemViaPointer",
+        "cJSON_GetArrayItem",
         "cJSON_GetArraySize",
         "cJSON_GetStringValue",
+        "cJSON_InsertItemInArray",
         "cJSON_IsArray",
         "cJSON_IsBool",
         "cJSON_IsFalse",
@@ -32,9 +37,13 @@
       "imported_dlls": [
         "KERNEL32.dll"
       ],
-      "reconstruct_ms": 698.65,
-      "omni_elapsed_ms": 626.871,
-      "omni_throughput_mb_s": 0.278,
+      "reconstruct_ms": 653.81,
+      "msvc_compiled": true,
+      "compiler": "msvc_cl_x64",
+      "compiled_twin_dll_bytes": 108544,
+      "compiled_twin_dll_sha256": "80c72c346951a3de9d778e7804ea34954c1ca630ddff407f14f7501b302d6ea9",
+      "omni_elapsed_ms": 274.886,
+      "omni_throughput_mb_s": 0.634,
       "omni_gears_executed": 12,
       "missing_or_empty_files": []
     },
@@ -45,6 +54,8 @@
       "status": "complete",
       "total_targets_analyzed": 5,
       "fully_lifted_congruent_functions": 0,
+      "ctree_structured_functions": 0,
+      "avg_goto_elimination_pct": 0.0,
       "lifted_function_names": [],
       "differential_congruence_pct_on_lifted": 0.0,
       "rtti_total_classes": 3,
@@ -53,9 +64,13 @@
       "imported_dlls": [
         "KERNEL32.dll"
       ],
-      "reconstruct_ms": 238.95,
-      "omni_elapsed_ms": 693.107,
-      "omni_throughput_mb_s": 0.291,
+      "reconstruct_ms": 98.92,
+      "msvc_compiled": true,
+      "compiler": "msvc_cl_x64",
+      "compiled_twin_dll_bytes": 102912,
+      "compiled_twin_dll_sha256": "15a20d553370adf41abc3728c08eb8f9f8efc7a2e4d7b77a682b0e17f6e2bd98",
+      "omni_elapsed_ms": 304.304,
+      "omni_throughput_mb_s": 0.663,
       "omni_gears_executed": 12,
       "missing_or_empty_files": []
     },
@@ -66,6 +81,8 @@
       "status": "complete",
       "total_targets_analyzed": 10,
       "fully_lifted_congruent_functions": 3,
+      "ctree_structured_functions": 3,
+      "avg_goto_elimination_pct": 100.0,
       "lifted_function_names": [
         "FastProcessor_v0_slot1",
         "FastProcessor_v0_slot2",
@@ -82,9 +99,13 @@
       "imported_dlls": [
         "KERNEL32.dll"
       ],
-      "reconstruct_ms": 246.76,
-      "omni_elapsed_ms": 412.364,
-      "omni_throughput_mb_s": 0.243,
+      "reconstruct_ms": 152.05,
+      "msvc_compiled": true,
+      "compiler": "msvc_cl_x64",
+      "compiled_twin_dll_bytes": 103424,
+      "compiled_twin_dll_sha256": "d54bfa808edfd29389ba305beb5b20f99603eb55a408be6ba5fc2345c33acef3",
+      "omni_elapsed_ms": 184.223,
+      "omni_throughput_mb_s": 0.543,
       "omni_gears_executed": 12,
       "missing_or_empty_files": []
     },
@@ -95,6 +116,8 @@
       "status": "complete",
       "total_targets_analyzed": 11,
       "fully_lifted_congruent_functions": 2,
+      "ctree_structured_functions": 2,
+      "avg_goto_elimination_pct": 100.0,
       "lifted_function_names": [
         "DualDevice_v0_slot1",
         "DualDevice_v1_slot1"
@@ -110,22 +133,26 @@
       "imported_dlls": [
         "KERNEL32.dll"
       ],
-      "reconstruct_ms": 173.74,
-      "omni_elapsed_ms": 450.083,
-      "omni_throughput_mb_s": 0.222,
+      "reconstruct_ms": 99.29,
+      "msvc_compiled": true,
+      "compiler": "msvc_cl_x64",
+      "compiled_twin_dll_bytes": 103424,
+      "compiled_twin_dll_sha256": "c15dd4fecf8bb1776f3952c7d429e99e4e953dfcab8f57a11363e8fabdecc854",
+      "omni_elapsed_ms": 193.367,
+      "omni_throughput_mb_s": 0.518,
       "omni_gears_executed": 12,
       "missing_or_empty_files": []
     }
   ],
-  "host_cpu_differential_checks": [
+  "live_compiled_dll_interop_checks": [
     {
-      "target": "poly_test.dll :: FastProcessor::process & reset",
-      "host_outputs": [
+      "target": "poly_test.dll <-> compiled twin :: FastProcessor shared C++ heap",
+      "original_dll_outputs": [
         31,
         32,
         31
       ],
-      "twin_outputs": [
+      "compiled_twin_outputs": [
         31,
         32,
         31
@@ -133,44 +160,58 @@
       "match": true
     },
     {
-      "target": "poly_test.dll :: CryptoProcessor::process",
-      "host_outputs": [
+      "target": "poly_test.dll <-> compiled twin :: CryptoProcessor shared C++ heap",
+      "original_dll_outputs": [
         4925,
         112
       ],
-      "twin_outputs": [
+      "compiled_twin_outputs": [
         4925,
         112
       ],
       "match": true
     },
     {
-      "target": "multi_poly.dll :: DualDevice(100) -> write(777) -> read()",
-      "host_outputs": [
+      "target": "multi_poly.dll <-> compiled twin :: DualDevice multiple-inheritance heap",
+      "original_dll_outputs": [
         100,
         777
       ],
-      "twin_outputs": [
+      "compiled_twin_outputs": [
         100,
         777
       ],
       "match": true
     },
     {
-      "target": "cjson.dll :: AddItemToArray + GetArraySize + IsArray/IsTrue/IsString",
-      "host_outputs": [
+      "target": "cjson.dll <-> compiled twin :: Live cJSON DOM heap traversal & predicates",
+      "original_dll_outputs": [
         3,
         1,
         1,
         1,
+        1578087011200,
         0
       ],
-      "twin_outputs": [
+      "compiled_twin_outputs": [
         3,
         1,
         1,
         1,
+        1578087011200,
         0
+      ],
+      "match": true
+    },
+    {
+      "target": "cjson AST :: AddItemToArray + GetArrayItem(1) + GetArraySize",
+      "original_dll_outputs": [
+        2,
+        66048
+      ],
+      "compiled_twin_outputs": [
+        2,
+        66048
       ],
       "match": true
     }
