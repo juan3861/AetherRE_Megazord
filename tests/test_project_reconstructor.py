@@ -190,8 +190,8 @@ def test_real_cpp_rtti_and_cjson_memory_twin_reconstruction(tmp_path: Path):
     cjson_rep = reconstruct_project(cjson_dll, tmp_path / "cjson_twin")
     assert cjson_rep.status == "complete"
     assert cjson_rep.total_exports_reconstructed == 78
-    assert cjson_rep.fully_lifted_functions >= 62
-    assert cjson_rep.ctree_structured_functions >= 62
+    assert cjson_rep.fully_lifted_functions >= 66
+    assert cjson_rep.ctree_structured_functions >= 66
     assert cjson_rep.ghidra_enriched_functions == 78
     assert cjson_rep.overall_congruence_pct == 100.0
     assert cjson_rep.struct_layouts_count >= 5
@@ -199,19 +199,34 @@ def test_real_cpp_rtti_and_cjson_memory_twin_reconstruction(tmp_path: Path):
     for req_sym in (
         "cJSON_CreateArray",
         "cJSON_CreateNumber",
+        "cJSON_CreateIntArray",
+        "cJSON_CreateFloatArray",
         "cJSON_CreateString",
         "cJSON_CreateTrue",
         "cJSON_AddTrueToObject",
         "cJSON_GetObjectItemCaseSensitive",
         "cJSON_Delete",
         "cJSON_Duplicate",
+        "cJSON_Minify",
         "cJSON_ReplaceItemInArray",
+        "cJSON_SetValuestring",
         "cJSON_malloc",
         "cJSON_free",
     ):
         assert lifted_map[req_sym]["is_fully_lifted"] is True, req_sym
     assert lifted_map["cJSON_CreateArray"]["returns_double"] is False
     assert lifted_map["cJSON_CreateNumber"]["takes_double_arg0"] is True
+
+    te_dll = repo_root / "external_test_repos" / "tinyexpr" / "tinyexpr.dll"
+    if te_dll.is_file():
+        te_rep = reconstruct_project(te_dll, tmp_path / "tinyexpr_twin")
+        assert te_rep.status == "complete"
+        assert te_rep.fully_lifted_functions >= 1
+        assert te_rep.overall_congruence_pct == 100.0
+        te_map = {f["name"]: f for f in te_rep.functions}
+        assert te_map["te_free"]["is_fully_lifted"] is True
+        build_te = compile_reconstructed_project(tmp_path / "tinyexpr_twin")
+        assert build_te["compiled"] is True
     structured_c = (tmp_path / "cjson_twin" / "src" / "reconstructed_structured.c").read_text(encoding="utf-8")
     assert "while (1)" in structured_c
 

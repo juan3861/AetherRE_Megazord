@@ -8,9 +8,9 @@
       "ground_truth": "cJSON.c (78 exports)",
       "status": "complete",
       "total_targets_analyzed": 78,
-      "fully_lifted_congruent_functions": 62,
-      "ctree_structured_functions": 62,
-      "avg_goto_elimination_pct": 50.0,
+      "fully_lifted_congruent_functions": 66,
+      "ctree_structured_functions": 66,
+      "avg_goto_elimination_pct": 46.97,
       "ghidra_enriched_functions": 78,
       "lifted_function_names": [
         "cJSON_AddArrayToObject",
@@ -32,6 +32,8 @@
         "cJSON_CreateBool",
         "cJSON_CreateDoubleArray",
         "cJSON_CreateFalse",
+        "cJSON_CreateFloatArray",
+        "cJSON_CreateIntArray",
         "cJSON_CreateNull",
         "cJSON_CreateNumber",
         "cJSON_CreateObject",
@@ -68,11 +70,13 @@
         "cJSON_IsRaw",
         "cJSON_IsString",
         "cJSON_IsTrue",
+        "cJSON_Minify",
         "cJSON_ReplaceItemInArray",
         "cJSON_ReplaceItemInObject",
         "cJSON_ReplaceItemInObjectCaseSensitive",
         "cJSON_ReplaceItemViaPointer",
         "cJSON_SetNumberHelper",
+        "cJSON_SetValuestring",
         "cJSON_free",
         "cJSON_malloc"
       ],
@@ -83,13 +87,13 @@
       "imported_dlls": [
         "KERNEL32.dll"
       ],
-      "reconstruct_ms": 8683.43,
+      "reconstruct_ms": 21783.71,
       "msvc_compiled": true,
       "compiler": "msvc_cl_x64",
-      "compiled_twin_dll_bytes": 125952,
-      "compiled_twin_dll_sha256": "094a3e6729444e5709f275b903b92fcd1c1cb60b8b55dbf48324cefc8c160d42",
-      "omni_elapsed_ms": 202.396,
-      "omni_throughput_mb_s": 0.861,
+      "compiled_twin_dll_bytes": 159232,
+      "compiled_twin_dll_sha256": "c56749b3d10895698810bcd8cef9f516047f146f27524907c4aea4d31b07b32f",
+      "omni_elapsed_ms": 257.049,
+      "omni_throughput_mb_s": 0.678,
       "omni_gears_executed": 12,
       "missing_or_empty_files": []
     },
@@ -99,25 +103,27 @@
       "ground_truth": "tinyexpr.c (5 exports)",
       "status": "complete",
       "total_targets_analyzed": 5,
-      "fully_lifted_congruent_functions": 0,
-      "ctree_structured_functions": 0,
-      "avg_goto_elimination_pct": 0.0,
+      "fully_lifted_congruent_functions": 1,
+      "ctree_structured_functions": 1,
+      "avg_goto_elimination_pct": 100.0,
       "ghidra_enriched_functions": 0,
-      "lifted_function_names": [],
-      "differential_congruence_pct_on_lifted": 0.0,
+      "lifted_function_names": [
+        "te_free"
+      ],
+      "differential_congruence_pct_on_lifted": 100.0,
       "rtti_total_classes": 3,
       "rtti_user_classes": [],
       "struct_layouts_recovered": 7,
       "imported_dlls": [
         "KERNEL32.dll"
       ],
-      "reconstruct_ms": 386.33,
+      "reconstruct_ms": 533.97,
       "msvc_compiled": true,
       "compiler": "msvc_cl_x64",
-      "compiled_twin_dll_bytes": 113152,
-      "compiled_twin_dll_sha256": "64b2b84530d7530f0844c6cc3d56684aad2b7727a4fa1bc34f617f5278cdc4eb",
-      "omni_elapsed_ms": 231.274,
-      "omni_throughput_mb_s": 0.872,
+      "compiled_twin_dll_bytes": 126976,
+      "compiled_twin_dll_sha256": "15cd5f3fac44d016c551bc6532379d4f6f901502ee614d2903398c833f927758",
+      "omni_elapsed_ms": 293.638,
+      "omni_throughput_mb_s": 0.687,
       "omni_gears_executed": 12,
       "missing_or_empty_files": []
     },
@@ -147,13 +153,13 @@
       "imported_dlls": [
         "KERNEL32.dll"
       ],
-      "reconstruct_ms": 356.31,
+      "reconstruct_ms": 443.82,
       "msvc_compiled": true,
       "compiler": "msvc_cl_x64",
-      "compiled_twin_dll_bytes": 105472,
-      "compiled_twin_dll_sha256": "27702a3767f8d1bbb4783ef2c8e10ead60247186501db2dc7a55050a5f5b426e",
-      "omni_elapsed_ms": 183.538,
-      "omni_throughput_mb_s": 0.545,
+      "compiled_twin_dll_bytes": 106496,
+      "compiled_twin_dll_sha256": "ab152f577c82f760e71166b9fed619d5d4d78a92af58c159120767831d567b06",
+      "omni_elapsed_ms": 196.979,
+      "omni_throughput_mb_s": 0.508,
       "omni_gears_executed": 12,
       "missing_or_empty_files": []
     },
@@ -182,13 +188,13 @@
       "imported_dlls": [
         "KERNEL32.dll"
       ],
-      "reconstruct_ms": 230.04,
+      "reconstruct_ms": 291.24,
       "msvc_compiled": true,
       "compiler": "msvc_cl_x64",
-      "compiled_twin_dll_bytes": 104960,
-      "compiled_twin_dll_sha256": "b3c89fd6fdc72a58fc54b0430bb6cece64c09a4fcd02b4e1d93592a9be2a4d3c",
-      "omni_elapsed_ms": 177.698,
-      "omni_throughput_mb_s": 0.563,
+      "compiled_twin_dll_bytes": 106496,
+      "compiled_twin_dll_sha256": "32d94380a12a3f48b0c9767ddf1e070971f0e3e60ddf2f93959b8b4d9fc70754",
+      "omni_elapsed_ms": 188.22,
+      "omni_throughput_mb_s": 0.532,
       "omni_gears_executed": 12,
       "missing_or_empty_files": []
     }
@@ -239,7 +245,7 @@
         1,
         1,
         1,
-        2536641196784,
+        2854816190048,
         0
       ],
       "compiled_twin_outputs": [
@@ -247,7 +253,7 @@
         1,
         1,
         1,
-        2536641196784,
+        2854816190048,
         0
       ],
       "match": true
@@ -287,6 +293,20 @@
       "compiled_twin_outputs": [
         "aether_v39",
         "{\"msg\":\"aether_v39\",\"ok\":true}"
+      ],
+      "match": true
+    },
+    {
+      "target": "compiled twin -> orig cjson.dll :: Live RVA Switch Minify + CreateIntArray + CreateFloatArray",
+      "original_dll_outputs": [
+        "{\"x\":[1,2],\"y\":true}",
+        "[10,-20,30]",
+        "[1.5,-2.25]"
+      ],
+      "compiled_twin_outputs": [
+        "{\"x\":[1,2],\"y\":true}",
+        "[10,-20,30]",
+        "[1.5,-2.25]"
       ],
       "match": true
     },
