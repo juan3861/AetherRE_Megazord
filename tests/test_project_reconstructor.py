@@ -6,7 +6,11 @@ import json
 import struct
 from pathlib import Path
 
-from aether_re.project_reconstructor import reconstruct_project
+from aether_re.project_reconstructor import (
+    _MemoryArena,
+    _execute_lifted_c_ast,
+    reconstruct_project,
+)
 from tests.test_electron_asar_forensics import _build_synthetic_asar
 
 
@@ -159,3 +163,32 @@ def test_electron_asar_full_project_copy_100pct_congruence(tmp_path: Path):
     assert (out_dir / "app.jsc").is_file()
     pkg = json.loads((out_dir / "package.json").read_text(encoding="utf-8"))
     assert pkg["name"] == "aether-desktop"
+
+
+def test_real_cpp_rtti_and_cjson_memory_twin_reconstruction(tmp_path: Path):
+    repo_root = Path(__file__).resolve().parent.parent
+    poly_dll = repo_root / "external_test_repos" / "cpp_poly" / "poly_test.dll"
+    cjson_dll = repo_root / "external_test_repos" / "cjson" / "cjson.dll"
+    if not poly_dll.is_file() or not cjson_dll.is_file():
+        return
+
+    poly_rep = reconstruct_project(poly_dll, tmp_path / "poly_twin")
+    assert poly_rep.status == "complete"
+    assert poly_rep.fully_lifted_functions >= 3
+    assert poly_rep.overall_congruence_pct == 100.0
+    assert any("FastProcessor" in c for c in poly_rep.rtti_classes)
+    assert any("CryptoProcessor" in c for c in poly_rep.rtti_classes)
+
+    poly_fns = {f["name"]: f["lifted_c_code"] for f in poly_rep.functions}
+    arena = _MemoryArena()
+    arena.write(0x10008, 4, 0)
+    arena.write(0x1000C, 4, 3)
+    assert _execute_lifted_c_ast(poly_fns["FastProcessor_v0_slot1"], 0x10000, 10, 0, 0, arena) == 31
+    assert _execute_lifted_c_ast(poly_fns["FastProcessor_v0_slot1"], 0x10000, 10, 0, 0, arena) == 32
+
+    cjson_rep = reconstruct_project(cjson_dll, tmp_path / "cjson_twin")
+    assert cjson_rep.status == "complete"
+    assert cjson_rep.total_exports_reconstructed == 78
+    assert cjson_rep.fully_lifted_functions >= 14
+    assert cjson_rep.overall_congruence_pct == 100.0
+    assert cjson_rep.struct_layouts_count >= 5

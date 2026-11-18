@@ -1,0 +1,185 @@
+{
+  "schema": "aetherre-ground-truth-twin-benchmark.v1",
+  "overall_passed": true,
+  "native_binaries": [
+    {
+      "binary": "cjson.dll",
+      "size_bytes": 182784,
+      "ground_truth": "cJSON.c (78 exports)",
+      "status": "complete",
+      "total_targets_analyzed": 78,
+      "fully_lifted_congruent_functions": 14,
+      "lifted_function_names": [
+        "cJSON_AddItemToArray",
+        "cJSON_DetachItemViaPointer",
+        "cJSON_GetArraySize",
+        "cJSON_GetStringValue",
+        "cJSON_IsArray",
+        "cJSON_IsBool",
+        "cJSON_IsFalse",
+        "cJSON_IsInvalid",
+        "cJSON_IsNull",
+        "cJSON_IsNumber",
+        "cJSON_IsObject",
+        "cJSON_IsRaw",
+        "cJSON_IsString",
+        "cJSON_IsTrue"
+      ],
+      "differential_congruence_pct_on_lifted": 100.0,
+      "rtti_total_classes": 3,
+      "rtti_user_classes": [],
+      "struct_layouts_recovered": 7,
+      "imported_dlls": [
+        "KERNEL32.dll"
+      ],
+      "reconstruct_ms": 698.65,
+      "omni_elapsed_ms": 626.871,
+      "omni_throughput_mb_s": 0.278,
+      "omni_gears_executed": 12,
+      "missing_or_empty_files": []
+    },
+    {
+      "binary": "tinyexpr.dll",
+      "size_bytes": 211456,
+      "ground_truth": "tinyexpr.c (5 exports)",
+      "status": "complete",
+      "total_targets_analyzed": 5,
+      "fully_lifted_congruent_functions": 0,
+      "lifted_function_names": [],
+      "differential_congruence_pct_on_lifted": 0.0,
+      "rtti_total_classes": 3,
+      "rtti_user_classes": [],
+      "struct_layouts_recovered": 2,
+      "imported_dlls": [
+        "KERNEL32.dll"
+      ],
+      "reconstruct_ms": 238.95,
+      "omni_elapsed_ms": 693.107,
+      "omni_throughput_mb_s": 0.291,
+      "omni_gears_executed": 12,
+      "missing_or_empty_files": []
+    },
+    {
+      "binary": "poly_test.dll",
+      "size_bytes": 104960,
+      "ground_truth": "poly_test.cpp (4 exports + 3 C++ RTTI classes)",
+      "status": "complete",
+      "total_targets_analyzed": 10,
+      "fully_lifted_congruent_functions": 3,
+      "lifted_function_names": [
+        "FastProcessor_v0_slot1",
+        "FastProcessor_v0_slot2",
+        "CryptoProcessor_v0_slot1"
+      ],
+      "differential_congruence_pct_on_lifted": 100.0,
+      "rtti_total_classes": 8,
+      "rtti_user_classes": [
+        "class IProcessor `RTTI Type Descriptor Name'",
+        "class FastProcessor `RTTI Type Descriptor Name'",
+        "class CryptoProcessor `RTTI Type Descriptor Name'"
+      ],
+      "struct_layouts_recovered": 1,
+      "imported_dlls": [
+        "KERNEL32.dll"
+      ],
+      "reconstruct_ms": 246.76,
+      "omni_elapsed_ms": 412.364,
+      "omni_throughput_mb_s": 0.243,
+      "omni_gears_executed": 12,
+      "missing_or_empty_files": []
+    },
+    {
+      "binary": "multi_poly.dll",
+      "size_bytes": 104960,
+      "ground_truth": "multi_poly.cpp (4 exports + Multiple Inheritance RTTI)",
+      "status": "complete",
+      "total_targets_analyzed": 11,
+      "fully_lifted_congruent_functions": 2,
+      "lifted_function_names": [
+        "DualDevice_v0_slot1",
+        "DualDevice_v1_slot1"
+      ],
+      "differential_congruence_pct_on_lifted": 100.0,
+      "rtti_total_classes": 8,
+      "rtti_user_classes": [
+        "class IReader `RTTI Type Descriptor Name'",
+        "class IWriter `RTTI Type Descriptor Name'",
+        "class DualDevice `RTTI Type Descriptor Name'"
+      ],
+      "struct_layouts_recovered": 1,
+      "imported_dlls": [
+        "KERNEL32.dll"
+      ],
+      "reconstruct_ms": 173.74,
+      "omni_elapsed_ms": 450.083,
+      "omni_throughput_mb_s": 0.222,
+      "omni_gears_executed": 12,
+      "missing_or_empty_files": []
+    }
+  ],
+  "host_cpu_differential_checks": [
+    {
+      "target": "poly_test.dll :: FastProcessor::process & reset",
+      "host_outputs": [
+        31,
+        32,
+        31
+      ],
+      "twin_outputs": [
+        31,
+        32,
+        31
+      ],
+      "match": true
+    },
+    {
+      "target": "poly_test.dll :: CryptoProcessor::process",
+      "host_outputs": [
+        4925,
+        112
+      ],
+      "twin_outputs": [
+        4925,
+        112
+      ],
+      "match": true
+    },
+    {
+      "target": "multi_poly.dll :: DualDevice(100) -> write(777) -> read()",
+      "host_outputs": [
+        100,
+        777
+      ],
+      "twin_outputs": [
+        100,
+        777
+      ],
+      "match": true
+    },
+    {
+      "target": "cjson.dll :: AddItemToArray + GetArraySize + IsArray/IsTrue/IsString",
+      "host_outputs": [
+        3,
+        1,
+        1,
+        1,
+        0
+      ],
+      "twin_outputs": [
+        3,
+        1,
+        1,
+        1,
+        0
+      ],
+      "match": true
+    }
+  ],
+  "electron_asar_copy_check": {
+    "project": "Electron ASAR Ground-Truth Tree",
+    "files_packed": 3,
+    "files_reconstructed": 3,
+    "congruence_pct": 100.0,
+    "byte_for_byte_sha256_match": true
+  }
+}
