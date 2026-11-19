@@ -459,7 +459,7 @@ def _discover_crt_allocator_map(
         "malloc": "malloc", "free": "free", "realloc": "realloc",
         "strlen": "strlen", "strcmp": "strcmp", "strncmp": "strncmp",
         "memcpy": "memcpy", "strcpy": "strcpy", "tolower": "tolower",
-        "sprintf": "sprintf", "strtod": "strtod",
+        "sprintf": "sprintf", "strtod": "strtod", "printf": "printf",
     }
     heap_names = {"HeapAlloc": "malloc", "HeapFree": "free", "HeapReAlloc": "realloc"}
 
@@ -496,6 +496,7 @@ def _discover_crt_allocator_map(
             (b"\x4c\x8b\xd9\x48\x2b\xca\xf6\xc2\x07", "strcpy"),
             (b"\x48\x89\x54\x24\x10\x4c\x89\x44\x24\x18\x4c\x89\x4c\x24\x20\x53\x56\x57\x48\x83\xec\x30\x48\x8b\xda\x48\x8d\x74\x24\x60", "sprintf"),
             (b"\x48\x89\x54\x24\x10\x4c\x89\x44\x24\x18\x4c\x89\x4c\x24\x20\x53\x56\x57\x48\x83\xec\x30\x48\x8b\xfa\x48\x8d\x74\x24\x60", "sscanf"),
+            (b"\x48\x89\x4c\x24\x08\x48\x89\x54\x24\x10\x4c\x89\x44\x24\x18\x4c\x89\x4c\x24\x20\x53\x56\x57\x48\x83\xec\x30\x48\x8b\xf9\x48\x8d\x74\x24\x58\xb9\x01\x00\x00\x00", "printf"),
             (b"\x40\x53\x48\x83\xec\x20\x48\x8b\xd9\xeb\x0f\x48\x8b\xcb\xe8", "malloc"),
         ):
             idx_hit = sec_bytes.find(pat)
@@ -888,6 +889,7 @@ def _lift_x64_function_full(
     vcall_sites: Dict[int, str] = {}
     rw_rip_rvas: Dict[int, int] = {}
     ro_lea_rvas: Dict[int, int] = {}
+    fn_lea_rvas: Dict[int, int] = {}
     crt_lea_sites: Dict[int, int] = {}
     fcall_sites: Dict[int, bool] = {}
     icall_sites: Dict[int, str] = {}
@@ -1061,6 +1063,8 @@ def _lift_x64_function_full(
             return "    rax = aether_sscanf(rcx, rdx, r8, r9);"
         if kind == "strtod":
             return "    xmm0 = aether_f64_to_bits(aether_strtod(rcx, rdx));"
+        if kind == "printf":
+            return "    rax = aether_printf(rcx, rdx, r8, r9);"
         if kind == "noop":
             return "    /* __security_check_cookie */"
         if kind == "tolower":
@@ -1338,6 +1342,11 @@ def _lift_x64_function_full(
                 rw_rip_rvas[addr] = rip_t
                 c_lines.append(f"    {dst_info[0]} = aether_data_ptr(0x{rip_t:x});")
                 continue
+            if dst_info and rip_t is not None and exec_ranges and any(lo <= rip_t < hi for lo, hi in exec_ranges):
+                fn_lea_rvas[addr] = rip_t
+                discovered_internal_rvas.append(rip_t)
+                c_lines.append(f"    {dst_info[0]} = aether_fn_ptr(0x{rip_t:x});")
+                continue
             if dst_info and rip_t is not None and crt_alloc_map and rip_t in crt_alloc_map:
                 _crt_id = {"malloc": 1, "free": 2, "realloc": 3}.get(crt_alloc_map[rip_t])
                 if _crt_id is not None:
@@ -1596,6 +1605,7 @@ def _lift_x64_function_full(
         meta_out["vcall_sites"] = vcall_sites
         meta_out["rw_rip_rvas"] = rw_rip_rvas
         meta_out["ro_lea_rvas"] = ro_lea_rvas
+        meta_out["fn_lea_rvas"] = fn_lea_rvas
         meta_out["crt_lea_sites"] = crt_lea_sites
         meta_out["fcall_sites"] = fcall_sites
         meta_out["icall_sites"] = icall_sites
@@ -1636,6 +1646,7 @@ def _simulate_x64_insns(
     rw_data_base: int = 0,
     ro_lea_rvas: Optional[Dict[int, int]] = None,
     ro_arena_addrs: Optional[Dict[int, int]] = None,
+    fn_lea_rvas: Optional[Dict[int, int]] = None,
     crt_lea_sites: Optional[Dict[int, int]] = None,
     fcall_sites: Optional[Dict[int, bool]] = None,
     icall_sites: Optional[Dict[int, str]] = None,
@@ -1666,6 +1677,7 @@ def _simulate_x64_insns(
     rw_map = rw_rip_rvas or {}
     ro_lea_map = ro_lea_rvas or {}
     ro_addr_map = ro_arena_addrs or {}
+    fn_lea_map = fn_lea_rvas or {}
     crt_lea_map = crt_lea_sites or {}
     fcall_map = fcall_sites or {}
     icall_map = icall_sites or {}
@@ -1941,6 +1953,8 @@ def _simulate_x64_insns(
                 _write_reg(parts[0], 0x1B000 + (rw_map[addr_cur] - rw_data_base))
             elif dst_info and addr_cur in ro_lea_map:
                 _write_reg(parts[0], ro_addr_map.get(ro_lea_map[addr_cur], 0))
+            elif dst_info and addr_cur in fn_lea_map:
+                _write_reg(parts[0], fn_lea_map[addr_cur])
             elif dst_info and dst_info[0] in anchor_set and _RIP_REL_RE.match(parts[1].strip()):
                 _write_reg(parts[0], 0)
             else:
@@ -2073,6 +2087,8 @@ def _simulate_x64_insns(
                 regs["rax"] = 0
             elif crt_kind == "strtod":
                 xmms["xmm0"] = _to_int64(arena.c_strtod(regs["rcx"], regs["rdx"]))
+            elif crt_kind == "printf":
+                regs["rax"] = 0
             elif crt_kind == "noop":
                 pass
             elif crt_kind == "tolower":
@@ -2115,6 +2131,7 @@ def _simulate_x64_insns(
                         rw_data_base=rw_data_base,
                         ro_lea_rvas=callee.get("ro_lea_rvas"),
                         ro_arena_addrs=ro_addr_map,
+                        fn_lea_rvas=callee.get("fn_lea_rvas"),
                         crt_lea_sites=callee.get("crt_lea_sites"),
                         fcall_sites=callee.get("fcall_sites"),
                         icall_sites=callee.get("icall_sites"),
@@ -2148,6 +2165,7 @@ def _simulate_x64_insns(
                     rw_data_base=rw_data_base,
                     ro_lea_rvas=callee.get("ro_lea_rvas"),
                     ro_arena_addrs=ro_addr_map,
+                    fn_lea_rvas=callee.get("fn_lea_rvas"),
                     crt_lea_sites=callee.get("crt_lea_sites"),
                     fcall_sites=callee.get("fcall_sites"),
                     icall_sites=callee.get("icall_sites"),
@@ -2186,6 +2204,7 @@ def _simulate_x64_insns(
                         rw_data_base=rw_data_base,
                         ro_lea_rvas=callee.get("ro_lea_rvas"),
                         ro_arena_addrs=ro_addr_map,
+                        fn_lea_rvas=callee.get("fn_lea_rvas"),
                         crt_lea_sites=callee.get("crt_lea_sites"),
                         fcall_sites=callee.get("fcall_sites"),
                         icall_sites=callee.get("icall_sites"),
@@ -2221,6 +2240,7 @@ def _simulate_x64_insns(
                     rw_data_base=rw_data_base,
                     ro_lea_rvas=callee.get("ro_lea_rvas"),
                     ro_arena_addrs=ro_addr_map,
+                    fn_lea_rvas=callee.get("fn_lea_rvas"),
                     crt_lea_sites=callee.get("crt_lea_sites"),
                     fcall_sites=callee.get("fcall_sites"),
                     icall_sites=callee.get("icall_sites"),
@@ -2315,6 +2335,8 @@ def _execute_lifted_c_ast(
         "aether_sprintf": lambda buf, fmt, a1, a2, a3: _to_int64(arena.c_sprintf(int(buf), int(fmt), int(a1), int(a2), int(a3))),
         "aether_sscanf": lambda *args: 0,
         "aether_strtod": lambda s_ptr, end_ptr: _bits_to_f64(arena.c_strtod(int(s_ptr), int(end_ptr))),
+        "aether_printf": lambda *args: 0,
+        "aether_fn_ptr": lambda r_rva: _to_int64(int(r_rva)),
         "aether_pcmpeqb64": _pcmpeqb64,
         "aether_tolower": lambda c: _to_int64(_tolower_ascii(int(c))),
         "aether_memcpy": lambda dst, src, sz: _to_int64(arena.c_memcpy(int(dst), int(src), int(sz))),
@@ -2820,6 +2842,16 @@ def reconstruct_project(
             "    if (!s) { if (endptr) *(char**)(uintptr_t)endptr = NULL; return 0.0; }",
             "    return strtod((const char*)(uintptr_t)s, (char**)(uintptr_t)endptr);",
             "}",
+            "static inline int64_t aether_printf(int64_t fmt, int64_t a1, int64_t a2, int64_t a3) {",
+            "    if (!fmt) return -1LL;",
+            "    const char* fs = (const char*)(uintptr_t)fmt;",
+            "    if (strchr(fs, 'g') || strchr(fs, 'f') || strchr(fs, 'e')) {",
+            "        double d_val = 0.0;",
+            "        memcpy(&d_val, &a1, 8);",
+            "        return (int64_t)printf(fs, d_val);",
+            "    }",
+            "    return (int64_t)printf(fs, a1, a2, a3);",
+            "}",
             "static inline int64_t aether_pcmpeqb64(int64_t a, int64_t b) {",
             "    uint64_t out = 0, ua = (uint64_t)a, ub = (uint64_t)b;",
             "    for (int i = 0; i < 8; ++i) {",
@@ -3203,6 +3235,7 @@ def reconstruct_project(
                 "vcall_sites": lift_meta.get("vcall_sites", {}),
                 "rw_rip_rvas": lift_meta.get("rw_rip_rvas", {}),
                 "ro_lea_rvas": lift_meta.get("ro_lea_rvas", {}),
+                "fn_lea_rvas": lift_meta.get("fn_lea_rvas", {}),
                 "crt_lea_sites": lift_meta.get("crt_lea_sites", {}),
                 "fcall_sites": lift_meta.get("fcall_sites", {}),
                 "icall_sites": lift_meta.get("icall_sites", {}),
@@ -3237,6 +3270,7 @@ def reconstruct_project(
                 rec["vcall_sites"] = lift_meta2.get("vcall_sites", rec["vcall_sites"])
                 rec["rw_rip_rvas"] = lift_meta2.get("rw_rip_rvas", rec["rw_rip_rvas"])
                 rec["ro_lea_rvas"] = lift_meta2.get("ro_lea_rvas", rec["ro_lea_rvas"])
+                rec["fn_lea_rvas"] = lift_meta2.get("fn_lea_rvas", rec["fn_lea_rvas"])
                 rec["crt_lea_sites"] = lift_meta2.get("crt_lea_sites", rec["crt_lea_sites"])
                 rec["fcall_sites"] = lift_meta2.get("fcall_sites", rec["fcall_sites"])
                 rec["icall_sites"] = lift_meta2.get("icall_sites", rec["icall_sites"])
@@ -3406,6 +3440,7 @@ def reconstruct_project(
                         rw_data_base=rw_data_base,
                         ro_lea_rvas=rec.get("ro_lea_rvas"),
                         ro_arena_addrs=ro_arena_addrs,
+                        fn_lea_rvas=rec.get("fn_lea_rvas"),
                         crt_lea_sites=rec.get("crt_lea_sites"),
                         fcall_sites=rec.get("fcall_sites"),
                         icall_sites=rec.get("icall_sites"),
@@ -3565,6 +3600,18 @@ def reconstruct_project(
             "    (void)rva;",
             "    return 0;",
             "}",
+        ])
+        all_fn_leas = sorted({r for rec in records_list for r in rec.get("fn_lea_rvas", {}).values()})
+        header_lines.append("static inline int64_t aether_fn_ptr(int64_t rva) {")
+        for f_rva in all_fn_leas:
+            f_sym = rva_to_symbol.get(f_rva, f"sub_{f_rva:x}")
+            header_lines.append(f"    if (rva == 0x{f_rva:x}) return (int64_t)(uintptr_t)&{f_sym};")
+        header_lines.extend([
+            "    (void)rva;",
+            "    return 0;",
+            "}",
+        ])
+        header_lines.extend([
             "typedef double (*aether_fcall8_t)(double, double, double, double, double, double, double, double);",
             "typedef double (*aether_cfcall8_t)(int64_t, double, double, double, double, double, double, double);",
             "static inline double aether_fcall_f64(int64_t fn_ptr, int64_t x0, int64_t x1, int64_t x2, int64_t x3, int64_t x4, int64_t x5, int64_t x6, int64_t x7) {",

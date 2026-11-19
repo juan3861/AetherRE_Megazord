@@ -99,13 +99,13 @@
       "imported_dlls": [
         "KERNEL32.dll"
       ],
-      "reconstruct_ms": 19805.6,
+      "reconstruct_ms": 19218.08,
       "msvc_compiled": true,
       "compiler": "msvc_cl_x64",
       "compiled_twin_dll_bytes": 197632,
-      "compiled_twin_dll_sha256": "54e98a1399009056bdae76a94c0743d9d483f1527d7f69048e812ecd56aefdf4",
-      "omni_elapsed_ms": 204.159,
-      "omni_throughput_mb_s": 0.854,
+      "compiled_twin_dll_sha256": "97d29b4f16f317c7738f172a8081b1daca9c7e001e207b7a2ef9fe10e4447024",
+      "omni_elapsed_ms": 202.558,
+      "omni_throughput_mb_s": 0.861,
       "omni_gears_executed": 12,
       "missing_or_empty_files": []
     },
@@ -115,13 +115,14 @@
       "ground_truth": "tinyexpr.c (5 exports)",
       "status": "complete",
       "total_targets_analyzed": 5,
-      "fully_lifted_congruent_functions": 2,
-      "ctree_structured_functions": 1,
+      "fully_lifted_congruent_functions": 3,
+      "ctree_structured_functions": 2,
       "avg_goto_elimination_pct": 100.0,
       "ghidra_enriched_functions": 0,
       "lifted_function_names": [
         "te_eval",
-        "te_free"
+        "te_free",
+        "te_print"
       ],
       "differential_congruence_pct_on_lifted": 100.0,
       "rtti_total_classes": 3,
@@ -130,13 +131,13 @@
       "imported_dlls": [
         "KERNEL32.dll"
       ],
-      "reconstruct_ms": 602.41,
+      "reconstruct_ms": 603.58,
       "msvc_compiled": true,
       "compiler": "msvc_cl_x64",
-      "compiled_twin_dll_bytes": 146432,
-      "compiled_twin_dll_sha256": "4c7c8548700a225b0e1c2d809f1ee5fd4c0af315135f958ae6682cc7d4bdf5c9",
-      "omni_elapsed_ms": 213.597,
-      "omni_throughput_mb_s": 0.944,
+      "compiled_twin_dll_bytes": 173056,
+      "compiled_twin_dll_sha256": "0cfdfd0cd6da27c13c8f92fd29e90aaa02a898202d5b879808ef2092acfa1263",
+      "omni_elapsed_ms": 214.234,
+      "omni_throughput_mb_s": 0.941,
       "omni_gears_executed": 12,
       "missing_or_empty_files": []
     },
@@ -172,13 +173,13 @@
       "imported_dlls": [
         "KERNEL32.dll"
       ],
-      "reconstruct_ms": 522.21,
+      "reconstruct_ms": 452.65,
       "msvc_compiled": true,
       "compiler": "msvc_cl_x64",
       "compiled_twin_dll_bytes": 108032,
-      "compiled_twin_dll_sha256": "63e4196f148d348b046f377191edb4e88cfcaec66ca6f82c6bc1604c6a807e21",
-      "omni_elapsed_ms": 161.262,
-      "omni_throughput_mb_s": 0.621,
+      "compiled_twin_dll_sha256": "aa60f66d6c9e76ccf48ad99ff3978171fd996e78abfead94b880c933dca95397",
+      "omni_elapsed_ms": 156.002,
+      "omni_throughput_mb_s": 0.642,
       "omni_gears_executed": 12,
       "missing_or_empty_files": []
     },
@@ -215,13 +216,13 @@
       "imported_dlls": [
         "KERNEL32.dll"
       ],
-      "reconstruct_ms": 594.49,
+      "reconstruct_ms": 442.98,
       "msvc_compiled": true,
       "compiler": "msvc_cl_x64",
       "compiled_twin_dll_bytes": 108032,
-      "compiled_twin_dll_sha256": "7fad9cc32f048416ebf1e151296bd60a00070ac7c48fc97e35c0e167f80b27c0",
-      "omni_elapsed_ms": 152.466,
-      "omni_throughput_mb_s": 0.657,
+      "compiled_twin_dll_sha256": "e4b973a4a2529d50fec2da53d51a6ae55a64c1b36c34bfb824ef6ba42d110b63",
+      "omni_elapsed_ms": 155.351,
+      "omni_throughput_mb_s": 0.644,
       "omni_gears_executed": 12,
       "missing_or_empty_files": []
     }
@@ -304,7 +305,7 @@
         1,
         1,
         1,
-        2664373443440,
+        2156192438576,
         0
       ],
       "compiled_twin_outputs": [
@@ -312,7 +313,7 @@
         1,
         1,
         1,
-        2664373443440,
+        2156192438576,
         0
       ],
       "match": true
@@ -440,6 +441,16 @@
         14.0,
         47.0,
         7.6842944819
+      ],
+      "match": true
+    },
+    {
+      "target": "tinyexpr.dll <-> compiled twin :: Live AST te_print() via aether_printf + aether_ro_ptr",
+      "original_dll_outputs": [
+        14.0
+      ],
+      "compiled_twin_outputs": [
+        14.0
       ],
       "match": true
     }
