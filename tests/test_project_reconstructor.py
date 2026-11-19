@@ -200,8 +200,8 @@ def test_real_cpp_rtti_and_cjson_memory_twin_reconstruction(tmp_path: Path):
     cjson_rep = reconstruct_project(cjson_dll, tmp_path / "cjson_twin")
     assert cjson_rep.status == "complete"
     assert cjson_rep.total_exports_reconstructed == 78
-    assert cjson_rep.fully_lifted_functions >= 74
-    assert cjson_rep.ctree_structured_functions >= 74
+    assert cjson_rep.fully_lifted_functions == 78
+    assert cjson_rep.ctree_structured_functions == 78
     assert cjson_rep.ghidra_enriched_functions == 78
     assert cjson_rep.overall_congruence_pct == 100.0
     assert cjson_rep.struct_layouts_count >= 5
@@ -210,6 +210,10 @@ def test_real_cpp_rtti_and_cjson_memory_twin_reconstruction(tmp_path: Path):
         "cJSON_Compare",
         "cJSON_GetErrorPtr",
         "cJSON_InitHooks",
+        "cJSON_Parse",
+        "cJSON_ParseWithLength",
+        "cJSON_ParseWithLengthOpts",
+        "cJSON_ParseWithOpts",
         "cJSON_Print",
         "cJSON_PrintBuffered",
         "cJSON_PrintPreallocated",

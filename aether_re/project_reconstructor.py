@@ -277,6 +277,24 @@ class _MemoryArena:
         self.write_cstr(dst, rendered.decode("latin1"))
         return len(rendered)
 
+    def c_strtod(self, s_ptr: int, endptr_ptr: int) -> int:
+        if s_ptr < self.base:
+            if endptr_ptr >= self.base:
+                self.write(endptr_ptr, 8, 0)
+            return 0
+        raw_s = self.read_cstr(s_ptr).decode("latin1", errors="replace")
+        m = re.match(r"^\s*([+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)", raw_s)
+        if not m:
+            if endptr_ptr >= self.base:
+                self.write(endptr_ptr, 8, s_ptr)
+            return 0
+        if endptr_ptr >= self.base:
+            self.write(endptr_ptr, 8, s_ptr + m.end())
+        try:
+            return _f64_to_bits(float(m.group(1)))
+        except Exception:
+            return 0
+
     def init_ro_data(self, ro_arena_addrs: Dict[int, int], ro_bytes_map: Dict[int, bytes]) -> None:
         for rva, va in ro_arena_addrs.items():
             raw = ro_bytes_map.get(rva, b"")
@@ -405,6 +423,8 @@ def _uses_xmm_before_write(insns: List[Tuple[int, str, str]], target_xmm: str) -
         parts = [p.strip().lower() for p in op_str.split(",")] if op_str else []
         if not parts:
             continue
+        if mnem == "call":
+            return False
         if mnem in ("comisd", "ucomisd"):
             if any(p == target_xmm for p in parts):
                 return True
@@ -439,7 +459,7 @@ def _discover_crt_allocator_map(
         "malloc": "malloc", "free": "free", "realloc": "realloc",
         "strlen": "strlen", "strcmp": "strcmp", "strncmp": "strncmp",
         "memcpy": "memcpy", "strcpy": "strcpy", "tolower": "tolower",
-        "sprintf": "sprintf",
+        "sprintf": "sprintf", "strtod": "strtod",
     }
     heap_names = {"HeapAlloc": "malloc", "HeapFree": "free", "HeapReAlloc": "realloc"}
 
@@ -487,6 +507,19 @@ def _discover_crt_allocator_map(
             cand_sc = sec_chk_hit - 7
             if (cand_sc % 16 == 0 or cand_sc == 0) and sec_bytes[cand_sc : cand_sc + 3] == b"\x48\x3b\x0d":
                 text_crt_map[sec_rva + cand_sc] = "noop"
+
+        pos_st = 0
+        while True:
+            st_hit = sec_bytes.find(b"\x45\x33\xc0\xe9", pos_st)
+            if st_hit < 0:
+                break
+            if st_hit % 4 == 0 and st_hit + 8 <= len(sec_bytes):
+                disp_st = struct.unpack_from("<i", sec_bytes, st_hit + 4)[0]
+                tgt_off_st = st_hit + 8 + disp_st
+                if 0 <= tgt_off_st and tgt_off_st + 10 <= len(sec_bytes):
+                    if sec_bytes[tgt_off_st : tgt_off_st + 10] == b"\x48\x89\x5c\x24\x10\x57\x48\x83\xec\x50":
+                        text_crt_map[sec_rva + st_hit] = "strtod"
+            pos_st = st_hit + 1
 
         tolow_hit = sec_bytes.find(b"\x8d\x41\xbf\x83\xf8\x19")
         if tolow_hit >= 0:
@@ -1026,6 +1059,8 @@ def _lift_x64_function_full(
             return "    rax = aether_sprintf(rcx, rdx, r8, r9, aether_mem_read(rsp + 0x20, 8));"
         if kind == "sscanf":
             return "    rax = aether_sscanf(rcx, rdx, r8, r9);"
+        if kind == "strtod":
+            return "    xmm0 = aether_f64_to_bits(aether_strtod(rcx, rdx));"
         if kind == "noop":
             return "    /* __security_check_cookie */"
         if kind == "tolower":
@@ -2036,6 +2071,8 @@ def _simulate_x64_insns(
                 regs["rax"] = _to_int64(arena.c_sprintf(regs["rcx"], regs["rdx"], regs["r8"], regs["r9"], arena.read(regs["rsp"] + 0x20, 8)))
             elif crt_kind == "sscanf":
                 regs["rax"] = 0
+            elif crt_kind == "strtod":
+                xmms["xmm0"] = _to_int64(arena.c_strtod(regs["rcx"], regs["rdx"]))
             elif crt_kind == "noop":
                 pass
             elif crt_kind == "tolower":
@@ -2277,6 +2314,7 @@ def _execute_lifted_c_ast(
         "aether_strcpy": lambda dst, src: _to_int64(arena.c_strcpy(int(dst), int(src))),
         "aether_sprintf": lambda buf, fmt, a1, a2, a3: _to_int64(arena.c_sprintf(int(buf), int(fmt), int(a1), int(a2), int(a3))),
         "aether_sscanf": lambda *args: 0,
+        "aether_strtod": lambda s_ptr, end_ptr: _bits_to_f64(arena.c_strtod(int(s_ptr), int(end_ptr))),
         "aether_pcmpeqb64": _pcmpeqb64,
         "aether_tolower": lambda c: _to_int64(_tolower_ascii(int(c))),
         "aether_memcpy": lambda dst, src, sz: _to_int64(arena.c_memcpy(int(dst), int(src), int(sz))),
@@ -2346,7 +2384,7 @@ def _execute_lifted_c_ast(
     env["aether_vcall"] = _vcall_helper
 
     def _clean_c_stmt(s: str) -> str:
-        s = s.replace("(int64_t)", "").replace("(uint64_t)", "").replace("~0xffLL", "~0xff").replace("~0xffffLL", "~0xffff")
+        s = s.replace("(int64_t)", "").replace("(uint64_t)", "").replace("0xffLL", "0xff").replace("0xffffLL", "0xffff")
         return re.sub(r"\b(0x[0-9a-fA-F]+|\d+)ULL\b", r"\1", s)
 
     pc = 0
@@ -2777,6 +2815,10 @@ def reconstruct_project(
             "    if (!buf || !fmt) return -1LL;",
             "    (void)a2;",
             "    return (int64_t)sscanf((const char*)(uintptr_t)buf, (const char*)(uintptr_t)fmt, (void*)(uintptr_t)a1);",
+            "}",
+            "static inline double aether_strtod(int64_t s, int64_t endptr) {",
+            "    if (!s) { if (endptr) *(char**)(uintptr_t)endptr = NULL; return 0.0; }",
+            "    return strtod((const char*)(uintptr_t)s, (char**)(uintptr_t)endptr);",
             "}",
             "static inline int64_t aether_pcmpeqb64(int64_t a, int64_t b) {",
             "    uint64_t out = 0, ua = (uint64_t)a, ub = (uint64_t)b;",

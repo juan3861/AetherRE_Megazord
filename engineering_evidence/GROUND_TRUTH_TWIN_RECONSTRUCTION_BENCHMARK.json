@@ -8,9 +8,9 @@
       "ground_truth": "cJSON.c (78 exports)",
       "status": "complete",
       "total_targets_analyzed": 78,
-      "fully_lifted_congruent_functions": 74,
-      "ctree_structured_functions": 74,
-      "avg_goto_elimination_pct": 48.65,
+      "fully_lifted_congruent_functions": 78,
+      "ctree_structured_functions": 78,
+      "avg_goto_elimination_pct": 50.0,
       "ghidra_enriched_functions": 78,
       "lifted_function_names": [
         "cJSON_AddArrayToObject",
@@ -74,6 +74,10 @@
         "cJSON_IsString",
         "cJSON_IsTrue",
         "cJSON_Minify",
+        "cJSON_Parse",
+        "cJSON_ParseWithLength",
+        "cJSON_ParseWithLengthOpts",
+        "cJSON_ParseWithOpts",
         "cJSON_Print",
         "cJSON_PrintBuffered",
         "cJSON_PrintPreallocated",
@@ -95,13 +99,13 @@
       "imported_dlls": [
         "KERNEL32.dll"
       ],
-      "reconstruct_ms": 16648.03,
+      "reconstruct_ms": 19805.6,
       "msvc_compiled": true,
       "compiler": "msvc_cl_x64",
-      "compiled_twin_dll_bytes": 227328,
-      "compiled_twin_dll_sha256": "371fc197fa34a1d0d2e81f19e1e56af2c50c82bec63ae4e76b1cfb6502cf444e",
-      "omni_elapsed_ms": 228.888,
-      "omni_throughput_mb_s": 0.762,
+      "compiled_twin_dll_bytes": 197632,
+      "compiled_twin_dll_sha256": "54e98a1399009056bdae76a94c0743d9d483f1527d7f69048e812ecd56aefdf4",
+      "omni_elapsed_ms": 204.159,
+      "omni_throughput_mb_s": 0.854,
       "omni_gears_executed": 12,
       "missing_or_empty_files": []
     },
@@ -126,13 +130,13 @@
       "imported_dlls": [
         "KERNEL32.dll"
       ],
-      "reconstruct_ms": 675.67,
+      "reconstruct_ms": 602.41,
       "msvc_compiled": true,
       "compiler": "msvc_cl_x64",
-      "compiled_twin_dll_bytes": 145408,
-      "compiled_twin_dll_sha256": "311fc6d01ba54fc43942d413be827eb01aab226f8b888643a9937d53d1dfffea",
-      "omni_elapsed_ms": 211.167,
-      "omni_throughput_mb_s": 0.955,
+      "compiled_twin_dll_bytes": 146432,
+      "compiled_twin_dll_sha256": "4c7c8548700a225b0e1c2d809f1ee5fd4c0af315135f958ae6682cc7d4bdf5c9",
+      "omni_elapsed_ms": 213.597,
+      "omni_throughput_mb_s": 0.944,
       "omni_gears_executed": 12,
       "missing_or_empty_files": []
     },
@@ -168,13 +172,13 @@
       "imported_dlls": [
         "KERNEL32.dll"
       ],
-      "reconstruct_ms": 502.35,
+      "reconstruct_ms": 522.21,
       "msvc_compiled": true,
       "compiler": "msvc_cl_x64",
       "compiled_twin_dll_bytes": 108032,
-      "compiled_twin_dll_sha256": "210dfdd80ee3a982a26b9ce17bc8722b75908a29695612c6937a0457a524c319",
-      "omni_elapsed_ms": 176.569,
-      "omni_throughput_mb_s": 0.567,
+      "compiled_twin_dll_sha256": "63e4196f148d348b046f377191edb4e88cfcaec66ca6f82c6bc1604c6a807e21",
+      "omni_elapsed_ms": 161.262,
+      "omni_throughput_mb_s": 0.621,
       "omni_gears_executed": 12,
       "missing_or_empty_files": []
     },
@@ -211,13 +215,13 @@
       "imported_dlls": [
         "KERNEL32.dll"
       ],
-      "reconstruct_ms": 521.98,
+      "reconstruct_ms": 594.49,
       "msvc_compiled": true,
       "compiler": "msvc_cl_x64",
       "compiled_twin_dll_bytes": 108032,
-      "compiled_twin_dll_sha256": "ede0557855e7622b4124a53ebf5f92f925c58abb16c791dc1168bb53a2106a0a",
-      "omni_elapsed_ms": 159.72,
-      "omni_throughput_mb_s": 0.627,
+      "compiled_twin_dll_sha256": "7fad9cc32f048416ebf1e151296bd60a00070ac7c48fc97e35c0e167f80b27c0",
+      "omni_elapsed_ms": 152.466,
+      "omni_throughput_mb_s": 0.657,
       "omni_gears_executed": 12,
       "missing_or_empty_files": []
     }
@@ -300,7 +304,7 @@
         1,
         1,
         1,
-        1817156433584,
+        2664373443440,
         0
       ],
       "compiled_twin_outputs": [
@@ -308,7 +312,7 @@
         1,
         1,
         1,
-        1817156433584,
+        2664373443440,
         0
       ],
       "match": true
@@ -396,6 +400,20 @@
       "compiled_twin_outputs": [
         "{\"n\":42.5,\"s\":\"aether\",\"ok\":true}",
         "{\"n\":42.5,\"s\":\"aether\",\"ok\":true}"
+      ],
+      "match": true
+    },
+    {
+      "target": "compiled twin cjson :: Full Live cJSON_Parse -> DOM -> cJSON_PrintUnformatted Roundtrip (78/78)",
+      "original_dll_outputs": [
+        3.14159,
+        "aether_78",
+        "{\"msg\":\"aether_78\",\"pi\":3.14159,\"arr\":[1,2,3],\"ok\":true}"
+      ],
+      "compiled_twin_outputs": [
+        3.14159,
+        "aether_78",
+        "{\"msg\":\"aether_78\",\"pi\":3.14159,\"arr\":[1,2,3],\"ok\":true}"
       ],
       "match": true
     },
