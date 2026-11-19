@@ -122,6 +122,37 @@ def _run_compiled_twin_interop_checks(reconstructed_dir: Path) -> List[Dict[str,
         "match": orig_cry == twin_cry == [4925, 112],
     })
 
+    # Full C++ polymorphic lifecycle inside compiled twin_poly (vtable init + vcall + virtual destructor)
+    twin_poly.create_processor.argtypes = [ctypes.c_int]
+    twin_poly.create_processor.restype = ctypes.c_void_p
+    twin_poly.execute_processor.argtypes = [ctypes.c_void_p, ctypes.c_int]
+    twin_poly.execute_processor.restype = ctypes.c_int
+    twin_poly.reset_processor.argtypes = [ctypes.c_void_p]
+    twin_poly.destroy_processor.argtypes = [ctypes.c_void_p]
+
+    orig_poly_life = []
+    twin_poly_life = []
+    for kind in (1, 2):
+        po = orig_poly.create_processor(kind)
+        pt = twin_poly.create_processor(kind)
+        orig_poly_life.append(orig_poly.execute_processor(po, 10))
+        twin_poly_life.append(twin_poly.execute_processor(pt, 10))
+        orig_poly_life.append(orig_poly.execute_processor(po, 25))
+        twin_poly_life.append(twin_poly.execute_processor(pt, 25))
+        orig_poly.reset_processor(po)
+        twin_poly.reset_processor(pt)
+        orig_poly_life.append(orig_poly.execute_processor(po, 10))
+        twin_poly_life.append(twin_poly.execute_processor(pt, 10))
+        orig_poly.destroy_processor(po)
+        twin_poly.destroy_processor(pt)
+
+    checks.append({
+        "target": "compiled twin poly_test :: Full C++ VTable Lifecycle (create/execute/reset/destroy x2)",
+        "original_dll_outputs": orig_poly_life,
+        "compiled_twin_outputs": twin_poly_life,
+        "match": orig_poly_life == twin_poly_life == [31, 77, 31, 4925, 97, 4925],
+    })
+
     # 2. multi_poly.dll <-> compiled multi_poly/reconstructed_twin.dll (Multiple Inheritance live heap)
     orig_mp = ctypes.CDLL(str(ROOT / "external_test_repos" / "cpp_poly" / "multi_poly.dll"))
     twin_mp = ctypes.CDLL(str(reconstructed_dir / "multi_poly" / "reconstructed_twin.dll"))
@@ -148,6 +179,31 @@ def _run_compiled_twin_interop_checks(reconstructed_dir: Path) -> List[Dict[str,
         "original_dll_outputs": [100, 777],
         "compiled_twin_outputs": [twin_init, orig_after_twin_write],
         "match": [twin_init, orig_after_twin_write] == [100, 777],
+    })
+
+    twin_mp.create_dual_device.argtypes = [ctypes.c_int]
+    twin_mp.create_dual_device.restype = ctypes.c_void_p
+    twin_mp.read_from_device.argtypes = [ctypes.c_void_p]
+    twin_mp.read_from_device.restype = ctypes.c_int
+    twin_mp.write_to_device.argtypes = [ctypes.c_void_p, ctypes.c_int]
+    twin_mp.destroy_dual_device.argtypes = [ctypes.c_void_p]
+
+    do = orig_mp.create_dual_device(42)
+    dt = twin_mp.create_dual_device(42)
+    mp_orig_seq = [orig_mp.read_from_device(do)]
+    mp_twin_seq = [twin_mp.read_from_device(dt)]
+    orig_mp.write_to_device(do, 99)
+    twin_mp.write_to_device(dt, 99)
+    mp_orig_seq.append(orig_mp.read_from_device(do))
+    mp_twin_seq.append(twin_mp.read_from_device(dt))
+    orig_mp.destroy_dual_device(do)
+    twin_mp.destroy_dual_device(dt)
+
+    checks.append({
+        "target": "compiled twin multi_poly :: Full Multiple-Inheritance Lifecycle (create/read/write/destroy)",
+        "original_dll_outputs": mp_orig_seq,
+        "compiled_twin_outputs": mp_twin_seq,
+        "match": mp_orig_seq == mp_twin_seq,
     })
 
     # 3. cjson.dll <-> compiled cjson/reconstructed_twin.dll (Live cJSON DOM heap tree!)
@@ -328,6 +384,27 @@ def _run_compiled_twin_interop_checks(reconstructed_dir: Path) -> List[Dict[str,
         ),
     })
 
+    twin_cj.cJSON_Compare.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int]
+    twin_cj.cJSON_Compare.restype = ctypes.c_int
+    cmp_o1 = twin_cj.cJSON_CreateObject()
+    cmp_o2 = twin_cj.cJSON_CreateObject()
+    cmp_o3 = twin_cj.cJSON_CreateObject()
+    twin_cj.cJSON_AddItemToObject(cmp_o1, b"v", twin_cj.cJSON_CreateNumber(42.5))
+    twin_cj.cJSON_AddItemToObject(cmp_o2, b"v", twin_cj.cJSON_CreateNumber(42.5))
+    twin_cj.cJSON_AddItemToObject(cmp_o3, b"v", twin_cj.cJSON_CreateNumber(99.0))
+    cmp_eq = twin_cj.cJSON_Compare(cmp_o1, cmp_o2, 1)
+    cmp_neq = twin_cj.cJSON_Compare(cmp_o1, cmp_o3, 1)
+    twin_cj.cJSON_Delete(cmp_o1)
+    twin_cj.cJSON_Delete(cmp_o2)
+    twin_cj.cJSON_Delete(cmp_o3)
+
+    checks.append({
+        "target": "compiled twin cjson :: Live SIMD cJSON_Compare(equal/unequal objects)",
+        "original_dll_outputs": [1, 0],
+        "compiled_twin_outputs": [cmp_eq, cmp_neq],
+        "match": cmp_eq == 1 and cmp_neq == 0,
+    })
+
     # Also verify compiled twin cJSON_AddItemToArray on _MemoryArena / AST matches expected behavior
     cj_rep = json.loads((reconstructed_dir / "cjson" / "twin_congruence_report.json").read_text(encoding="utf-8"))
     cj_fns = {f["name"]: f["lifted_c_code"] for f in cj_rep["functions"]}
@@ -506,8 +583,8 @@ def main() -> int:
         "",
         "## 4. Limitações Reais Observadas (Verdade Radical)",
         "",
-        "- Todos os 4 projetos C gêmeos gerados (`cjson`, `tinyexpr`, `poly_test`, `multi_poly`) compilam nativamente em MSVC x64 `/O2` sem erros (incluindo resolução de até 128 sub-rotinas internas `.text` e tabelas RVA de `switch`).",
-        f"- Em `cjson.dll`, **{cj_lifted}/{cj_total}** exports são 100% elevados (incluindo `cJSON_Minify` com jump-table RVA, `cJSON_CreateIntArray`/`CreateFloatArray` via SIMD `movd`/`movss`/`cvtdq2pd`/`cvtps2pd`, `cJSON_SetValuestring` via `strcpy`, além de construtores, DOM, `cJSON_Delete` recursivo, `cJSON_Duplicate`, `cJSON_GetObjectItem*`, `cJSON_ReplaceItem*` e XMM/CRT), com **{cj_ghidra}/{cj_total}** enriquecidos via Ghidra. Os {cj_rem} exports restantes (`cJSON_Parse*`/`Print*`/`Compare`/`InitHooks`/`GetErrorPtr`/`Version` — dependentes de `.data` mutável ou `sprintf`/`strtod`) mantêm esqueleto compilável + structs recuperadas; na `tinyexpr.dll`, **{te_lifted}/{te_total}** (`te_free` com switch `sub_3410` + `aether_free`) atinge 100%, enquanto `te_eval`/`te_compile`/`te_interp`/`te_print` envolvem callbacks indiretos em nós AST ou formatação CRT.",
+        "- Todos os 4 projetos C gêmeos gerados (`cjson`, `tinyexpr`, `poly_test`, `multi_poly`) compilam nativamente em MSVC x64 `/O2` sem erros (incluindo resolução de até 128 sub-rotinas internas `.text`, tabelas RVA de `switch` e despacho virtual C++ RTTI via `aether_vtable_ptr`/`aether_vcall`).",
+        f"- Em `cjson.dll`, **{cj_lifted}/{cj_total}** exports são 100% elevados (incluindo `cJSON_Compare` via SIMD `movdqa`/`andpd`/`maxsd`, `cJSON_Minify` com jump-table RVA, `cJSON_CreateIntArray`/`CreateFloatArray` via `movd`/`movss`/`cvtdq2pd`/`cvtps2pd`, `cJSON_SetValuestring` via `strcpy`, além de construtores, DOM, `cJSON_Delete` recursivo, `cJSON_Duplicate`, `cJSON_GetObjectItem*`, `cJSON_ReplaceItem*` e XMM/CRT), com **{cj_ghidra}/{cj_total}** enriquecidos via Ghidra. Os {cj_rem} exports restantes (`cJSON_Parse*`/`Print*`/`InitHooks`/`GetErrorPtr`/`Version` — dependentes de `.data` mutável ou `sprintf`/`strtod`) mantêm esqueleto compilável + structs recuperadas; em `poly_test.dll` (**9/10**) e `multi_poly.dll` (**10/11**), todos os factories, wrappers polimórficos e destrutores virtuais são 100% elevados (restando apenas `_purecall`); na `tinyexpr.dll`, **{te_lifted}/{te_total}** (`te_free` com switch `sub_3410` + `aether_free`) atinge 100%, enquanto `te_eval`/`te_compile`/`te_interp`/`te_print` envolvem callbacks indiretos em nós AST ou formatação CRT.",
         "",
     ])
     md_out.write_text("\n".join(md_lines), encoding="utf-8")

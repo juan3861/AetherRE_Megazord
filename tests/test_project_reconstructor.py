@@ -12,7 +12,14 @@ from aether_re.project_reconstructor import (
     compile_reconstructed_project,
     reconstruct_project,
 )
-from tests.test_electron_asar_forensics import _build_synthetic_asar
+try:
+    from tests.test_electron_asar_forensics import _build_synthetic_asar
+except ModuleNotFoundError:
+    import sys as _sys
+    _tests_dir = str(Path(__file__).resolve().parent)
+    if _tests_dir not in _sys.path:
+        _sys.path.insert(0, _tests_dir)
+    from test_electron_asar_forensics import _build_synthetic_asar
 
 
 def _build_synthetic_pe64_with_exports() -> bytes:
@@ -175,10 +182,13 @@ def test_real_cpp_rtti_and_cjson_memory_twin_reconstruction(tmp_path: Path):
 
     poly_rep = reconstruct_project(poly_dll, tmp_path / "poly_twin")
     assert poly_rep.status == "complete"
-    assert poly_rep.fully_lifted_functions >= 3
+    assert poly_rep.fully_lifted_functions >= 9
     assert poly_rep.overall_congruence_pct == 100.0
     assert any("FastProcessor" in c for c in poly_rep.rtti_classes)
     assert any("CryptoProcessor" in c for c in poly_rep.rtti_classes)
+    poly_map = {f["name"]: f for f in poly_rep.functions}
+    for req_poly in ("create_processor", "execute_processor", "reset_processor", "destroy_processor"):
+        assert poly_map[req_poly]["is_fully_lifted"] is True, req_poly
 
     poly_fns = {f["name"]: f["lifted_c_code"] for f in poly_rep.functions}
     arena = _MemoryArena()
@@ -190,13 +200,14 @@ def test_real_cpp_rtti_and_cjson_memory_twin_reconstruction(tmp_path: Path):
     cjson_rep = reconstruct_project(cjson_dll, tmp_path / "cjson_twin")
     assert cjson_rep.status == "complete"
     assert cjson_rep.total_exports_reconstructed == 78
-    assert cjson_rep.fully_lifted_functions >= 66
-    assert cjson_rep.ctree_structured_functions >= 66
+    assert cjson_rep.fully_lifted_functions >= 67
+    assert cjson_rep.ctree_structured_functions >= 67
     assert cjson_rep.ghidra_enriched_functions == 78
     assert cjson_rep.overall_congruence_pct == 100.0
     assert cjson_rep.struct_layouts_count >= 5
     lifted_map = {f["name"]: f for f in cjson_rep.functions}
     for req_sym in (
+        "cJSON_Compare",
         "cJSON_CreateArray",
         "cJSON_CreateNumber",
         "cJSON_CreateIntArray",
@@ -216,6 +227,18 @@ def test_real_cpp_rtti_and_cjson_memory_twin_reconstruction(tmp_path: Path):
         assert lifted_map[req_sym]["is_fully_lifted"] is True, req_sym
     assert lifted_map["cJSON_CreateArray"]["returns_double"] is False
     assert lifted_map["cJSON_CreateNumber"]["takes_double_arg0"] is True
+
+    mp_dll = repo_root / "external_test_repos" / "cpp_poly" / "multi_poly.dll"
+    if mp_dll.is_file():
+        mp_rep = reconstruct_project(mp_dll, tmp_path / "multi_poly_twin")
+        assert mp_rep.status == "complete"
+        assert mp_rep.fully_lifted_functions >= 10
+        assert mp_rep.overall_congruence_pct == 100.0
+        mp_map = {f["name"]: f for f in mp_rep.functions}
+        for req_mp in ("create_dual_device", "read_from_device", "write_to_device", "destroy_dual_device"):
+            assert mp_map[req_mp]["is_fully_lifted"] is True, req_mp
+        build_mp = compile_reconstructed_project(tmp_path / "multi_poly_twin")
+        assert build_mp["compiled"] is True
 
     te_dll = repo_root / "external_test_repos" / "tinyexpr" / "tinyexpr.dll"
     if te_dll.is_file():
