@@ -200,14 +200,16 @@ def test_real_cpp_rtti_and_cjson_memory_twin_reconstruction(tmp_path: Path):
     cjson_rep = reconstruct_project(cjson_dll, tmp_path / "cjson_twin")
     assert cjson_rep.status == "complete"
     assert cjson_rep.total_exports_reconstructed == 78
-    assert cjson_rep.fully_lifted_functions >= 67
-    assert cjson_rep.ctree_structured_functions >= 67
+    assert cjson_rep.fully_lifted_functions >= 69
+    assert cjson_rep.ctree_structured_functions >= 69
     assert cjson_rep.ghidra_enriched_functions == 78
     assert cjson_rep.overall_congruence_pct == 100.0
     assert cjson_rep.struct_layouts_count >= 5
     lifted_map = {f["name"]: f for f in cjson_rep.functions}
     for req_sym in (
         "cJSON_Compare",
+        "cJSON_GetErrorPtr",
+        "cJSON_InitHooks",
         "cJSON_CreateArray",
         "cJSON_CreateNumber",
         "cJSON_CreateIntArray",
@@ -244,9 +246,10 @@ def test_real_cpp_rtti_and_cjson_memory_twin_reconstruction(tmp_path: Path):
     if te_dll.is_file():
         te_rep = reconstruct_project(te_dll, tmp_path / "tinyexpr_twin")
         assert te_rep.status == "complete"
-        assert te_rep.fully_lifted_functions >= 1
+        assert te_rep.fully_lifted_functions >= 2
         assert te_rep.overall_congruence_pct == 100.0
         te_map = {f["name"]: f for f in te_rep.functions}
+        assert te_map["te_eval"]["is_fully_lifted"] is True
         assert te_map["te_free"]["is_fully_lifted"] is True
         build_te = compile_reconstructed_project(tmp_path / "tinyexpr_twin")
         assert build_te["compiled"] is True

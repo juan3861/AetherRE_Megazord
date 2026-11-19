@@ -745,6 +745,7 @@ def _lift_x64_function_full(
     crt_alloc_map: Optional[Dict[int, str]] = None,
     callee_sigs: Optional[Dict[int, Tuple[bool, bool, bool]]] = None,
     vtable_arena_addrs: Optional[Dict[int, int]] = None,
+    rw_ranges: Optional[List[Tuple[int, int]]] = None,
     meta_out: Optional[Dict[str, Any]] = None,
 ) -> Tuple[str, List[Tuple[int, str, str]], bool, bool, Dict[int, int], bool, List[int]]:
     """Lifts an x86_64 function byte slice into compilable C code, IR, ro-constants, CRT calls, and internal callees."""
@@ -765,6 +766,9 @@ def _lift_x64_function_full(
     jump_table_targets: Dict[str, List[int]] = {}
     vtable_leas: Dict[int, int] = {}
     vcall_sites: Dict[int, str] = {}
+    rw_rip_rvas: Dict[int, int] = {}
+    crt_lea_sites: Dict[int, int] = {}
+    fcall_sites: Dict[int, bool] = {}
 
     for insn in md.disasm(code_bytes, base_rva):
         mnem = insn.mnemonic.lower()
@@ -891,6 +895,15 @@ def _lift_x64_function_full(
             ro_val, ro_w = ro
             ro_rip_values[addr_i] = ro_val
             return f"((int64_t)0x{ro_val:x}ULL)", ro_w
+        if rw_ranges:
+            m_rip_rw = _RIP_REL_RE.match(op_raw.strip())
+            if m_rip_rw:
+                rip_t = _resolve_rip_target_rva(op_raw, addr_i)
+                if rip_t is not None and any(lo <= rip_t < hi for lo, hi in rw_ranges):
+                    qual = (m_rip_rw.group(1) or "").lower()
+                    w_rw = {"byte": 1, "word": 2, "dword": 4, "qword": 8}.get(qual, default_w)
+                    rw_rip_rvas[addr_i] = rip_t
+                    return f"aether_mem_read(aether_data_ptr(0x{rip_t:x}), {w_rw})", w_rw
         return _resolve_read_expr(op_raw, default_mem_width=default_w)
 
     def _resolve_rip_target_rva(op_raw: str, addr_i: int) -> Optional[int]:
@@ -934,7 +947,7 @@ def _lift_x64_function_full(
         if is_tail:
             c_lines.append(ret_stmt)
 
-    for addr, mnem, op_str in insns:
+    for insn_idx, (addr, mnem, op_str) in enumerate(insns):
         c_lines.append(f"L_{addr:x}: ; /* {mnem} {op_str} */")
         parts = [p.strip() for p in op_str.split(",")] if op_str else []
 
@@ -1123,6 +1136,15 @@ def _lift_x64_function_full(
                     w = mem_dst[1] if mem_dst[1] else (src_info[1] if src_info else 8)
                     c_lines.append(f"    aether_mem_write({mem_dst[0]}, {w}, {src_res[0]});")
                     continue
+                if mem_dst is None and rw_ranges and src_res is not None:
+                    m_rip_dst = _RIP_REL_RE.match(parts[0].strip())
+                    rip_dst = _resolve_rip_target_rva(parts[0], addr) if m_rip_dst else None
+                    if rip_dst is not None and any(lo <= rip_dst < hi for lo, hi in rw_ranges):
+                        qual = (m_rip_dst.group(1) or "").lower()
+                        w = {"byte": 1, "word": 2, "dword": 4, "qword": 8}.get(qual, src_info[1] if src_info else 8)
+                        rw_rip_rvas[addr] = rip_dst
+                        c_lines.append(f"    aether_mem_write(aether_data_ptr(0x{rip_dst:x}), {w}, {src_res[0]});")
+                        continue
 
         if mnem.startswith("cmov") and len(parts) == 2:
             j_equiv = "j" + mnem[4:]
@@ -1146,6 +1168,16 @@ def _lift_x64_function_full(
             if dst_info and rip_t is not None and vtable_arena_addrs and rip_t in vtable_arena_addrs:
                 vtable_leas[addr] = vtable_arena_addrs[rip_t]
                 c_lines.append(f"    {dst_info[0]} = aether_vtable_ptr(0x{rip_t:x});")
+                continue
+            if dst_info and rip_t is not None and crt_alloc_map and rip_t in crt_alloc_map:
+                _crt_id = {"malloc": 1, "free": 2, "realloc": 3}.get(crt_alloc_map[rip_t])
+                if _crt_id is not None:
+                    crt_lea_sites[addr] = _crt_id
+                    c_lines.append(f"    {dst_info[0]} = aether_crt_fn_ptr({_crt_id});")
+                    continue
+            if dst_info and rip_t is not None and rw_ranges and any(lo <= rip_t < hi for lo, hi in rw_ranges):
+                rw_rip_rvas[addr] = rip_t
+                c_lines.append(f"    {dst_info[0]} = aether_data_ptr(0x{rip_t:x});")
                 continue
             mem_src = _parse_mem_operand(parts[1], default_width=8)
             if dst_info and mem_src is not None:
@@ -1335,6 +1367,34 @@ def _lift_x64_function_full(
                     vcall_sites[addr] = mem_v[0]
                     c_lines.append(f"    rax = aether_vcall(aether_mem_read({mem_v[0]}, 8), rcx, rdx, r8, r9);")
                     continue
+            if returns_double:
+                reg_fc = _REG_INFO.get(parts[0].lower())
+                mem_fc = _parse_mem_operand(parts[0], default_width=8) if reg_fc is None else None
+                if reg_fc is not None or mem_fc is not None:
+                    fn_expr = reg_fc[0] if reg_fc is not None else f"aether_mem_read({mem_fc[0]}, 8)"
+                    is_closure = False
+                    for prev_i in range(insn_idx - 1, max(-1, insn_idx - 4), -1):
+                        _, pm, po = insns[prev_i]
+                        if pm in ("call", "jmp", "ret"):
+                            break
+                        pp = [x.strip().lower() for x in po.split(",")] if po else []
+                        if pm == "mov" and pp and pp[0] == "rcx":
+                            is_closure = True
+                            break
+                    fcall_sites[addr] = True
+                    if is_closure:
+                        c_lines.append(
+                            f"    xmm0 = aether_f64_to_bits(aether_cfcall_f64({fn_expr}, rcx, xmm1, xmm2, xmm3, "
+                            "aether_mem_read(rsp + 0x20, 8), aether_mem_read(rsp + 0x28, 8), "
+                            "aether_mem_read(rsp + 0x30, 8), aether_mem_read(rsp + 0x38, 8)));"
+                        )
+                    else:
+                        c_lines.append(
+                            f"    xmm0 = aether_f64_to_bits(aether_fcall_f64({fn_expr}, xmm0, xmm1, xmm2, xmm3, "
+                            "aether_mem_read(rsp + 0x20, 8), aether_mem_read(rsp + 0x28, 8), "
+                            "aether_mem_read(rsp + 0x30, 8), aether_mem_read(rsp + 0x38, 8)));"
+                        )
+                    continue
 
         fully_lifted = False
         c_lines.append(f"    /* unresolved-op: {mnem} {op_str} */")
@@ -1349,6 +1409,9 @@ def _lift_x64_function_full(
         meta_out["rva_anchor_regs"] = sorted(rva_anchor_regs)
         meta_out["vtable_leas"] = vtable_leas
         meta_out["vcall_sites"] = vcall_sites
+        meta_out["rw_rip_rvas"] = rw_rip_rvas
+        meta_out["crt_lea_sites"] = crt_lea_sites
+        meta_out["fcall_sites"] = fcall_sites
     return "\n".join(c_lines), insns, fully_lifted, has_calls_or_memory, ro_rip_values, returns_double, discovered_internal_rvas
 
 
@@ -1382,6 +1445,10 @@ def _simulate_x64_insns(
     rva_anchors: Optional[set[str]] = None,
     vtable_leas: Optional[Dict[int, int]] = None,
     vcall_sites: Optional[Dict[int, str]] = None,
+    rw_rip_rvas: Optional[Dict[int, int]] = None,
+    rw_data_base: int = 0,
+    crt_lea_sites: Optional[Dict[int, int]] = None,
+    fcall_sites: Optional[Dict[int, bool]] = None,
     _stack_base: int = 0x1F800,
     _depth: int = 0,
 ) -> int:
@@ -1406,6 +1473,9 @@ def _simulate_x64_insns(
     anchor_set = set(rva_anchors or ())
     vt_lea_map = vtable_leas or {}
     vcall_map = vcall_sites or {}
+    rw_map = rw_rip_rvas or {}
+    crt_lea_map = crt_lea_sites or {}
+    fcall_map = fcall_sites or {}
 
     addr_to_idx = {addr: i for i, (addr, _, _) in enumerate(insns)}
     cmp_lhs, cmp_rhs, cmp_width = 0, 0, 8
@@ -1431,6 +1501,12 @@ def _simulate_x64_insns(
             return lit
         if insn_addr in ro_map and _RIP_REL_RE.match(op.strip()):
             return _to_int64(ro_map[insn_addr])
+        if insn_addr in rw_map and rw_data_base > 0:
+            m_rw = _RIP_REL_RE.match(op.strip())
+            if m_rw:
+                qual = (m_rw.group(1) or "").lower()
+                w_rw = {"byte": 1, "word": 2, "dword": 4, "qword": 8}.get(qual, default_mem_w)
+                return arena.read(0x1B000 + (rw_map[insn_addr] - rw_data_base), w_rw)
         mem_info = _parse_mem_operand(op, default_width=default_mem_w)
         if mem_info is not None:
             addr = int(eval(mem_info[0], {"__builtins__": {}}, regs))
@@ -1618,6 +1694,15 @@ def _simulate_x64_insns(
                     if val is not None:
                         m_addr = int(eval(mem_dst[0], {"__builtins__": {}}, regs))
                         arena.write(m_addr, mem_dst[1], val)
+                elif addr_cur in rw_map and rw_data_base > 0:
+                    m_rw = _RIP_REL_RE.match(parts[0].strip())
+                    if m_rw:
+                        qual = (m_rw.group(1) or "").lower()
+                        src_info = _REG_INFO.get(parts[1].lower())
+                        w_rw = {"byte": 1, "word": 2, "dword": 4, "qword": 8}.get(qual, src_info[1] if src_info else 8)
+                        val = _eval_op(parts[1], w_rw, addr_cur)
+                        if val is not None:
+                            arena.write(0x1B000 + (rw_map[addr_cur] - rw_data_base), w_rw, val)
         elif mnem.startswith("cmov") and len(parts) == 2:
             j_equiv = "j" + mnem[4:]
             dst_info = _REG_INFO.get(parts[0].lower())
@@ -1629,6 +1714,10 @@ def _simulate_x64_insns(
             dst_info = _REG_INFO.get(parts[0].lower())
             if dst_info and addr_cur in vt_lea_map:
                 _write_reg(parts[0], vt_lea_map[addr_cur])
+            elif dst_info and addr_cur in crt_lea_map:
+                _write_reg(parts[0], 0x1A000 + crt_lea_map[addr_cur])
+            elif dst_info and addr_cur in rw_map and rw_data_base > 0:
+                _write_reg(parts[0], 0x1B000 + (rw_map[addr_cur] - rw_data_base))
             elif dst_info and dst_info[0] in anchor_set and _RIP_REL_RE.match(parts[1].strip()):
                 _write_reg(parts[0], 0)
             else:
@@ -1783,6 +1872,10 @@ def _simulate_x64_insns(
                         rva_anchors=set(callee.get("rva_anchor_regs", ())),
                         vtable_leas=callee.get("vtable_leas"),
                         vcall_sites=callee.get("vcall_sites"),
+                        rw_rip_rvas=callee.get("rw_rip_rvas"),
+                        rw_data_base=rw_data_base,
+                        crt_lea_sites=callee.get("crt_lea_sites"),
+                        fcall_sites=callee.get("fcall_sites"),
                         _stack_base=max(0x1C200, regs["rsp"] - 0x100),
                         _depth=_depth + 1,
                     )
@@ -1809,6 +1902,10 @@ def _simulate_x64_insns(
                     rva_anchors=set(callee.get("rva_anchor_regs", ())),
                     vtable_leas=callee.get("vtable_leas"),
                     vcall_sites=callee.get("vcall_sites"),
+                    rw_rip_rvas=callee.get("rw_rip_rvas"),
+                    rw_data_base=rw_data_base,
+                    crt_lea_sites=callee.get("crt_lea_sites"),
+                    fcall_sites=callee.get("fcall_sites"),
                     _stack_base=max(0x1C200, regs["rsp"] - 0x100),
                     _depth=_depth + 1,
                 )
@@ -1840,6 +1937,10 @@ def _simulate_x64_insns(
                         rva_anchors=set(callee.get("rva_anchor_regs", ())),
                         vtable_leas=callee.get("vtable_leas"),
                         vcall_sites=callee.get("vcall_sites"),
+                        rw_rip_rvas=callee.get("rw_rip_rvas"),
+                        rw_data_base=rw_data_base,
+                        crt_lea_sites=callee.get("crt_lea_sites"),
+                        fcall_sites=callee.get("fcall_sites"),
                         _stack_base=max(0x1C200, regs["rsp"] - 0x100),
                         _depth=_depth + 1,
                     )
@@ -1868,6 +1969,10 @@ def _simulate_x64_insns(
                     rva_anchors=set(callee.get("rva_anchor_regs", ())),
                     vtable_leas=callee.get("vtable_leas"),
                     vcall_sites=callee.get("vcall_sites"),
+                    rw_rip_rvas=callee.get("rw_rip_rvas"),
+                    rw_data_base=rw_data_base,
+                    crt_lea_sites=callee.get("crt_lea_sites"),
+                    fcall_sites=callee.get("fcall_sites"),
                     _stack_base=max(0x1C200, regs["rsp"] - 0x100),
                     _depth=_depth + 1,
                 )
@@ -1875,6 +1980,8 @@ def _simulate_x64_insns(
                     xmms["xmm0"] = _to_int64(child_ret)
                 else:
                     regs["rax"] = _to_int64(child_ret)
+            elif addr_cur in fcall_map:
+                xmms["xmm0"] = 0
         pc += 1
 
     return _to_int64(xmms["xmm0"] if returns_double else regs["rax"])
@@ -1894,6 +2001,7 @@ def _execute_lifted_c_ast(
     ro_table_fns: Optional[Dict[str, List[int]]] = None,
     vtable_arena_addrs: Optional[Dict[int, int]] = None,
     rva_to_c_sym: Optional[Dict[int, str]] = None,
+    rw_data_base: int = 0,
     _stack_base: int = 0x1F800,
     _depth: int = 0,
 ) -> int:
@@ -1956,6 +2064,10 @@ def _execute_lifted_c_ast(
         "aether_f64_mul": _f64_mul,
         "aether_f64_div": _f64_div,
         "aether_vtable_ptr": lambda vt_rva: _to_int64((vtable_arena_addrs or {}).get(int(vt_rva), 0)),
+        "aether_data_ptr": lambda d_rva: _to_int64(0x1B000 + (int(d_rva) - rw_data_base)) if rw_data_base > 0 else 0,
+        "aether_crt_fn_ptr": lambda kid: _to_int64(0x1A000 + int(kid)),
+        "aether_fcall_f64": lambda *args: 0.0,
+        "aether_cfcall_f64": lambda *args: 0.0,
     })
     if ro_table_fns:
         for t_fn_name, t_vals in ro_table_fns.items():
@@ -1981,6 +2093,7 @@ def _execute_lifted_c_ast(
                         ro_table_fns=ro_table_fns,
                         vtable_arena_addrs=vtable_arena_addrs,
                         rva_to_c_sym=rva_to_c_sym,
+                        rw_data_base=rw_data_base,
                         _stack_base=max(0x1C200, int(env["rsp"]) - 0x100),
                         _depth=_depth + 1,
                     )
@@ -2529,6 +2642,11 @@ def reconstruct_project(
             for sec in pe.sections
             if not (sec.Characteristics & 0x80000000)  # not IMAGE_SCN_MEM_WRITE
         ]
+        rw_ranges = [
+            (sec.VirtualAddress, sec.VirtualAddress + max(sec.Misc_VirtualSize, sec.SizeOfRawData))
+            for sec in pe.sections
+            if (sec.Characteristics & 0x80000000) and not (sec.Characteristics & 0x20000000)
+        ]
         image_base = pe.OPTIONAL_HEADER.ImageBase
         existing_rvas = {rva for _, _, rva in exports}
         vtable_targets: List[Tuple[str, int, int]] = []
@@ -2728,6 +2846,7 @@ def reconstruct_project(
                 rva_to_symbol=rva_to_symbol,
                 crt_alloc_map=crt_alloc_map,
                 vtable_arena_addrs=vtable_arena_addrs,
+                rw_ranges=rw_ranges,
                 meta_out=lift_meta,
             )
             takes_double_arg0 = bool(lift_meta.get("takes_double_arg0", False))
@@ -2772,6 +2891,9 @@ def reconstruct_project(
                 "rva_anchor_regs": lift_meta.get("rva_anchor_regs", []),
                 "vtable_leas": lift_meta.get("vtable_leas", {}),
                 "vcall_sites": lift_meta.get("vcall_sites", {}),
+                "rw_rip_rvas": lift_meta.get("rw_rip_rvas", {}),
+                "crt_lea_sites": lift_meta.get("crt_lea_sites", {}),
+                "fcall_sites": lift_meta.get("fcall_sites", {}),
                 "internal_callees": discovered_internal_rvas,
             }
             records_list.append(rec)
@@ -2793,6 +2915,7 @@ def reconstruct_project(
                     crt_alloc_map=crt_alloc_map,
                     callee_sigs=callee_sigs,
                     vtable_arena_addrs=vtable_arena_addrs,
+                    rw_ranges=rw_ranges,
                     meta_out=lift_meta2,
                 )
                 rec["c_code"] = c_code2
@@ -2800,6 +2923,9 @@ def reconstruct_project(
                 rec["rva_anchor_regs"] = lift_meta2.get("rva_anchor_regs", rec["rva_anchor_regs"])
                 rec["vtable_leas"] = lift_meta2.get("vtable_leas", rec["vtable_leas"])
                 rec["vcall_sites"] = lift_meta2.get("vcall_sites", rec["vcall_sites"])
+                rec["rw_rip_rvas"] = lift_meta2.get("rw_rip_rvas", rec["rw_rip_rvas"])
+                rec["crt_lea_sites"] = lift_meta2.get("crt_lea_sites", rec["crt_lea_sites"])
+                rec["fcall_sites"] = lift_meta2.get("fcall_sites", rec["fcall_sites"])
 
         ro_table_defs: Dict[str, Tuple[int, List[int]]] = {}
         for rec in records_list:
@@ -2846,6 +2972,10 @@ def reconstruct_project(
             if slots and all(_is_transitively_lifted(srva, set()) for srva in slots):
                 default_vt_va = vtable_arena_addrs[vt_rva]
                 break
+
+        all_rw_rvas = [r for rec in records_list for r in rec.get("rw_rip_rvas", {}).values()]
+        rw_data_base = min(all_rw_rvas) if all_rw_rvas else 0
+        rw_data_span = min(65536, max(64, (max(all_rw_rvas) - rw_data_base) + 64)) if all_rw_rvas else 64
 
         c_fn_table: Dict[str, Dict[str, Any]] = {r["c_ident"]: r for r in records_list}
 
@@ -2923,6 +3053,10 @@ def reconstruct_project(
                         rva_anchors=set(rec.get("rva_anchor_regs", ())),
                         vtable_leas=rec.get("vtable_leas"),
                         vcall_sites=rec.get("vcall_sites"),
+                        rw_rip_rvas=rec.get("rw_rip_rvas"),
+                        rw_data_base=rw_data_base,
+                        crt_lea_sites=rec.get("crt_lea_sites"),
+                        fcall_sites=rec.get("fcall_sites"),
                     )
                     c_out = _execute_lifted_c_ast(
                         c_code,
@@ -2937,6 +3071,7 @@ def reconstruct_project(
                         ro_table_fns=ro_table_fns_map,
                         vtable_arena_addrs=vtable_arena_addrs,
                         rva_to_c_sym=rva_to_symbol,
+                        rw_data_base=rw_data_base,
                     )
                     if asm_out == c_out and a_asm.digest() == a_c.digest():
                         passed_vecs += 1
@@ -3037,6 +3172,26 @@ def reconstruct_project(
         header_lines.extend([
             "    (void)vt_rva;",
             "    return 0;",
+            "}",
+            f"static uint8_t aether_rw_data[{rw_data_span}] = {{ 0 }};",
+            "static inline int64_t aether_data_ptr(int64_t rva) {",
+            f"    if ({rw_data_base} > 0 && rva >= 0x{rw_data_base:x} && rva < 0x{rw_data_base + rw_data_span:x}) return (int64_t)(uintptr_t)(aether_rw_data + (rva - 0x{rw_data_base:x}));",
+            "    (void)rva;",
+            "    return 0;",
+            "}",
+            "static inline int64_t aether_crt_fn_ptr(int64_t kid) {",
+            "    if (kid == 1) return (int64_t)(uintptr_t)&malloc;",
+            "    if (kid == 2) return (int64_t)(uintptr_t)&free;",
+            "    if (kid == 3) return (int64_t)(uintptr_t)&realloc;",
+            "    return 0;",
+            "}",
+            "typedef double (*aether_fcall8_t)(double, double, double, double, double, double, double, double);",
+            "typedef double (*aether_cfcall8_t)(int64_t, double, double, double, double, double, double, double);",
+            "static inline double aether_fcall_f64(int64_t fn_ptr, int64_t x0, int64_t x1, int64_t x2, int64_t x3, int64_t x4, int64_t x5, int64_t x6, int64_t x7) {",
+            "    return fn_ptr ? ((aether_fcall8_t)(uintptr_t)fn_ptr)(aether_bits_to_f64(x0), aether_bits_to_f64(x1), aether_bits_to_f64(x2), aether_bits_to_f64(x3), aether_bits_to_f64(x4), aether_bits_to_f64(x5), aether_bits_to_f64(x6), aether_bits_to_f64(x7)) : 0.0;",
+            "}",
+            "static inline double aether_cfcall_f64(int64_t fn_ptr, int64_t ctx, int64_t x1, int64_t x2, int64_t x3, int64_t x4, int64_t x5, int64_t x6, int64_t x7) {",
+            "    return fn_ptr ? ((aether_cfcall8_t)(uintptr_t)fn_ptr)(ctx, aether_bits_to_f64(x1), aether_bits_to_f64(x2), aether_bits_to_f64(x3), aether_bits_to_f64(x4), aether_bits_to_f64(x5), aether_bits_to_f64(x6), aether_bits_to_f64(x7)) : 0.0;",
             "}",
             "",
             "#ifdef __cplusplus",

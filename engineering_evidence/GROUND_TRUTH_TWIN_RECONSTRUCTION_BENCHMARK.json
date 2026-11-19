@@ -8,9 +8,9 @@
       "ground_truth": "cJSON.c (78 exports)",
       "status": "complete",
       "total_targets_analyzed": 78,
-      "fully_lifted_congruent_functions": 67,
-      "ctree_structured_functions": 67,
-      "avg_goto_elimination_pct": 46.27,
+      "fully_lifted_congruent_functions": 69,
+      "ctree_structured_functions": 69,
+      "avg_goto_elimination_pct": 47.83,
       "ghidra_enriched_functions": 78,
       "lifted_function_names": [
         "cJSON_AddArrayToObject",
@@ -55,11 +55,13 @@
         "cJSON_Duplicate",
         "cJSON_GetArrayItem",
         "cJSON_GetArraySize",
+        "cJSON_GetErrorPtr",
         "cJSON_GetNumberValue",
         "cJSON_GetObjectItem",
         "cJSON_GetObjectItemCaseSensitive",
         "cJSON_GetStringValue",
         "cJSON_HasObjectItem",
+        "cJSON_InitHooks",
         "cJSON_InsertItemInArray",
         "cJSON_IsArray",
         "cJSON_IsBool",
@@ -88,13 +90,13 @@
       "imported_dlls": [
         "KERNEL32.dll"
       ],
-      "reconstruct_ms": 15810.74,
+      "reconstruct_ms": 27584.45,
       "msvc_compiled": true,
       "compiler": "msvc_cl_x64",
-      "compiled_twin_dll_bytes": 159744,
-      "compiled_twin_dll_sha256": "3f3fbc390489a8ade5dc813c656f848cc95a7b53fee81e9b3b3083fb2967c1a9",
-      "omni_elapsed_ms": 200.738,
-      "omni_throughput_mb_s": 0.868,
+      "compiled_twin_dll_bytes": 177152,
+      "compiled_twin_dll_sha256": "348a3c81a9c06371fa66e676f255f6342c3fa417d238aee364fe335914ff50da",
+      "omni_elapsed_ms": 337.096,
+      "omni_throughput_mb_s": 0.517,
       "omni_gears_executed": 12,
       "missing_or_empty_files": []
     },
@@ -104,11 +106,12 @@
       "ground_truth": "tinyexpr.c (5 exports)",
       "status": "complete",
       "total_targets_analyzed": 5,
-      "fully_lifted_congruent_functions": 1,
+      "fully_lifted_congruent_functions": 2,
       "ctree_structured_functions": 1,
       "avg_goto_elimination_pct": 100.0,
       "ghidra_enriched_functions": 0,
       "lifted_function_names": [
+        "te_eval",
         "te_free"
       ],
       "differential_congruence_pct_on_lifted": 100.0,
@@ -118,13 +121,13 @@
       "imported_dlls": [
         "KERNEL32.dll"
       ],
-      "reconstruct_ms": 523.41,
+      "reconstruct_ms": 1161.82,
       "msvc_compiled": true,
       "compiler": "msvc_cl_x64",
-      "compiled_twin_dll_bytes": 126976,
-      "compiled_twin_dll_sha256": "3f7a47d59ac053721b8d3d4f3cf317243126c2c7887df26844c7e3f005ebd1c2",
-      "omni_elapsed_ms": 206.974,
-      "omni_throughput_mb_s": 0.974,
+      "compiled_twin_dll_bytes": 137216,
+      "compiled_twin_dll_sha256": "845b3f9e2ec809a271a361120548bec78882ffafeda352173f99d25dfa8c4815",
+      "omni_elapsed_ms": 341.538,
+      "omni_throughput_mb_s": 0.59,
       "omni_gears_executed": 12,
       "missing_or_empty_files": []
     },
@@ -160,13 +163,13 @@
       "imported_dlls": [
         "KERNEL32.dll"
       ],
-      "reconstruct_ms": 397.99,
+      "reconstruct_ms": 610.71,
       "msvc_compiled": true,
       "compiler": "msvc_cl_x64",
-      "compiled_twin_dll_bytes": 106496,
-      "compiled_twin_dll_sha256": "a3f2a8531de10819cc4b7fbbe58324bc16f64e6ab2fe1e5ce2e0cc4cb33b8354",
-      "omni_elapsed_ms": 157.188,
-      "omni_throughput_mb_s": 0.637,
+      "compiled_twin_dll_bytes": 107520,
+      "compiled_twin_dll_sha256": "ada4f01c210bcdac3640be1a29369fb02f9eda169f152109f2847d6b5e953663",
+      "omni_elapsed_ms": 250.572,
+      "omni_throughput_mb_s": 0.399,
       "omni_gears_executed": 12,
       "missing_or_empty_files": []
     },
@@ -203,13 +206,13 @@
       "imported_dlls": [
         "KERNEL32.dll"
       ],
-      "reconstruct_ms": 439.71,
+      "reconstruct_ms": 706.82,
       "msvc_compiled": true,
       "compiler": "msvc_cl_x64",
-      "compiled_twin_dll_bytes": 106496,
-      "compiled_twin_dll_sha256": "e4b26006fec513a0342d11067dbc3fcb5ddb596b3e853054c00076e1ef7d5037",
-      "omni_elapsed_ms": 152.957,
-      "omni_throughput_mb_s": 0.654,
+      "compiled_twin_dll_bytes": 107520,
+      "compiled_twin_dll_sha256": "7b1235573c82f26ed5241aa6b1485c24e68cd949dc5a162a7b7fcc503b39be69",
+      "omni_elapsed_ms": 378.458,
+      "omni_throughput_mb_s": 0.264,
       "omni_gears_executed": 12,
       "missing_or_empty_files": []
     }
@@ -292,7 +295,7 @@
         1,
         1,
         1,
-        3109722382848,
+        2241819824720,
         0
       ],
       "compiled_twin_outputs": [
@@ -300,7 +303,7 @@
         1,
         1,
         1,
-        3109722382848,
+        2241819824720,
         0
       ],
       "match": true
@@ -378,6 +381,20 @@
       "compiled_twin_outputs": [
         2,
         66048
+      ],
+      "match": true
+    },
+    {
+      "target": "tinyexpr.dll <-> compiled twin :: Live AST te_eval(sin/sqrt/pow/log/abs) & te_free",
+      "original_dll_outputs": [
+        14.0,
+        47.0,
+        7.6842944819
+      ],
+      "compiled_twin_outputs": [
+        14.0,
+        47.0,
+        7.6842944819
       ],
       "match": true
     }
