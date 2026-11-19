@@ -405,6 +405,17 @@ def _run_compiled_twin_interop_checks(reconstructed_dir: Path) -> List[Dict[str,
         "match": cmp_eq == 1 and cmp_neq == 0,
     })
 
+    orig_cj.cJSON_Version.restype = ctypes.c_char_p
+    twin_cj.cJSON_Version.restype = ctypes.c_char_p
+    ver_orig = orig_cj.cJSON_Version().decode("utf-8")
+    ver_twin = twin_cj.cJSON_Version().decode("utf-8")
+    checks.append({
+        "target": "cjson.dll <-> compiled twin :: Live cJSON_Version() via .rdata + sprintf",
+        "original_dll_outputs": [ver_orig],
+        "compiled_twin_outputs": [ver_twin],
+        "match": ver_orig == ver_twin == "1.7.19",
+    })
+
     # Also verify compiled twin cJSON_AddItemToArray on _MemoryArena / AST matches expected behavior
     cj_rep = json.loads((reconstructed_dir / "cjson" / "twin_congruence_report.json").read_text(encoding="utf-8"))
     cj_fns = {f["name"]: f["lifted_c_code"] for f in cj_rep["functions"]}
@@ -610,8 +621,8 @@ def main() -> int:
         "",
         "## 4. Limitações Reais Observadas (Verdade Radical)",
         "",
-        "- Todos os 4 projetos C gêmeos gerados (`cjson`, `tinyexpr`, `poly_test`, `multi_poly`) compilam nativamente em MSVC x64 `/O2` sem erros (incluindo resolução de até 128 sub-rotinas internas `.text`, tabelas RVA de `switch`, globais mutáveis `.data` via `aether_data_ptr`, despacho virtual C++ RTTI via `aether_vtable_ptr`/`aether_vcall` e callbacks float-ABI via `aether_fcall_f64`/`aether_cfcall_f64`).",
-        f"- Em `cjson.dll`, **{cj_lifted}/{cj_total}** exports são 100% elevados (incluindo `cJSON_GetErrorPtr`/`cJSON_InitHooks` via `.data` mutável + `aether_crt_fn_ptr`, `cJSON_Compare` via SIMD `movdqa`/`andpd`/`maxsd`, `cJSON_Minify` com jump-table RVA, `cJSON_CreateIntArray`/`CreateFloatArray`, `cJSON_SetValuestring`, construtores, DOM, `cJSON_Delete` recursivo, `cJSON_Duplicate`, `cJSON_GetObjectItem*`, `cJSON_ReplaceItem*` e XMM/CRT), com **{cj_ghidra}/{cj_total}** enriquecidos via Ghidra. Os {cj_rem} exports restantes (`cJSON_Parse*`/`Print*`/`Version` — dependentes de `sprintf`/`strtod` ou sub-rotinas CRT complexas) mantêm esqueleto compilável + structs recuperadas; em `poly_test.dll` (**9/10**) e `multi_poly.dll` (**10/11**), todos os factories, wrappers polimórficos e destrutores virtuais são 100% elevados (restando apenas `_purecall`); na `tinyexpr.dll`, **{te_lifted}/{te_total}** (`te_eval` com 16 callbacks indiretos float-ABI/closure + `te_free` com switch `sub_3410`) atingem 100% e avaliam ASTs matemáticas reais ao vivo na CPU host, enquanto `te_compile`/`te_interp`/`te_print` envolvem parsing de strings ou `printf` CRT.",
+        "- Todos os 4 projetos C gêmeos gerados (`cjson`, `tinyexpr`, `poly_test`, `multi_poly`) compilam nativamente em MSVC x64 `/O2` sem erros (incluindo resolução de até 128 sub-rotinas internas `.text`, tabelas RVA de `switch`, globais mutáveis `.data` via `aether_data_ptr`, constantes `.rdata` via `aether_ro_ptr`, despacho virtual C++ RTTI via `aether_vtable_ptr`/`aether_vcall`, callbacks float-ABI via `aether_fcall_f64`/`aether_cfcall_f64` e chamadas indiretas via `aether_icall`).",
+        f"- Em `cjson.dll`, **{cj_lifted}/{cj_total}** exports são 100% elevados (incluindo `cJSON_Version` via `aether_ro_ptr` + `aether_sprintf` retornando `'1.7.19'` ao vivo, `cJSON_GetErrorPtr`/`cJSON_InitHooks` via `.data` mutável + `aether_crt_fn_ptr`, `cJSON_Compare` via SIMD `movdqa`/`andpd`/`maxsd`, `cJSON_Minify` com jump-table RVA, `cJSON_CreateIntArray`/`CreateFloatArray`, `cJSON_SetValuestring`, construtores, DOM, `cJSON_Delete` recursivo, `cJSON_Duplicate`, `cJSON_GetObjectItem*`, `cJSON_ReplaceItem*` e XMM/CRT), com **{cj_ghidra}/{cj_total}** enriquecidos via Ghidra. Os {cj_rem} exports restantes (`cJSON_Parse*`/`Print*` — dependentes de `strtod`/`sscanf`/AVX CRT internos) mantêm esqueleto compilável + structs recuperadas; em `poly_test.dll` (**9/10**) e `multi_poly.dll` (**10/11**), todos os factories, wrappers polimórficos e destrutores virtuais são 100% elevados (restando apenas `_purecall`); na `tinyexpr.dll`, **{te_lifted}/{te_total}** (`te_eval` com 16 callbacks indiretos float-ABI/closure + `te_free` com switch `sub_3410`) atingem 100% e avaliam ASTs matemáticas reais ao vivo na CPU host, enquanto `te_compile`/`te_interp`/`te_print` envolvem parsing de strings ou `printf` CRT.",
         "",
     ])
     md_out.write_text("\n".join(md_lines), encoding="utf-8")

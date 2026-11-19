@@ -8,9 +8,9 @@
       "ground_truth": "cJSON.c (78 exports)",
       "status": "complete",
       "total_targets_analyzed": 78,
-      "fully_lifted_congruent_functions": 69,
-      "ctree_structured_functions": 69,
-      "avg_goto_elimination_pct": 47.83,
+      "fully_lifted_congruent_functions": 70,
+      "ctree_structured_functions": 70,
+      "avg_goto_elimination_pct": 48.57,
       "ghidra_enriched_functions": 78,
       "lifted_function_names": [
         "cJSON_AddArrayToObject",
@@ -80,6 +80,7 @@
         "cJSON_ReplaceItemViaPointer",
         "cJSON_SetNumberHelper",
         "cJSON_SetValuestring",
+        "cJSON_Version",
         "cJSON_free",
         "cJSON_malloc"
       ],
@@ -90,13 +91,13 @@
       "imported_dlls": [
         "KERNEL32.dll"
       ],
-      "reconstruct_ms": 27584.45,
+      "reconstruct_ms": 16052.19,
       "msvc_compiled": true,
       "compiler": "msvc_cl_x64",
-      "compiled_twin_dll_bytes": 177152,
-      "compiled_twin_dll_sha256": "348a3c81a9c06371fa66e676f255f6342c3fa417d238aee364fe335914ff50da",
-      "omni_elapsed_ms": 337.096,
-      "omni_throughput_mb_s": 0.517,
+      "compiled_twin_dll_bytes": 196096,
+      "compiled_twin_dll_sha256": "45ea67fc40b6d627b0563b0229885631634c94d3ffe1c97289f4d8ab2398085f",
+      "omni_elapsed_ms": 202.087,
+      "omni_throughput_mb_s": 0.863,
       "omni_gears_executed": 12,
       "missing_or_empty_files": []
     },
@@ -121,13 +122,13 @@
       "imported_dlls": [
         "KERNEL32.dll"
       ],
-      "reconstruct_ms": 1161.82,
+      "reconstruct_ms": 584.8,
       "msvc_compiled": true,
       "compiler": "msvc_cl_x64",
-      "compiled_twin_dll_bytes": 137216,
-      "compiled_twin_dll_sha256": "845b3f9e2ec809a271a361120548bec78882ffafeda352173f99d25dfa8c4815",
-      "omni_elapsed_ms": 341.538,
-      "omni_throughput_mb_s": 0.59,
+      "compiled_twin_dll_bytes": 138752,
+      "compiled_twin_dll_sha256": "8dc3403ac3ff0095482c5ce68bae29995f1391f3db9fe78ce50477bd23ea4680",
+      "omni_elapsed_ms": 213.02,
+      "omni_throughput_mb_s": 0.947,
       "omni_gears_executed": 12,
       "missing_or_empty_files": []
     },
@@ -163,13 +164,13 @@
       "imported_dlls": [
         "KERNEL32.dll"
       ],
-      "reconstruct_ms": 610.71,
+      "reconstruct_ms": 594.8,
       "msvc_compiled": true,
       "compiler": "msvc_cl_x64",
-      "compiled_twin_dll_bytes": 107520,
-      "compiled_twin_dll_sha256": "ada4f01c210bcdac3640be1a29369fb02f9eda169f152109f2847d6b5e953663",
-      "omni_elapsed_ms": 250.572,
-      "omni_throughput_mb_s": 0.399,
+      "compiled_twin_dll_bytes": 108032,
+      "compiled_twin_dll_sha256": "bb022a22b88023f8519ce3507bc4b57e0fdea673a81377cca4ef5fbf91ac3688",
+      "omni_elapsed_ms": 165.169,
+      "omni_throughput_mb_s": 0.606,
       "omni_gears_executed": 12,
       "missing_or_empty_files": []
     },
@@ -206,13 +207,13 @@
       "imported_dlls": [
         "KERNEL32.dll"
       ],
-      "reconstruct_ms": 706.82,
+      "reconstruct_ms": 663.63,
       "msvc_compiled": true,
       "compiler": "msvc_cl_x64",
-      "compiled_twin_dll_bytes": 107520,
-      "compiled_twin_dll_sha256": "7b1235573c82f26ed5241aa6b1485c24e68cd949dc5a162a7b7fcc503b39be69",
-      "omni_elapsed_ms": 378.458,
-      "omni_throughput_mb_s": 0.264,
+      "compiled_twin_dll_bytes": 108032,
+      "compiled_twin_dll_sha256": "8d3abd4cb2958cd441c06037018964bef60c305acd0eae2f5291ba6c0fe870df",
+      "omni_elapsed_ms": 208.28,
+      "omni_throughput_mb_s": 0.481,
       "omni_gears_executed": 12,
       "missing_or_empty_files": []
     }
@@ -295,7 +296,7 @@
         1,
         1,
         1,
-        2241819824720,
+        2002958370352,
         0
       ],
       "compiled_twin_outputs": [
@@ -303,7 +304,7 @@
         1,
         1,
         1,
-        2241819824720,
+        2002958370352,
         0
       ],
       "match": true
@@ -369,6 +370,16 @@
       "compiled_twin_outputs": [
         1,
         0
+      ],
+      "match": true
+    },
+    {
+      "target": "cjson.dll <-> compiled twin :: Live cJSON_Version() via .rdata + sprintf",
+      "original_dll_outputs": [
+        "1.7.19"
+      ],
+      "compiled_twin_outputs": [
+        "1.7.19"
       ],
       "match": true
     },
