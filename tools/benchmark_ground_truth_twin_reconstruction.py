@@ -510,6 +510,47 @@ def _run_compiled_twin_interop_checks(reconstructed_dir: Path) -> List[Dict[str,
         "match": ast_p is not None,
     })
 
+    # Live Self-Contained te_interp & te_compile (5/5 tinyexpr)
+    twin_te.te_interp.argtypes = [ctypes.c_char_p, ctypes.POINTER(ctypes.c_int)]
+    twin_te.te_interp.restype = ctypes.c_double
+    twin_te.te_compile.argtypes = [ctypes.c_char_p, ctypes.c_void_p, ctypes.c_int, ctypes.POINTER(ctypes.c_int)]
+    twin_te.te_compile.restype = ctypes.c_void_p
+    orig_te.te_interp.argtypes = [ctypes.c_char_p, ctypes.POINTER(ctypes.c_int)]
+    orig_te.te_interp.restype = ctypes.c_double
+
+    class _TeVar(ctypes.Structure):
+        _fields_ = [
+            ("name", ctypes.c_char_p),
+            ("address", ctypes.c_void_p),
+            ("type", ctypes.c_int),
+            ("context", ctypes.c_void_p),
+        ]
+
+    interp_orig: List[float] = []
+    interp_twin: List[float] = []
+    for expr_i in (b"2 + 3 * 4", b"(10 + 5) * 3 - 4 / 2", b"2^10 + 7%3"):
+        e_o = ctypes.c_int(-1)
+        e_t = ctypes.c_int(-1)
+        interp_orig.append(round(orig_te.te_interp(expr_i, ctypes.byref(e_o)), 10))
+        interp_twin.append(round(twin_te.te_interp(expr_i, ctypes.byref(e_t)), 10))
+
+    x_var = ctypes.c_double(5.0)
+    v_arr = (_TeVar * 1)(_TeVar(b"x", ctypes.cast(ctypes.byref(x_var), ctypes.c_void_p), 0, None))
+    e_c = ctypes.c_int(-1)
+    twin_ast = twin_te.te_compile(b"x*x + 2*x + 1", v_arr, 1, ctypes.byref(e_c))
+    v5 = round(twin_te.te_eval(twin_ast), 10) if twin_ast else 0.0
+    x_var.value = 10.0
+    v10 = round(twin_te.te_eval(twin_ast), 10) if twin_ast else 0.0
+    if twin_ast:
+        twin_te.te_free(twin_ast)
+
+    checks.append({
+        "target": "compiled twin tinyexpr :: Live Self-Contained te_interp(pow/fmod) & te_compile(x*x+2*x+1) (5/5)",
+        "original_dll_outputs": interp_orig + [36.0, 121.0],
+        "compiled_twin_outputs": interp_twin + [v5, v10],
+        "match": interp_orig == interp_twin and interp_twin == [14.0, 43.0, 1025.0] and [v5, v10] == [36.0, 121.0],
+    })
+
     return checks
 
 

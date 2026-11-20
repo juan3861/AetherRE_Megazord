@@ -223,6 +223,15 @@ class _MemoryArena:
                 self.buf[d_off : d_off + max_n] = bytes(self.buf[s_off : s_off + max_n])
         return dst
 
+    def c_memset(self, dst: int, val: int, size: int) -> int:
+        n = max(0, int(size))
+        if n > 0 and self.base <= dst < self.base + self.size:
+            d_off = dst - self.base
+            max_n = min(n, self.size - d_off)
+            if max_n > 0:
+                self.buf[d_off : d_off + max_n] = bytes([int(val) & 0xFF]) * max_n
+        return dst
+
     def c_strcpy(self, dst: int, src: int) -> int:
         n = self.c_strlen(src) + 1
         return self.c_memcpy(dst, src, n)
@@ -494,6 +503,8 @@ def _discover_crt_allocator_map(
             (b"\x48\x2b\xd1\xf6\xc1\x07", "strcmp"),
             (b"\x48\x2b\xd1\x4d\x85\xc0\x74", "strncmp"),
             (b"\x48\x8b\xc1\x4c\x8d\x15", "memcpy"),
+            (b"\x48\x8b\xc1\x4c\x8b\xc9\x4c\x8d\x15", "memset"),
+            (b"\x48\x81\xec\xb8\x00\x00\x00\x66\x0f\x7f\x74\x24\x50\x66\x0f\x7f\x7c\x24\x60\x66\x49\x0f\x7e\xc0\x66\x49\x0f\x7e\xc9", "fmod"),
             (b"\x4c\x8b\xd9\x48\x2b\xca\xf6\xc2\x07", "strcpy"),
             (b"\x48\x89\x54\x24\x10\x4c\x89\x44\x24\x18\x4c\x89\x4c\x24\x20\x53\x56\x57\x48\x83\xec\x30\x48\x8b\xda\x48\x8d\x74\x24\x60", "sprintf"),
             (b"\x48\x89\x54\x24\x10\x4c\x89\x44\x24\x18\x4c\x89\x4c\x24\x20\x53\x56\x57\x48\x83\xec\x30\x48\x8b\xfa\x48\x8d\x74\x24\x60", "sscanf"),
@@ -522,6 +533,25 @@ def _discover_crt_allocator_map(
                     if sec_bytes[tgt_off_st : tgt_off_st + 10] == b"\x48\x89\x5c\x24\x10\x57\x48\x83\xec\x50":
                         text_crt_map[sec_rva + st_hit] = "strtod"
             pos_st = st_hit + 1
+
+        pow_hit = sec_bytes.find(
+            b"\x48\x89\x5c\x24\x18\x55\x56\x57\x48\x81\xec\xb0\x00\x00\x00\xf2\x0f\x11\x84\x24\xd0\x00\x00\x00\x45\x33\xdb"
+        )
+        if pow_hit >= 0 and (pow_hit % 16 == 0 or pow_hit == 0):
+            pow_rva = sec_rva + pow_hit
+            text_crt_map[pow_rva] = "pow"
+            pos_dp = 0
+            while True:
+                dp_hit = sec_bytes.find(b"\x83\xe0\x03\x3c\x03\x0f\x84", pos_dp)
+                if dp_hit < 0:
+                    break
+                if dp_hit >= 6 and sec_bytes[dp_hit - 6 : dp_hit - 4] == b"\x8b\x05":
+                    jmp_pos = dp_hit + 11
+                    if jmp_pos + 5 <= len(sec_bytes) and sec_bytes[jmp_pos] == 0xE9:
+                        disp_pw = struct.unpack_from("<i", sec_bytes, jmp_pos + 1)[0]
+                        if sec_rva + jmp_pos + 5 + disp_pw == pow_rva:
+                            text_crt_map[sec_rva + dp_hit - 6] = "pow"
+                pos_dp = dp_hit + 1
 
         pos_ct = 0
         _ct_masks = {0x103: "isalpha", 0x04: "isdigit", 0x08: "isspace", 0x80: "isxdigit"}
@@ -748,6 +778,15 @@ def _f64_div(a: int, b: int) -> int:
     return _f64_to_bits(_bits_to_f64(a) / fb)
 
 
+def _safe_f64_pow(a: float, b: float) -> float:
+    try:
+        return float(math.pow(a, b))
+    except OverflowError:
+        return float("inf")
+    except ValueError:
+        return float("nan")
+
+
 def _resolve_rip_rel_const(
     op_str: str,
     insn_addr: int,
@@ -963,9 +1002,12 @@ def _lift_x64_function_full(
             last_rax_idx = idx_i
     returns_double = last_xmm0_idx > last_rax_idx
 
-    uses_float_callee = bool(callee_sigs) and any(
+    uses_float_callee = any(
         ((_tgt := _parse_int_literal(op_i)) is not None)
-        and callee_sigs.get(_tgt, (False, False, False)) != (False, False, False)
+        and (
+            (bool(callee_sigs) and callee_sigs.get(_tgt, (False, False, False)) != (False, False, False))
+            or (bool(crt_alloc_map) and crt_alloc_map.get(_tgt) in ("pow", "fmod", "strtod"))
+        )
         for _, mn_i, op_i in insns
         if mn_i in ("call", "jmp")
     )
@@ -1090,6 +1132,12 @@ def _lift_x64_function_full(
             return "    /* __security_check_cookie */"
         if kind == "tolower":
             return "    rax = aether_tolower(rcx);"
+        if kind == "memset":
+            return "    rax = aether_memset(rcx, rdx, r8);"
+        if kind == "pow":
+            return "    xmm0 = aether_f64_to_bits(aether_pow(aether_bits_to_f64(xmm0), aether_bits_to_f64(xmm1)));"
+        if kind == "fmod":
+            return "    xmm0 = aether_f64_to_bits(aether_fmod(aether_bits_to_f64(xmm0), aether_bits_to_f64(xmm1)));"
         return "    rax = aether_memcpy(rcx, rdx, r8);"
 
     def _emit_internal_call(target_rva: int, is_tail: bool) -> None:
@@ -1185,10 +1233,10 @@ def _lift_x64_function_full(
                 c_lines.append(f"    {d_low} = 0; {d_low}_hi = 0;")
                 continue
 
-        if mnem in ("andps", "andpd", "orps", "orpd") and len(parts) == 2:
+        if mnem in ("andps", "andpd", "orps", "orpd", "xorps", "xorpd") and len(parts) == 2:
             d_low, s_low = parts[0].lower(), parts[1].lower()
             if d_low in _XMM_REGS:
-                op_c = "&" if mnem.startswith("and") else "|"
+                op_c = "&" if mnem.startswith("and") else ("|" if mnem.startswith("or") else "^")
                 if s_low in _XMM_REGS:
                     c_lines.append(
                         f"    {d_low} = {d_low} {op_c} {s_low}; {d_low}_hi = {d_low}_hi {op_c} {s_low}_hi;"
@@ -1284,7 +1332,7 @@ def _lift_x64_function_full(
                     c_lines.append(f"{stmt} rsp += 8;")
                     continue
 
-        if mnem in ("mov", "movsxd", "movsx", "movzx") and len(parts) == 2:
+        if mnem in ("mov", "movabs", "movsxd", "movsx", "movzx") and len(parts) == 2:
             dst_info = _REG_INFO.get(parts[0].lower())
             if dst_info:
                 tbl_hit = _parse_pe_rva_table_ref(
@@ -1363,17 +1411,17 @@ def _lift_x64_function_full(
                 rw_rip_rvas[addr] = rip_t
                 c_lines.append(f"    {dst_info[0]} = aether_data_ptr(0x{rip_t:x});")
                 continue
+            if dst_info and rip_t is not None and crt_alloc_map and rip_t in crt_alloc_map:
+                _crt_id = {"malloc": 1, "free": 2, "realloc": 3, "pow": 4, "fmod": 5}.get(crt_alloc_map[rip_t])
+                if _crt_id is not None:
+                    crt_lea_sites[addr] = _crt_id
+                    c_lines.append(f"    {dst_info[0]} = aether_crt_fn_ptr({_crt_id});")
+                    continue
             if dst_info and rip_t is not None and exec_ranges and any(lo <= rip_t < hi for lo, hi in exec_ranges):
                 fn_lea_rvas[addr] = rip_t
                 discovered_internal_rvas.append(rip_t)
                 c_lines.append(f"    {dst_info[0]} = aether_fn_ptr(0x{rip_t:x});")
                 continue
-            if dst_info and rip_t is not None and crt_alloc_map and rip_t in crt_alloc_map:
-                _crt_id = {"malloc": 1, "free": 2, "realloc": 3}.get(crt_alloc_map[rip_t])
-                if _crt_id is not None:
-                    crt_lea_sites[addr] = _crt_id
-                    c_lines.append(f"    {dst_info[0]} = aether_crt_fn_ptr({_crt_id});")
-                    continue
             if dst_info and rip_t is not None and ro_ranges and any(lo <= rip_t < hi for lo, hi in ro_ranges):
                 ro_lea_rvas[addr] = rip_t
                 c_lines.append(f"    {dst_info[0]} = aether_ro_ptr(0x{rip_t:x});")
@@ -1848,22 +1896,34 @@ def _simulate_x64_insns(
                     arena.write(m_addr, 8, xmms[sl])
                     if is_128:
                         arena.write(m_addr + 8, 8, xmms_hi[sl])
-        elif mnem in ("xorps", "xorpd") and len(parts) == 2:
-            dl, sl = parts[0].lower(), parts[1].lower()
-            if dl in _XMM_REGS and dl == sl:
+        elif mnem in ("xorps", "xorpd") and len(parts) == 2 and parts[0].lower() == parts[1].lower():
+            dl = parts[0].lower()
+            if dl in _XMM_REGS:
                 xmms[dl] = 0
                 xmms_hi[dl] = 0
-        elif mnem in ("andps", "andpd", "orps", "orpd") and len(parts) == 2:
+        elif mnem in ("andps", "andpd", "orps", "orpd", "xorps", "xorpd") and len(parts) == 2:
             dl, sl = parts[0].lower(), parts[1].lower()
             if dl in _XMM_REGS:
-                is_and = mnem.startswith("and")
+                op_k = "and" if mnem.startswith("and") else ("or" if mnem.startswith("or") else "xor")
                 if sl in _XMM_REGS:
-                    xmms[dl] = _to_int64(xmms[dl] & xmms[sl] if is_and else xmms[dl] | xmms[sl])
-                    xmms_hi[dl] = _to_int64(xmms_hi[dl] & xmms_hi[sl] if is_and else xmms_hi[dl] | xmms_hi[sl])
+                    if op_k == "and":
+                        xmms[dl] = _to_int64(xmms[dl] & xmms[sl])
+                        xmms_hi[dl] = _to_int64(xmms_hi[dl] & xmms_hi[sl])
+                    elif op_k == "or":
+                        xmms[dl] = _to_int64(xmms[dl] | xmms[sl])
+                        xmms_hi[dl] = _to_int64(xmms_hi[dl] | xmms_hi[sl])
+                    else:
+                        xmms[dl] = _to_int64(xmms[dl] ^ xmms[sl])
+                        xmms_hi[dl] = _to_int64(xmms_hi[dl] ^ xmms_hi[sl])
                 else:
                     sv = _eval_op(parts[1], 8, addr_cur)
                     if sv is not None:
-                        xmms[dl] = _to_int64(xmms[dl] & sv if is_and else xmms[dl] | sv)
+                        if op_k == "and":
+                            xmms[dl] = _to_int64(xmms[dl] & sv)
+                        elif op_k == "or":
+                            xmms[dl] = _to_int64(xmms[dl] | sv)
+                        else:
+                            xmms[dl] = _to_int64(xmms[dl] ^ sv)
         elif mnem in ("andnps", "andnpd") and len(parts) == 2:
             dl, sl = parts[0].lower(), parts[1].lower()
             if dl in _XMM_REGS and sl in _XMM_REGS:
@@ -1921,7 +1981,7 @@ def _simulate_x64_insns(
             if parts[0].lower() in _REG_INFO:
                 _write_reg(parts[0], arena.read(regs["rsp"], 8))
                 regs["rsp"] = _to_int64(regs["rsp"] + 8)
-        elif mnem in ("mov", "movsxd", "movsx", "movzx") and len(parts) == 2:
+        elif mnem in ("mov", "movabs", "movsxd", "movsx", "movzx") and len(parts) == 2:
             dst_info = _REG_INFO.get(parts[0].lower())
             if dst_info:
                 if addr_cur in tbl_map:
@@ -2124,6 +2184,20 @@ def _simulate_x64_insns(
                 regs["rax"] = _to_int64(_tolower_ascii(regs["rcx"]))
             elif crt_kind == "memcpy":
                 regs["rax"] = _to_int64(arena.c_memcpy(regs["rcx"], regs["rdx"], regs["r8"]))
+            elif crt_kind == "memset":
+                regs["rax"] = _to_int64(arena.c_memset(regs["rcx"], regs["rdx"], regs["r8"]))
+            elif crt_kind == "pow":
+                try:
+                    _pv = math.pow(_bits_to_f64(xmms["xmm0"]), _bits_to_f64(xmms["xmm1"]))
+                    xmms["xmm0"] = _to_int64(_f64_to_bits(_pv))
+                except (ValueError, OverflowError):
+                    xmms["xmm0"] = _to_int64(0x7FF8000000000000)
+            elif crt_kind == "fmod":
+                try:
+                    _fv = math.fmod(_bits_to_f64(xmms["xmm0"]), _bits_to_f64(xmms["xmm1"]))
+                    xmms["xmm0"] = _to_int64(_f64_to_bits(_fv))
+                except (ValueError, ZeroDivisionError):
+                    xmms["xmm0"] = _to_int64(0x7FF8000000000000)
             if mnem == "jmp":
                 return _to_int64(xmms["xmm0"] if returns_double else regs["rax"])
         elif mnem in (
@@ -2373,6 +2447,9 @@ def _execute_lifted_c_ast(
         "aether_pcmpeqb64": _pcmpeqb64,
         "aether_tolower": lambda c: _to_int64(_tolower_ascii(int(c))),
         "aether_memcpy": lambda dst, src, sz: _to_int64(arena.c_memcpy(int(dst), int(src), int(sz))),
+        "aether_memset": lambda dst, val, sz: _to_int64(arena.c_memset(int(dst), int(val), int(sz))),
+        "aether_pow": lambda a, b: _safe_f64_pow(float(a), float(b)),
+        "aether_fmod": lambda a, b: math.fmod(float(a), float(b)) if float(b) != 0.0 else float("nan"),
         "aether_f64_to_bits": _f64_to_bits,
         "aether_bits_to_f64": _bits_to_f64,
         "aether_f64_comisd": _f64_comisd,
@@ -2527,7 +2604,14 @@ def _structure_lifted_c_to_ctree(c_ident: str, c_code: str) -> Dict[str, Any]:
                 .replace("0xffLL", "0xff")
                 .replace("0xffffLL", "0xffff")
             )
-            stmts_s.append(c_cmov)
+            cond_part = c_cmov[4 : c_cmov.index(") {")].strip()
+            body_part = c_cmov[c_cmov.index(") {") + 3 : -1].strip()
+            sub_stmts = [s.strip() for s in body_part.split(";") if s.strip()]
+            if len(sub_stmts) == 1 and " = " in sub_stmts[0]:
+                lhs_c, rhs_c = sub_stmts[0].split(" = ", 1)
+                stmts_s.append(f"{lhs_c.strip()} = ({cond_part}) ? ({rhs_c.strip()}) : ({lhs_c.strip()});")
+            elif sub_stmts:
+                stmts_s.append(f"(({cond_part}) ? ({', '.join(sub_stmts)}, 0) : 0);")
         else:
             for st in [s.strip() for s in ln.split(";") if s.strip()]:
                 c_stmt = (
@@ -2909,6 +2993,12 @@ def reconstruct_project(
             "    if (dst && src && size > 0) memcpy((void*)(uintptr_t)dst, (const void*)(uintptr_t)src, (size_t)size);",
             "    return dst;",
             "}",
+            "static inline int64_t aether_memset(int64_t dst, int64_t val, int64_t size) {",
+            "    if (dst && size > 0) memset((void*)(uintptr_t)dst, (int)(unsigned char)val, (size_t)size);",
+            "    return dst;",
+            "}",
+            "static inline double aether_pow(double a, double b) { return pow(a, b); }",
+            "static inline double aether_fmod(double a, double b) { return fmod(a, b); }",
             "static inline int64_t aether_strcpy(int64_t dst, int64_t src) {",
             "    if (dst && src) {",
             "        size_t n = strlen((const char*)(uintptr_t)src) + 1;",
@@ -3623,6 +3713,8 @@ def reconstruct_project(
             "    if (kid == 1) return (int64_t)(uintptr_t)&malloc;",
             "    if (kid == 2) return (int64_t)(uintptr_t)&free;",
             "    if (kid == 3) return (int64_t)(uintptr_t)&realloc;",
+            "    if (kid == 4) return (int64_t)(uintptr_t)&aether_pow;",
+            "    if (kid == 5) return (int64_t)(uintptr_t)&aether_fmod;",
             "    return 0;",
             "}",
             "static inline int64_t aether_icall(int64_t fn_ptr, int64_t a0, int64_t a1, int64_t a2, int64_t a3) {",
