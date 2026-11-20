@@ -460,6 +460,7 @@ def _discover_crt_allocator_map(
         "strlen": "strlen", "strcmp": "strcmp", "strncmp": "strncmp",
         "memcpy": "memcpy", "strcpy": "strcpy", "tolower": "tolower",
         "sprintf": "sprintf", "strtod": "strtod", "printf": "printf",
+        "isalpha": "isalpha", "isdigit": "isdigit", "isspace": "isspace", "isxdigit": "isxdigit",
     }
     heap_names = {"HeapAlloc": "malloc", "HeapFree": "free", "HeapReAlloc": "realloc"}
 
@@ -521,6 +522,24 @@ def _discover_crt_allocator_map(
                     if sec_bytes[tgt_off_st : tgt_off_st + 10] == b"\x48\x89\x5c\x24\x10\x57\x48\x83\xec\x50":
                         text_crt_map[sec_rva + st_hit] = "strtod"
             pos_st = st_hit + 1
+
+        pos_ct = 0
+        _ct_masks = {0x103: "isalpha", 0x04: "isdigit", 0x08: "isspace", 0x80: "isxdigit"}
+        while True:
+            ct_hit = sec_bytes.find(b"\x48\x89\x5c\x24\x08\x57\x48\x83\xec\x20\x83\x3d", pos_ct)
+            if ct_hit < 0:
+                break
+            if ct_hit % 16 == 0 or ct_hit == 0:
+                ct_rva = sec_rva + ct_hit
+                for bi in md.disasm(sec_bytes[ct_hit : ct_hit + 72], ct_rva):
+                    if bi.mnemonic.lower() == "and" and bi.op_str.lower().startswith("eax, "):
+                        m_val = _parse_int_literal(bi.op_str.split(",", 1)[1].strip())
+                        if m_val in _ct_masks:
+                            text_crt_map[ct_rva] = _ct_masks[m_val]
+                            break
+                    if bi.mnemonic.lower() == "ret":
+                        break
+            pos_ct = ct_hit + 1
 
         tolow_hit = sec_bytes.find(b"\x8d\x41\xbf\x83\xf8\x19")
         if tolow_hit >= 0:
@@ -1065,6 +1084,8 @@ def _lift_x64_function_full(
             return "    xmm0 = aether_f64_to_bits(aether_strtod(rcx, rdx));"
         if kind == "printf":
             return "    rax = aether_printf(rcx, rdx, r8, r9);"
+        if kind in ("isalpha", "isdigit", "isspace", "isxdigit"):
+            return f"    rax = aether_{kind}(rcx);"
         if kind == "noop":
             return "    /* __security_check_cookie */"
         if kind == "tolower":
@@ -2089,6 +2110,14 @@ def _simulate_x64_insns(
                 xmms["xmm0"] = _to_int64(arena.c_strtod(regs["rcx"], regs["rdx"]))
             elif crt_kind == "printf":
                 regs["rax"] = 0
+            elif crt_kind == "isalpha":
+                regs["rax"] = 1 if (0 <= (regs["rcx"] & 0xFF) < 128 and chr(regs["rcx"] & 0xFF).isalpha()) else 0
+            elif crt_kind == "isdigit":
+                regs["rax"] = 1 if (0 <= (regs["rcx"] & 0xFF) < 128 and chr(regs["rcx"] & 0xFF).isdigit()) else 0
+            elif crt_kind == "isspace":
+                regs["rax"] = 1 if (0 <= (regs["rcx"] & 0xFF) < 128 and chr(regs["rcx"] & 0xFF).isspace()) else 0
+            elif crt_kind == "isxdigit":
+                regs["rax"] = 1 if ((regs["rcx"] & 0xFF) in b"0123456789abcdefABCDEF") else 0
             elif crt_kind == "noop":
                 pass
             elif crt_kind == "tolower":
@@ -2336,6 +2365,10 @@ def _execute_lifted_c_ast(
         "aether_sscanf": lambda *args: 0,
         "aether_strtod": lambda s_ptr, end_ptr: _bits_to_f64(arena.c_strtod(int(s_ptr), int(end_ptr))),
         "aether_printf": lambda *args: 0,
+        "aether_isalpha": lambda c: 1 if (0 <= (int(c) & 0xFF) < 128 and chr(int(c) & 0xFF).isalpha()) else 0,
+        "aether_isdigit": lambda c: 1 if (0 <= (int(c) & 0xFF) < 128 and chr(int(c) & 0xFF).isdigit()) else 0,
+        "aether_isspace": lambda c: 1 if (0 <= (int(c) & 0xFF) < 128 and chr(int(c) & 0xFF).isspace()) else 0,
+        "aether_isxdigit": lambda c: 1 if ((int(c) & 0xFF) in b"0123456789abcdefABCDEF") else 0,
         "aether_fn_ptr": lambda r_rva: _to_int64(int(r_rva)),
         "aether_pcmpeqb64": _pcmpeqb64,
         "aether_tolower": lambda c: _to_int64(_tolower_ascii(int(c))),
@@ -2488,7 +2521,13 @@ def _structure_lifted_c_to_ctree(c_ident: str, c_code: str) -> Dict[str, Any]:
             tgt = ln[ln.index("goto ") + 5 : ln.rindex(";")].strip()
             steps[-1] = (lbl_s, stmts_s, ("goto", f"{cond_str}::{tgt}"))
         elif ln.startswith("if (") and ") {" in ln and ln.endswith("}"):
-            return {"status": "skipped", "reason": "inline_cmov"}
+            c_cmov = (
+                ln.replace("(int64_t)", "(long long)")
+                .replace("(uint64_t)", "(unsigned long long)")
+                .replace("0xffLL", "0xff")
+                .replace("0xffffLL", "0xffff")
+            )
+            stmts_s.append(c_cmov)
         else:
             for st in [s.strip() for s in ln.split(";") if s.strip()]:
                 c_stmt = (
@@ -2862,6 +2901,10 @@ def reconstruct_project(
             "static inline int64_t aether_tolower(int64_t c) {",
             "    return (int64_t)tolower((int)(unsigned char)c);",
             "}",
+            "static inline int64_t aether_isalpha(int64_t c) { return (int64_t)isalpha((int)(unsigned char)c); }",
+            "static inline int64_t aether_isdigit(int64_t c) { return (int64_t)isdigit((int)(unsigned char)c); }",
+            "static inline int64_t aether_isspace(int64_t c) { return (int64_t)isspace((int)(unsigned char)c); }",
+            "static inline int64_t aether_isxdigit(int64_t c) { return (int64_t)isxdigit((int)(unsigned char)c); }",
             "static inline int64_t aether_memcpy(int64_t dst, int64_t src, int64_t size) {",
             "    if (dst && src && size > 0) memcpy((void*)(uintptr_t)dst, (const void*)(uintptr_t)src, (size_t)size);",
             "    return dst;",

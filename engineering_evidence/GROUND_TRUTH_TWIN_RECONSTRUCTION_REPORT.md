@@ -6,10 +6,10 @@ Verificação empírica real (sem mocks): reconstrução de binários MSVC x64 `
 
 | Binário Real | Alvos | 100% Lifted | C-Tree | Ghidra Ref. | Congruência | Twin DLL Compilada (MSVC) | Structs | Tempo (ms) |
 |---|---:|---:|---:|---:|---:|---|---:|---:|
-| `cjson.dll` | 78 | 78 | 78 | 78 | **100.0%** | PASS (197632 B) | 7 | 19218.08 |
-| `tinyexpr.dll` | 5 | 3 | 2 | 0 | **100.0%** | PASS (173056 B) | 7 | 603.58 |
-| `poly_test.dll` | 10 | 9 | 9 | 0 | **100.0%** | PASS (108032 B) | 6 | 452.65 |
-| `multi_poly.dll` | 11 | 10 | 10 | 0 | **100.0%** | PASS (108032 B) | 6 | 442.98 |
+| `cjson.dll` | 78 | 78 | 78 | 78 | **100.0%** | PASS (197632 B) | 7 | 22453.82 |
+| `tinyexpr.dll` | 5 | 3 | 2 | 0 | **100.0%** | PASS (160256 B) | 6 | 561.91 |
+| `poly_test.dll` | 10 | 9 | 9 | 0 | **100.0%** | PASS (108032 B) | 6 | 843.65 |
+| `multi_poly.dll` | 11 | 10 | 10 | 0 | **100.0%** | PASS (108032 B) | 6 | 540.52 |
 
 ## 2. Interoperabilidade Ao Vivo em Heap Compartilhado (`DLL Original` <-> `reconstructed_twin.dll`)
 
@@ -20,7 +20,7 @@ Verificação empírica real (sem mocks): reconstrução de binários MSVC x64 `
 | `compiled twin poly_test :: Full C++ VTable Lifecycle (create/execute/reset/destroy x2)` | `[31, 77, 31, 4925, 97, 4925]` | `[31, 77, 31, 4925, 97, 4925]` | **PASS (100%)** |
 | `multi_poly.dll <-> compiled twin :: DualDevice multiple-inheritance heap` | `[100, 777]` | `[100, 777]` | **PASS (100%)** |
 | `compiled twin multi_poly :: Full Multiple-Inheritance Lifecycle (create/read/write/destroy)` | `[42, 42]` | `[42, 42]` | **PASS (100%)** |
-| `cjson.dll <-> compiled twin :: Live cJSON DOM heap traversal & predicates` | `[3, 1, 1, 1, 2156192438576, 0]` | `[3, 1, 1, 1, 2156192438576, 0]` | **PASS (100%)** |
+| `cjson.dll <-> compiled twin :: Live cJSON DOM heap traversal & predicates` | `[3, 1, 1, 1, 2018889642864, 0]` | `[3, 1, 1, 1, 2018889642864, 0]` | **PASS (100%)** |
 | `cjson.dll <-> compiled twin :: IEEE-754 XMM GetNumberValue(3.14159/NULL) & SetNumberHelper(99.75)` | `[3.14159, True, 99.75]` | `[3.14159, True, 99.75]` | **PASS (100%)** |
 | `compiled twin -> orig cjson.dll :: Live CRT Heap DOM Construction (CreateArray+Number+True+Bool+Null) & PrintUnformatted` | `['[42.5,true,false,null]', 4]` | `['[42.5,true,false,null]', 4]` | **PASS (100%)** |
 | `compiled twin -> orig cjson.dll :: Live Object+String+AddTrue+GetObjectItemCS+Delete` | `['aether_v39', '{"msg":"aether_v39","ok":true}']` | `['aether_v39', '{"msg":"aether_v39","ok":true}']` | **PASS (100%)** |
