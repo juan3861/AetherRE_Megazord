@@ -99,13 +99,13 @@
       "imported_dlls": [
         "KERNEL32.dll"
       ],
-      "reconstruct_ms": 19778.38,
+      "reconstruct_ms": 19723.18,
       "msvc_compiled": true,
       "compiler": "msvc_cl_x64",
-      "compiled_twin_dll_bytes": 275968,
-      "compiled_twin_dll_sha256": "be91c0b0b54dba17ce612aa9e6f3ea8d35e827db2f4e8265fbc3345bb33b397c",
-      "omni_elapsed_ms": 251.842,
-      "omni_throughput_mb_s": 0.692,
+      "compiled_twin_dll_bytes": 276480,
+      "compiled_twin_dll_sha256": "5e7e460f3a1f82137e92e7bd58cedb933c04c8c7c4578609c45afe974cddcd60",
+      "omni_elapsed_ms": 215.206,
+      "omni_throughput_mb_s": 0.81,
       "omni_gears_executed": 12,
       "missing_or_empty_files": []
     },
@@ -133,13 +133,13 @@
       "imported_dlls": [
         "KERNEL32.dll"
       ],
-      "reconstruct_ms": 2502.92,
+      "reconstruct_ms": 2542.69,
       "msvc_compiled": true,
       "compiler": "msvc_cl_x64",
       "compiled_twin_dll_bytes": 318464,
-      "compiled_twin_dll_sha256": "744bc1f45412a4756f90662cefe1ceed9360d2a8aa8c3b5e9a424039b5c7c774",
-      "omni_elapsed_ms": 219.033,
-      "omni_throughput_mb_s": 0.921,
+      "compiled_twin_dll_sha256": "7b0b0f808e0fd50cfde02e85f7de4adf6111bb38e0a5b35ec982247ce55dca68",
+      "omni_elapsed_ms": 220.168,
+      "omni_throughput_mb_s": 0.916,
       "omni_gears_executed": 12,
       "missing_or_empty_files": []
     },
@@ -149,9 +149,9 @@
       "ground_truth": "poly_test.cpp (4 exports + 3 C++ RTTI classes)",
       "status": "complete",
       "total_targets_analyzed": 10,
-      "fully_lifted_congruent_functions": 9,
-      "ctree_structured_functions": 9,
-      "avg_goto_elimination_pct": 88.89,
+      "fully_lifted_congruent_functions": 10,
+      "ctree_structured_functions": 10,
+      "avg_goto_elimination_pct": 90.0,
       "ghidra_enriched_functions": 0,
       "lifted_function_names": [
         "create_processor",
@@ -159,6 +159,7 @@
         "execute_processor",
         "reset_processor",
         "IProcessor_v0_slot0",
+        "IProcessor_v0_slot1",
         "FastProcessor_v0_slot0",
         "FastProcessor_v0_slot1",
         "FastProcessor_v0_slot2",
@@ -171,17 +172,17 @@
         "class FastProcessor `RTTI Type Descriptor Name'",
         "class CryptoProcessor `RTTI Type Descriptor Name'"
       ],
-      "struct_layouts_recovered": 7,
+      "struct_layouts_recovered": 1,
       "imported_dlls": [
         "KERNEL32.dll"
       ],
-      "reconstruct_ms": 698.14,
+      "reconstruct_ms": 673.22,
       "msvc_compiled": true,
       "compiler": "msvc_cl_x64",
-      "compiled_twin_dll_bytes": 172032,
-      "compiled_twin_dll_sha256": "50a32e304cba25b01ca89506efe50daadfc5e80b100a6f7d17921f0e5d17af36",
-      "omni_elapsed_ms": 147.451,
-      "omni_throughput_mb_s": 0.679,
+      "compiled_twin_dll_bytes": 103936,
+      "compiled_twin_dll_sha256": "a91d2224caeacbc32f2756f54e14b3ae24e710d24b707e614a3b188299a0176a",
+      "omni_elapsed_ms": 147.636,
+      "omni_throughput_mb_s": 0.678,
       "omni_gears_executed": 12,
       "missing_or_empty_files": []
     },
@@ -191,8 +192,8 @@
       "ground_truth": "multi_poly.cpp (4 exports + Multiple Inheritance RTTI)",
       "status": "complete",
       "total_targets_analyzed": 11,
-      "fully_lifted_congruent_functions": 10,
-      "ctree_structured_functions": 10,
+      "fully_lifted_congruent_functions": 11,
+      "ctree_structured_functions": 11,
       "avg_goto_elimination_pct": 100.0,
       "ghidra_enriched_functions": 0,
       "lifted_function_names": [
@@ -201,6 +202,7 @@
         "read_from_device",
         "write_to_device",
         "IReader_v0_slot0",
+        "IReader_v0_slot1",
         "IWriter_v0_slot0",
         "DualDevice_v0_slot0",
         "DualDevice_v0_slot1",
@@ -214,17 +216,17 @@
         "class IWriter `RTTI Type Descriptor Name'",
         "class DualDevice `RTTI Type Descriptor Name'"
       ],
-      "struct_layouts_recovered": 7,
+      "struct_layouts_recovered": 1,
       "imported_dlls": [
         "KERNEL32.dll"
       ],
-      "reconstruct_ms": 653.89,
+      "reconstruct_ms": 455.0,
       "msvc_compiled": true,
       "compiler": "msvc_cl_x64",
-      "compiled_twin_dll_bytes": 172032,
-      "compiled_twin_dll_sha256": "be3039c40faceebf907b09a139f851ff52af675a1475264f9358b2347d0f4257",
-      "omni_elapsed_ms": 142.177,
-      "omni_throughput_mb_s": 0.704,
+      "compiled_twin_dll_bytes": 103936,
+      "compiled_twin_dll_sha256": "b81084ba43f0c95211c78735f0c0fc76d65d7a2061484785771ebda1ad7a1b69",
+      "omni_elapsed_ms": 164.17,
+      "omni_throughput_mb_s": 0.61,
       "omni_gears_executed": 12,
       "missing_or_empty_files": []
     }
@@ -307,7 +309,7 @@
         1,
         1,
         1,
-        2369629529504,
+        1754727807360,
         0
       ],
       "compiled_twin_outputs": [
@@ -315,7 +317,7 @@
         1,
         1,
         1,
-        2369629529504,
+        1754727807360,
         0
       ],
       "match": true

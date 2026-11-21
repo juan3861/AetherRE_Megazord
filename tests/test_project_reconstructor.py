@@ -182,7 +182,9 @@ def test_real_cpp_rtti_and_cjson_memory_twin_reconstruction(tmp_path: Path):
 
     poly_rep = reconstruct_project(poly_dll, tmp_path / "poly_twin")
     assert poly_rep.status == "complete"
-    assert poly_rep.fully_lifted_functions >= 9
+    assert poly_rep.total_exports_reconstructed == 10
+    assert poly_rep.fully_lifted_functions == 10
+    assert poly_rep.ctree_structured_functions == 10
     assert poly_rep.overall_congruence_pct == 100.0
     assert any("FastProcessor" in c for c in poly_rep.rtti_classes)
     assert any("CryptoProcessor" in c for c in poly_rep.rtti_classes)
@@ -243,7 +245,9 @@ def test_real_cpp_rtti_and_cjson_memory_twin_reconstruction(tmp_path: Path):
     if mp_dll.is_file():
         mp_rep = reconstruct_project(mp_dll, tmp_path / "multi_poly_twin")
         assert mp_rep.status == "complete"
-        assert mp_rep.fully_lifted_functions >= 10
+        assert mp_rep.total_exports_reconstructed == 11
+        assert mp_rep.fully_lifted_functions == 11
+        assert mp_rep.ctree_structured_functions == 11
         assert mp_rep.overall_congruence_pct == 100.0
         mp_map = {f["name"]: f for f in mp_rep.functions}
         for req_mp in ("create_dual_device", "read_from_device", "write_to_device", "destroy_dual_device"):

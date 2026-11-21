@@ -487,6 +487,11 @@ def _discover_crt_allocator_map(
             elif sym in heap_names:
                 heap_iat_kind[slot_rva] = heap_names[sym]
 
+    lc = getattr(pe, "DIRECTORY_ENTRY_LOAD_CONFIG", None)
+    cfg_disp_va = int(getattr(lc.struct, "GuardCFDispatchFunctionPointer", 0) or 0) if lc and getattr(lc, "struct", None) else 0
+    if cfg_disp_va > image_base:
+        alloc_map[cfg_disp_va - image_base] = "guard_icall"
+
     md = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_64)
     text_crt_map: Dict[int, str] = {}
 
@@ -523,6 +528,17 @@ def _discover_crt_allocator_map(
             cand_sc = sec_chk_hit - 7
             if (cand_sc % 16 == 0 or cand_sc == 0) and sec_bytes[cand_sc : cand_sc + 3] == b"\x48\x3b\x0d":
                 text_crt_map[sec_rva + cand_sc] = "noop"
+
+        pos_ab = 0
+        while True:
+            ab_hit = sec_bytes.find(b"\x48\x85\xc0\x74\x0a\xb9\x16\x00\x00\x00", pos_ab)
+            if ab_hit < 0:
+                break
+            if ab_hit >= 9 and sec_bytes[ab_hit - 9 : ab_hit - 4] == b"\x48\x83\xec\x28\xe8":
+                cand_ab = ab_hit - 9
+                if cand_ab % 4 == 0:
+                    text_crt_map[sec_rva + cand_ab] = "abort"
+            pos_ab = ab_hit + 1
 
         pos_st = 0
         while True:
@@ -1240,6 +1256,10 @@ def _lift_x64_function_full(
             return "    xmm0 = aether_f64_to_bits(aether_pow(aether_bits_to_f64(xmm0), aether_bits_to_f64(xmm1)));"
         if kind == "fmod":
             return "    xmm0 = aether_f64_to_bits(aether_fmod(aether_bits_to_f64(xmm0), aether_bits_to_f64(xmm1)));"
+        if kind == "guard_icall":
+            return "    rax = aether_icall(rax, rcx, rdx, r8, r9);"
+        if kind == "abort":
+            return "    rax = aether_abort();"
         return "    rax = aether_memcpy(rcx, rdx, r8);"
 
     def _emit_internal_call(target_rva: int, is_tail: bool) -> None:
@@ -2348,6 +2368,32 @@ def _simulate_x64_insns(
                     xmms["xmm0"] = _to_int64(_f64_to_bits(_fv))
                 except (ValueError, ZeroDivisionError):
                     xmms["xmm0"] = _to_int64(0x7FF8000000000000)
+            elif crt_kind == "guard_icall":
+                _gfn = regs["rax"]
+                if _gfn == 0x1A001:
+                    regs["rax"] = _to_int64(arena.alloc(regs["rcx"]))
+                elif _gfn == 0x1A002:
+                    regs["rax"] = _to_int64(arena.free(regs["rcx"]))
+                elif _gfn == 0x1A003:
+                    regs["rax"] = _to_int64(arena.realloc(regs["rcx"], regs["rdx"]))
+                elif _gfn in fn_map:
+                    _gc = fn_map[_gfn]
+                    regs["rax"] = _to_int64(_simulate_x64_insns(
+                        _gc["insns"], regs["rcx"], regs["rdx"], regs["r8"], regs["r9"],
+                        mem_arena=arena, ro_rip_values=_gc.get("ro_rip_values"),
+                        crt_call_sites=_gc.get("crt_call_sites"), fn_table=fn_map,
+                        ro_tables=_gc.get("ro_tables"), rva_anchors=set(_gc.get("rva_anchor_regs", ())),
+                        vtable_leas=_gc.get("vtable_leas"), vcall_sites=_gc.get("vcall_sites"),
+                        rw_rip_rvas=_gc.get("rw_rip_rvas"), rw_data_base=rw_data_base,
+                        ro_lea_rvas=_gc.get("ro_lea_rvas"), ro_arena_addrs=ro_arena_addrs,
+                        fn_lea_rvas=_gc.get("fn_lea_rvas"), crt_lea_sites=_gc.get("crt_lea_sites"),
+                        fcall_sites=_gc.get("fcall_sites"), icall_sites=_gc.get("icall_sites"),
+                        _depth=_depth + 1,
+                    ))
+                else:
+                    regs["rax"] = 0
+            elif crt_kind == "abort":
+                regs["rax"] = 0
             if mnem == "jmp":
                 return _to_int64(xmms["xmm0"] if returns_double else regs["rax"])
         elif mnem in (
@@ -2587,6 +2633,7 @@ def _execute_lifted_c_ast(
         "aether_strcpy": lambda dst, src: _to_int64(arena.c_strcpy(int(dst), int(src))),
         "aether_sprintf": lambda buf, fmt, a1, a2, a3: _to_int64(arena.c_sprintf(int(buf), int(fmt), int(a1), int(a2), int(a3))),
         "aether_sscanf": lambda *args: 0,
+        "aether_abort": lambda *args: 0,
         "aether_strtod": lambda s_ptr, end_ptr: _bits_to_f64(arena.c_strtod(int(s_ptr), int(end_ptr))),
         "aether_printf": lambda *args: 0,
         "aether_isalpha": lambda c: 1 if (0 <= (int(c) & 0xFF) < 128 and chr(int(c) & 0xFF).isalpha()) else 0,
@@ -3970,6 +4017,7 @@ def reconstruct_project(
         header_lines.append("static inline double aether_atan2(double y, double x) { return atan2(y, x); }")
         header_lines.append("static inline double aether_pow(double a, double b);")
         header_lines.append("static inline double aether_fmod(double a, double b);")
+        header_lines.append("static inline int64_t aether_abort(void) { return 0; }")
 
         use_ro_sec = bool(
             ro_relocs
