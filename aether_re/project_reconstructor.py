@@ -236,6 +236,16 @@ class _MemoryArena:
         n = self.c_strlen(src) + 1
         return self.c_memcpy(dst, src, n)
 
+    def c_strrchr(self, s: int, ch: int) -> int:
+        if s < self.base:
+            return 0
+        raw = self.read_cstr(s)
+        target = int(ch) & 0xFF
+        if target == 0:
+            return s + len(raw)
+        idx = raw.rfind(bytes([target]))
+        return (s + idx) if idx >= 0 else 0
+
     def c_strncmp(self, a: int, b: int, n: int) -> int:
         if n <= 0:
             return 0
@@ -469,7 +479,7 @@ def _discover_crt_allocator_map(
     heap_iat_kind: Dict[int, str] = {}
     direct_names = {
         "malloc": "malloc", "free": "free", "realloc": "realloc",
-        "strlen": "strlen", "strcmp": "strcmp", "strncmp": "strncmp",
+        "strlen": "strlen", "strcmp": "strcmp", "strncmp": "strncmp", "strrchr": "strrchr",
         "memcpy": "memcpy", "strcpy": "strcpy", "tolower": "tolower",
         "sprintf": "sprintf", "strtod": "strtod", "printf": "printf",
         "isalpha": "isalpha", "isdigit": "isdigit", "isspace": "isspace", "isxdigit": "isxdigit",
@@ -514,6 +524,7 @@ def _discover_crt_allocator_map(
             (b"\x48\x8b\xc1\x4c\x8b\xc9\x4c\x8d\x15", "memset"),
             (b"\x48\x81\xec\xb8\x00\x00\x00\x66\x0f\x7f\x74\x24\x50\x66\x0f\x7f\x7c\x24\x60\x66\x49\x0f\x7e\xc0\x66\x49\x0f\x7e\xc9", "fmod"),
             (b"\x4c\x8b\xd9\x48\x2b\xca\xf6\xc2\x07", "strcpy"),
+            (b"\x45\x33\xc9\x4c\x8b\xc1\x84\xd2\x75\x3f", "strrchr"),
             (b"\x48\x89\x54\x24\x10\x4c\x89\x44\x24\x18\x4c\x89\x4c\x24\x20\x53\x56\x57\x48\x83\xec\x30\x48\x8b\xda\x48\x8d\x74\x24\x60", "sprintf"),
             (b"\x48\x89\x54\x24\x10\x4c\x89\x44\x24\x18\x4c\x89\x4c\x24\x20\x53\x56\x57\x48\x83\xec\x30\x48\x8b\xfa\x48\x8d\x74\x24\x60", "sscanf"),
             (b"\x48\x89\x4c\x24\x08\x48\x89\x54\x24\x10\x4c\x89\x44\x24\x18\x4c\x89\x4c\x24\x20\x53\x56\x57\x48\x83\xec\x30\x48\x8b\xf9\x48\x8d\x74\x24\x58\xb9\x01\x00\x00\x00", "printf"),
@@ -1236,6 +1247,8 @@ def _lift_x64_function_full(
             return "    rax = aether_strncmp(rcx, rdx, r8);"
         if kind == "strcpy":
             return "    rax = aether_strcpy(rcx, rdx);"
+        if kind == "strrchr":
+            return "    rax = aether_strrchr(rcx, rdx);"
         if kind == "sprintf":
             return "    rax = aether_sprintf(rcx, rdx, r8, r9, aether_mem_read(rsp + 0x20, 8));"
         if kind == "sscanf":
@@ -2332,6 +2345,8 @@ def _simulate_x64_insns(
                 regs["rax"] = _to_int64(arena.c_strncmp(regs["rcx"], regs["rdx"], regs["r8"]))
             elif crt_kind == "strcpy":
                 regs["rax"] = _to_int64(arena.c_strcpy(regs["rcx"], regs["rdx"]))
+            elif crt_kind == "strrchr":
+                regs["rax"] = _to_int64(arena.c_strrchr(regs["rcx"], regs["rdx"]))
             elif crt_kind == "sprintf":
                 regs["rax"] = _to_int64(arena.c_sprintf(regs["rcx"], regs["rdx"], regs["r8"], regs["r9"], arena.read(regs["rsp"] + 0x20, 8)))
             elif crt_kind == "sscanf":
@@ -2631,6 +2646,7 @@ def _execute_lifted_c_ast(
         "aether_strcmp": lambda p1, p2: _to_int64(arena.c_strcmp(int(p1), int(p2))),
         "aether_strncmp": lambda p1, p2, n: _to_int64(arena.c_strncmp(int(p1), int(p2), int(n))),
         "aether_strcpy": lambda dst, src: _to_int64(arena.c_strcpy(int(dst), int(src))),
+        "aether_strrchr": lambda s, ch: _to_int64(arena.c_strrchr(int(s), int(ch))),
         "aether_sprintf": lambda buf, fmt, a1, a2, a3: _to_int64(arena.c_sprintf(int(buf), int(fmt), int(a1), int(a2), int(a3))),
         "aether_sscanf": lambda *args: 0,
         "aether_abort": lambda *args: 0,
@@ -2747,7 +2763,7 @@ def _execute_lifted_c_ast(
             return _to_int64(int(env["rax"]))
         if ln == "return aether_bits_to_f64(xmm0);":
             return _to_int64(int(env["xmm0"]))
-        if ln.startswith("if (") and "goto " in ln:
+        if ln.startswith("if (") and ("goto " in ln or ") {" in ln):
             if ") goto " in ln:
                 cond_str = ln[4 : ln.index(") goto")].strip()
                 target_lbl = ln[ln.index("goto ") + 5 : ln.rindex(";")].strip()
@@ -3242,6 +3258,9 @@ def reconstruct_project(
             "        memcpy((void*)(uintptr_t)dst, (const void*)(uintptr_t)src, n);",
             "    }",
             "    return dst;",
+            "}",
+            "static inline int64_t aether_strrchr(int64_t s, int64_t ch) {",
+            "    return s ? (int64_t)(uintptr_t)strrchr((const char*)(uintptr_t)s, (int)(unsigned char)ch) : 0;",
             "}",
             "static inline int64_t aether_u32(uint64_t v) {",
             "    return (int64_t)(uint32_t)v;",
