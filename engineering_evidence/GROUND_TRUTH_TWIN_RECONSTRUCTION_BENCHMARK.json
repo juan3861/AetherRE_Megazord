@@ -99,13 +99,13 @@
       "imported_dlls": [
         "KERNEL32.dll"
       ],
-      "reconstruct_ms": 18330.73,
+      "reconstruct_ms": 19778.38,
       "msvc_compiled": true,
       "compiler": "msvc_cl_x64",
-      "compiled_twin_dll_bytes": 198144,
-      "compiled_twin_dll_sha256": "d852da8548527b1a33048659e15ea48d7c4866fbfa119b7cf4abfa2831a5258f",
-      "omni_elapsed_ms": 201.313,
-      "omni_throughput_mb_s": 0.866,
+      "compiled_twin_dll_bytes": 275968,
+      "compiled_twin_dll_sha256": "be91c0b0b54dba17ce612aa9e6f3ea8d35e827db2f4e8265fbc3345bb33b397c",
+      "omni_elapsed_ms": 251.842,
+      "omni_throughput_mb_s": 0.692,
       "omni_gears_executed": 12,
       "missing_or_empty_files": []
     },
@@ -129,17 +129,17 @@
       "differential_congruence_pct_on_lifted": 100.0,
       "rtti_total_classes": 3,
       "rtti_user_classes": [],
-      "struct_layouts_recovered": 5,
+      "struct_layouts_recovered": 7,
       "imported_dlls": [
         "KERNEL32.dll"
       ],
-      "reconstruct_ms": 2193.48,
+      "reconstruct_ms": 2502.92,
       "msvc_compiled": true,
       "compiler": "msvc_cl_x64",
-      "compiled_twin_dll_bytes": 167424,
-      "compiled_twin_dll_sha256": "7217787a04963099dda8e96c30449e552c922d2bb6a126c880705f02e7572a07",
-      "omni_elapsed_ms": 213.033,
-      "omni_throughput_mb_s": 0.947,
+      "compiled_twin_dll_bytes": 318464,
+      "compiled_twin_dll_sha256": "744bc1f45412a4756f90662cefe1ceed9360d2a8aa8c3b5e9a424039b5c7c774",
+      "omni_elapsed_ms": 219.033,
+      "omni_throughput_mb_s": 0.921,
       "omni_gears_executed": 12,
       "missing_or_empty_files": []
     },
@@ -171,17 +171,17 @@
         "class FastProcessor `RTTI Type Descriptor Name'",
         "class CryptoProcessor `RTTI Type Descriptor Name'"
       ],
-      "struct_layouts_recovered": 6,
+      "struct_layouts_recovered": 7,
       "imported_dlls": [
         "KERNEL32.dll"
       ],
-      "reconstruct_ms": 401.56,
+      "reconstruct_ms": 698.14,
       "msvc_compiled": true,
       "compiler": "msvc_cl_x64",
-      "compiled_twin_dll_bytes": 106496,
-      "compiled_twin_dll_sha256": "25e5fcf782f8397a128b4948c7dfeee5c0c600d41f8b5d910bb6ff4abf8da21a",
-      "omni_elapsed_ms": 159.225,
-      "omni_throughput_mb_s": 0.629,
+      "compiled_twin_dll_bytes": 172032,
+      "compiled_twin_dll_sha256": "50a32e304cba25b01ca89506efe50daadfc5e80b100a6f7d17921f0e5d17af36",
+      "omni_elapsed_ms": 147.451,
+      "omni_throughput_mb_s": 0.679,
       "omni_gears_executed": 12,
       "missing_or_empty_files": []
     },
@@ -214,17 +214,17 @@
         "class IWriter `RTTI Type Descriptor Name'",
         "class DualDevice `RTTI Type Descriptor Name'"
       ],
-      "struct_layouts_recovered": 6,
+      "struct_layouts_recovered": 7,
       "imported_dlls": [
         "KERNEL32.dll"
       ],
-      "reconstruct_ms": 429.9,
+      "reconstruct_ms": 653.89,
       "msvc_compiled": true,
       "compiler": "msvc_cl_x64",
-      "compiled_twin_dll_bytes": 106496,
-      "compiled_twin_dll_sha256": "1a32e6390339fcfd4233c9b738f437f9a5f5f8e186d776361a6ce470ddff8aff",
-      "omni_elapsed_ms": 162.987,
-      "omni_throughput_mb_s": 0.614,
+      "compiled_twin_dll_bytes": 172032,
+      "compiled_twin_dll_sha256": "be3039c40faceebf907b09a139f851ff52af675a1475264f9358b2347d0f4257",
+      "omni_elapsed_ms": 142.177,
+      "omni_throughput_mb_s": 0.704,
       "omni_gears_executed": 12,
       "missing_or_empty_files": []
     }
@@ -307,7 +307,7 @@
         1,
         1,
         1,
-        2897239646144,
+        2369629529504,
         0
       ],
       "compiled_twin_outputs": [
@@ -315,7 +315,7 @@
         1,
         1,
         1,
-        2897239646144,
+        2369629529504,
         0
       ],
       "match": true
@@ -471,6 +471,20 @@
         1025.0,
         36.0,
         121.0
+      ],
+      "match": true
+    },
+    {
+      "target": "compiled twin tinyexpr :: Live .rdata Relocated Builtins te_interp(sin/pi/sqrt/pow/ln/e/abs/cos/floor/ceil/fac/ncr/atan2)",
+      "original_dll_outputs": [
+        47.0,
+        145.25,
+        3.1415926536
+      ],
+      "compiled_twin_outputs": [
+        47.0,
+        145.25,
+        3.1415926536
       ],
       "match": true
     }

@@ -437,7 +437,10 @@ def _uses_xmm_before_write(insns: List[Tuple[int, str, str]], target_xmm: str) -
         if mnem in ("comisd", "ucomisd"):
             if any(p == target_xmm for p in parts):
                 return True
-        elif mnem in ("addsd", "subsd", "mulsd", "divsd"):
+        elif mnem in ("addsd", "subsd", "mulsd", "divsd", "andps", "andpd", "orps", "orpd"):
+            if any(p == target_xmm for p in parts):
+                return True
+        elif mnem in ("xorps", "xorpd") and len(parts) == 2 and parts[0] != parts[1]:
             if any(p == target_xmm for p in parts):
                 return True
         elif mnem == "cvttsd2si" and len(parts) == 2 and parts[1] == target_xmm:
@@ -538,20 +541,119 @@ def _discover_crt_allocator_map(
             b"\x48\x89\x5c\x24\x18\x55\x56\x57\x48\x81\xec\xb0\x00\x00\x00\xf2\x0f\x11\x84\x24\xd0\x00\x00\x00\x45\x33\xdb"
         )
         if pow_hit >= 0 and (pow_hit % 16 == 0 or pow_hit == 0):
-            pow_rva = sec_rva + pow_hit
-            text_crt_map[pow_rva] = "pow"
+            text_crt_map[sec_rva + pow_hit] = "pow"
+
+        # 1b. Discover MSVC CRT <math.h> routines via .pdata matherr name references + exact prologues
+        _math_names_b = {
+            b"acos", b"asin", b"atan", b"atan2", b"ceil", b"cos", b"cosh",
+            b"exp", b"fabs", b"floor", b"fmod", b"log", b"log10", b"pow",
+            b"sin", b"sinh", b"sqrt", b"tan", b"tanh",
+        }
+        for p_sec in pe.sections:
+            if p_sec.Name.startswith(b".pdata"):
+                p_raw = p_sec.PointerToRawData
+                p_sz = min(p_sec.Misc_VirtualSize, len(pe_data) - p_raw)
+                for p_off in range(p_raw, p_raw + p_sz - 11, 12):
+                    fn_b, fn_e, _ = struct.unpack_from("<III", pe_data, p_off)
+                    if not (sec_rva <= fn_b < fn_e <= sec_rva + sec_size):
+                        continue
+                    fb = sec_bytes[fn_b - sec_rva : fn_e - sec_rva]
+                    for j in range(max(0, len(fb) - 7)):
+                        if fb[j] in (0x48, 0x4C) and fb[j + 1] == 0x8D and (fb[j + 2] & 0xC7) == 0x05:
+                            disp_m = struct.unpack_from("<i", fb, j + 3)[0]
+                            tgt_m = fn_b + j + 7 + disp_m
+                            try:
+                                to_m = pe.get_offset_from_rva(tgt_m)
+                            except Exception:
+                                continue
+                            if 0 <= to_m < len(pe_data):
+                                s_m = pe_data[to_m : to_m + 16].split(b"\x00", 1)[0]
+                                if s_m in _math_names_b:
+                                    text_crt_map.setdefault(fn_b, s_m.decode("ascii"))
+                                    break
+                break
+
+        for m_pat, m_name in (
+            (b"\x48\x83\xec\x78\x83\x3d", "sin"),
+            (b"\x48\x83\xec\x68\x83\x3d", "cos"),
+            (b"\x48\x81\xec\x88\x00\x00\x00\x66\x0f\x7f\x74\x24\x20\x66\x0f\x7f\x7c\x24\x30\x83\x3d", "tan"),
+            (b"\x48\x83\xec\x68\x48\xba\xff\xff\xff\xff\xff\xff\xff\x7f\x0f\x29\x7c\x24\x40\x0f\x28\xf8", "tanh"),
+            (b"\x48\x83\xec\x38\x48\xba\xff\xff\xff\xff\xff\xff\xff\x7f\x0f\x57\xd2\xf2\x0f\x10\xd0\x0f\x28\xd8", "atan"),
+            (b"\x48\x89\x5c\x24\x08\x48\x89\x6c\x24\x10\x48\x89\x74\x24\x18\x57\x41\x54\x41\x55\x41\x56\x41\x57\x48\x83\xec\x60", "atan2"),
+            (b"\x48\x83\xec\x38\xf3\x0f\x7e\xc0\x66\x48\x0f\x7e\xc2\x48\x0f\xba\xf2\x3f", "exp"),
+            (b"\x48\x83\xec\x58\x66\x0f\x7f\x74\x24\x20", "log"),
+        ):
+            m_hit = sec_bytes.find(m_pat)
+            if m_hit >= 0 and (m_hit % 16 == 0 or m_hit == 0):
+                if m_name in ("sin", "cos") and sec_bytes[m_hit + 17 : m_hit + 28] != b"\x66\x48\x0f\x7e\xc2\x66\x0f\x57\xd2\x4c\x8b":
+                    continue
+                if m_name == "log":
+                    for l_pos in (m_hit, sec_bytes.find(m_pat, m_hit + 1)):
+                        if l_pos >= 0 and (l_pos % 16 == 0 or l_pos == 0):
+                            if sec_bytes[l_pos + 23 : l_pos + 36] == b"\x66\x0f\x6f\xd8\x66\x0f\x28\xe0\x66\x0f\x73\xd3\x34":
+                                text_crt_map.setdefault(sec_rva + l_pos, "log")
+                            elif sec_bytes[l_pos + 23 : l_pos + 36] == b"\x66\x0f\x28\xd8\x66\x0f\x28\xe0\x66\x0f\x73\xd3\x34":
+                                text_crt_map.setdefault(sec_rva + l_pos, "log10")
+                    continue
+                text_crt_map.setdefault(sec_rva + m_hit, m_name)
+
+        pos_cf = 0
+        while True:
+            cf_hit = sec_bytes.find(
+                b"\x45\x33\xc9\x0f\x57\xd2\xf2\x0f\x10\xd0\x48\xb9\xff\xff\xff\xff\xff\xff\xff\x7f\x66\x48\x0f\x7e\xd2\x48\x8b\xc2",
+                pos_cf,
+            )
+            if cf_hit < 0:
+                break
+            if cf_hit % 16 == 0 or cf_hit == 0:
+                is_ceil = sec_bytes[cf_hit + 96 : cf_hit + 98] == b"\x48\xb8"
+                text_crt_map.setdefault(sec_rva + cf_hit, "ceil" if is_ceil else "floor")
+            pos_cf = cf_hit + 1
+
+        # 1c. Propagate CRT <math.h> names through __isa_available / __use_fma3_lib dispatchers
+        for _ in range(2):
             pos_dp = 0
             while True:
                 dp_hit = sec_bytes.find(b"\x83\xe0\x03\x3c\x03\x0f\x84", pos_dp)
                 if dp_hit < 0:
                     break
                 if dp_hit >= 6 and sec_bytes[dp_hit - 6 : dp_hit - 4] == b"\x8b\x05":
+                    je_disp = struct.unpack_from("<i", sec_bytes, dp_hit + 7)[0]
+                    je_tgt = sec_rva + dp_hit + 11 + je_disp
+                    if je_tgt in text_crt_map:
+                        text_crt_map.setdefault(sec_rva + dp_hit - 6, text_crt_map[je_tgt])
                     jmp_pos = dp_hit + 11
                     if jmp_pos + 5 <= len(sec_bytes) and sec_bytes[jmp_pos] == 0xE9:
                         disp_pw = struct.unpack_from("<i", sec_bytes, jmp_pos + 1)[0]
-                        if sec_rva + jmp_pos + 5 + disp_pw == pow_rva:
-                            text_crt_map[sec_rva + dp_hit - 6] = "pow"
+                        tgt_pw = sec_rva + jmp_pos + 5 + disp_pw
+                        if tgt_pw in text_crt_map:
+                            text_crt_map.setdefault(sec_rva + dp_hit - 6, text_crt_map[tgt_pw])
                 pos_dp = dp_hit + 1
+            pos_cf_dp = 0
+            while True:
+                cf_dp = sec_bytes.find(b"\x0f\x8d", pos_cf_dp)
+                if cf_dp < 0:
+                    break
+                if cf_dp >= 7 and sec_bytes[cf_dp - 7 : cf_dp - 5] == b"\x83\x3d":
+                    jmp_pos = cf_dp + 6
+                    if jmp_pos + 5 <= len(sec_bytes) and sec_bytes[jmp_pos] == 0xE9:
+                        disp_cf = struct.unpack_from("<i", sec_bytes, jmp_pos + 1)[0]
+                        tgt_cf = sec_rva + jmp_pos + 5 + disp_cf
+                        if tgt_cf in text_crt_map:
+                            text_crt_map.setdefault(sec_rva + cf_dp - 7, text_crt_map[tgt_cf])
+                pos_cf_dp = cf_dp + 1
+            pos_fm = 0
+            while True:
+                fm_hit = sec_bytes.find(b"\x48\x83\xec", pos_fm)
+                if fm_hit < 0:
+                    break
+                if (fm_hit % 16 == 0 or fm_hit == 0) and fm_hit + 26 <= len(sec_bytes):
+                    if sec_bytes[fm_hit + 4 : fm_hit + 6] == b"\x83\x3d" and sec_bytes[fm_hit + 11 : fm_hit + 13] == b"\x0f\x85":
+                        disp_fm = struct.unpack_from("<i", sec_bytes, fm_hit + 13)[0]
+                        tgt_fm = sec_rva + fm_hit + 17 + disp_fm
+                        if tgt_fm in text_crt_map and text_crt_map[tgt_fm] in ("log", "log10"):
+                            text_crt_map.setdefault(sec_rva + fm_hit, text_crt_map[tgt_fm])
+                pos_fm = fm_hit + 1
 
         pos_ct = 0
         _ct_masks = {0x103: "isalpha", 0x04: "isdigit", 0x08: "isspace", 0x80: "isxdigit"}
@@ -992,7 +1094,7 @@ def _lift_x64_function_full(
         first_op = op_i.split(",")[0].strip().lower() if op_i else ""
         if mn_i == "call":
             last_rax_idx = idx_i
-        elif first_op == "xmm0" and mn_i in ("movsd", "movaps", "movapd", "addsd", "subsd", "mulsd", "divsd", "cvtsi2sd"):
+        elif first_op == "xmm0" and mn_i in ("movsd", "movaps", "movapd", "addsd", "subsd", "mulsd", "divsd", "cvtsi2sd", "andps", "andpd", "orps", "orpd"):
             last_xmm0_idx = idx_i
         elif first_op == "xmm0" and mn_i in ("xorps", "xorpd") and not xmm0_used_for_zero_fill and last_rax_idx == -1:
             last_xmm0_idx = idx_i
@@ -1403,6 +1505,16 @@ def _lift_x64_function_full(
                 rva_anchor_regs.add(dst_info[0])
                 c_lines.append(f"    {dst_info[0]} = 0;")
                 continue
+            if rip_t is None and rva_anchor_regs and "[" in parts[1] and "+" in parts[1]:
+                _m_anc = re.match(r"^\[\s*([a-z0-9]+)\s*\+\s*(0x[0-9a-f]+|\d+)\s*\]$", parts[1].strip().lower())
+                if _m_anc and _m_anc.group(1) in rva_anchor_regs:
+                    _cand_rva = _parse_int_literal(_m_anc.group(2))
+                    if _cand_rva is not None and (
+                        (ro_ranges and any(lo <= _cand_rva < hi for lo, hi in ro_ranges))
+                        or (rw_ranges and any(lo <= _cand_rva < hi for lo, hi in rw_ranges))
+                        or (exec_ranges and any(lo <= _cand_rva < hi for lo, hi in exec_ranges))
+                    ):
+                        rip_t = _cand_rva
             if dst_info and rip_t is not None and vtable_arena_addrs and rip_t in vtable_arena_addrs:
                 vtable_leas[addr] = vtable_arena_addrs[rip_t]
                 c_lines.append(f"    {dst_info[0]} = aether_vtable_ptr(0x{rip_t:x});")
@@ -1447,12 +1559,13 @@ def _lift_x64_function_full(
                     if mnem == "xor" and parts[0].lower() == parts[1].lower():
                         c_lines.append(f"    {canon} = 0;")
                     else:
-                        lhs_expr = f"aether_u32({canon})" if w == 4 else canon
+                        lhs_expr = (f"aether_i32({canon})" if mnem == "sar" else f"aether_u32({canon})") if w == 4 else canon
                         rhs_expr = f"({src_res[0]} & 63)" if mnem in ("shl", "shr", "sar") else src_res[0]
                         stmt = _emit_reg_write_stmt(parts[0], f"({lhs_expr}) {op_sym} ({rhs_expr})")
                         if stmt:
-                            if mnem == "sub" and parts[1].strip() == "1" and canon != "rsp":
-                                c_lines.append(f"{stmt} cmp_lhs = {canon}; cmp_rhs = 0;")
+                            if mnem == "sub" and canon != "rsp":
+                                cmp_val = f"aether_i32({canon})" if w == 4 else canon
+                                c_lines.append(f"{stmt} cmp_lhs = {cmp_val}; cmp_rhs = 0;")
                                 last_cmp_width = w
                             else:
                                 c_lines.append(stmt)
@@ -1511,8 +1624,9 @@ def _lift_x64_function_full(
                 }
                 stmt = _emit_reg_write_stmt(parts[0], expr_map[mnem])
                 if stmt:
-                    if mnem in ("inc", "dec") and canon != "rsp":
-                        c_lines.append(f"{stmt} cmp_lhs = {canon}; cmp_rhs = 0;")
+                    if mnem in ("inc", "dec", "neg") and canon != "rsp":
+                        cmp_val = f"aether_i32({canon})" if (mnem == "neg" and w == 4) else canon
+                        c_lines.append(f"{stmt} cmp_lhs = {cmp_val}; cmp_rhs = 0;")
                         last_cmp_width = w
                     else:
                         c_lines.append(stmt)
@@ -1524,6 +1638,17 @@ def _lift_x64_function_full(
                     c_lines.append(
                         f"    aether_mem_write({mem_dst[0]}, {mem_dst[1]}, aether_mem_read({mem_dst[0]}, {mem_dst[1]}) {delta});"
                     )
+                    continue
+
+        if mnem == "div" and len(parts) == 1:
+            dst_info = _REG_INFO.get(parts[0].lower())
+            if dst_info:
+                canon, w = dst_info
+                if w == 8:
+                    c_lines.append(f"    rax = aether_udiv64(rdx, rax, {canon}); rdx = _aether_div_rem;")
+                    continue
+                if w == 4:
+                    c_lines.append(f"    rax = aether_udiv32(rdx, rax, {canon}); rdx = _aether_div_rem;")
                     continue
 
         if mnem == "cmp" and len(parts) == 2:
@@ -1548,7 +1673,9 @@ def _lift_x64_function_full(
             rhs = _resolve_read_with_rip(parts[1], addr, default_w=w_hint)
             if lhs is not None and rhs is not None:
                 last_cmp_width = w_hint
-                c_lines.append(f"    cmp_lhs = ((int64_t)({lhs[0]}) & (int64_t)({rhs[0]})); cmp_rhs = 0;")
+                _t_raw = f"((int64_t)({lhs[0]}) & (int64_t)({rhs[0]}))"
+                _t_sext = f"aether_i{w_hint * 8}({_t_raw})" if w_hint in (1, 2, 4) else _t_raw
+                c_lines.append(f"    cmp_lhs = {_t_sext}; cmp_rhs = 0;")
                 continue
 
         if mnem.startswith("set") and len(parts) == 1:
@@ -2053,8 +2180,9 @@ def _simulate_x64_insns(
                         _write_reg(parts[0], lhs_val + val)
                     elif mnem == "sub":
                         _write_reg(parts[0], lhs_val - val)
-                        if parts[1].strip() == "1" and dst_info[0] != "rsp":
-                            cmp_lhs, cmp_rhs, cmp_width = regs[dst_info[0]], 0, dst_info[1]
+                        if dst_info[0] != "rsp":
+                            cmp_lhs = _i32(regs[dst_info[0]]) if dst_info[1] == 4 else regs[dst_info[0]]
+                            cmp_rhs, cmp_width = 0, dst_info[1]
                     elif mnem == "imul":
                         _write_reg(parts[0], lhs_val * val)
                     elif mnem == "xor":
@@ -2065,8 +2193,11 @@ def _simulate_x64_insns(
                         _write_reg(parts[0], lhs_val | val)
                     elif mnem == "shl":
                         _write_reg(parts[0], lhs_val << (val & 63))
-                    elif mnem in ("shr", "sar"):
+                    elif mnem == "shr":
                         _write_reg(parts[0], lhs_val >> (val & 63))
+                    elif mnem == "sar":
+                        _s_lhs = _i32(lhs_val) if dst_info[1] == 4 else lhs_val
+                        _write_reg(parts[0], _s_lhs >> (val & (31 if dst_info[1] == 4 else 63)))
             elif dst_info and len(parts) == 3 and mnem == "imul":
                 v1 = _eval_op(parts[1], dst_info[1], addr_cur)
                 v2 = _eval_op(parts[2], dst_info[1], addr_cur)
@@ -2119,6 +2250,9 @@ def _simulate_x64_insns(
                         cmp_lhs, cmp_rhs, cmp_width = regs[dst_info[0]], 0, dst_info[1]
                 elif mnem == "neg":
                     _write_reg(parts[0], -lhs_val)
+                    if dst_info[0] != "rsp":
+                        cmp_lhs = _i32(regs[dst_info[0]]) if dst_info[1] == 4 else regs[dst_info[0]]
+                        cmp_rhs, cmp_width = 0, dst_info[1]
                 elif mnem == "not":
                     _write_reg(parts[0], ~lhs_val)
             else:
@@ -2127,6 +2261,20 @@ def _simulate_x64_insns(
                     m_addr = int(eval(mem_dst[0], {"__builtins__": {}}, regs))
                     cur = arena.read(m_addr, mem_dst[1])
                     arena.write(m_addr, mem_dst[1], cur + 1 if mnem == "inc" else cur - 1)
+        elif mnem == "div" and len(parts) == 1:
+            dst_info = _REG_INFO.get(parts[0].lower())
+            if dst_info:
+                dv = _eval_op(parts[0], dst_info[1], addr_cur) or 0
+                if dst_info[1] == 8:
+                    ud = dv & 0xFFFFFFFFFFFFFFFF
+                    un = ((regs["rdx"] & 0xFFFFFFFFFFFFFFFF) << 64) | (regs["rax"] & 0xFFFFFFFFFFFFFFFF)
+                    regs["rax"] = _to_int64(un // ud) if ud else 0
+                    regs["rdx"] = _to_int64(un % ud) if ud else 0
+                elif dst_info[1] == 4:
+                    ud = dv & 0xFFFFFFFF
+                    un = ((regs["rdx"] & 0xFFFFFFFF) << 32) | (regs["rax"] & 0xFFFFFFFF)
+                    regs["rax"] = _u32(un // ud) if ud else 0
+                    regs["rdx"] = _u32(un % ud) if ud else 0
         elif mnem == "cmp" and len(parts) == 2:
             l_info = _REG_INFO.get(parts[0].lower())
             r_info = _REG_INFO.get(parts[1].lower())
@@ -2140,7 +2288,9 @@ def _simulate_x64_insns(
             wh = l_info[1] if l_info else (r_info[1] if r_info else 8)
             v1, v2 = _eval_op(parts[0], wh, addr_cur), _eval_op(parts[1], wh, addr_cur)
             if v1 is not None and v2 is not None:
-                cmp_lhs, cmp_rhs, cmp_width = _to_int64(v1 & v2), 0, wh
+                _t_res = v1 & v2
+                _t_signed = _i32(_t_res) if wh == 4 else (_i16(_t_res) if wh == 2 else (_i8(_t_res) if wh == 1 else _to_int64(_t_res)))
+                cmp_lhs, cmp_rhs, cmp_width = _t_signed, 0, wh
         elif mnem.startswith("set") and len(parts) == 1:
             j_equiv = "j" + mnem[3:]
             dst_info = _REG_INFO.get(parts[0].lower())
@@ -2450,6 +2600,7 @@ def _execute_lifted_c_ast(
         "aether_memset": lambda dst, val, sz: _to_int64(arena.c_memset(int(dst), int(val), int(sz))),
         "aether_pow": lambda a, b: _safe_f64_pow(float(a), float(b)),
         "aether_fmod": lambda a, b: math.fmod(float(a), float(b)) if float(b) != 0.0 else float("nan"),
+        "_aether_div_rem": 0,
         "aether_f64_to_bits": _f64_to_bits,
         "aether_bits_to_f64": _bits_to_f64,
         "aether_f64_comisd": _f64_comisd,
@@ -2477,6 +2628,24 @@ def _execute_lifted_c_ast(
     if ro_table_fns:
         for t_fn_name, t_vals in ro_table_fns.items():
             env[t_fn_name] = (lambda vals: lambda idx: vals[int(idx)] if 0 <= int(idx) < len(vals) else 0)(t_vals)
+    def _exec_udiv64(hi: Any, lo: Any, d: Any) -> int:
+        ud = int(d) & 0xFFFFFFFFFFFFFFFF
+        if ud == 0:
+            env["_aether_div_rem"] = 0
+            return 0
+        un = ((int(hi) & 0xFFFFFFFFFFFFFFFF) << 64) | (int(lo) & 0xFFFFFFFFFFFFFFFF)
+        env["_aether_div_rem"] = _to_int64(un % ud)
+        return _to_int64(un // ud)
+    def _exec_udiv32(hi: Any, lo: Any, d: Any) -> int:
+        ud = int(d) & 0xFFFFFFFF
+        if ud == 0:
+            env["_aether_div_rem"] = 0
+            return 0
+        un = ((int(hi) & 0xFFFFFFFF) << 32) | (int(lo) & 0xFFFFFFFF)
+        env["_aether_div_rem"] = _u32(un % ud)
+        return _u32(un // ud)
+    env["aether_udiv64"] = _exec_udiv64
+    env["aether_udiv32"] = _exec_udiv32
     if c_fn_table:
         for c_sym, meta in c_fn_table.items():
             def _make_callee(m: Dict[str, Any]):
@@ -2999,6 +3168,27 @@ def reconstruct_project(
             "}",
             "static inline double aether_pow(double a, double b) { return pow(a, b); }",
             "static inline double aether_fmod(double a, double b) { return fmod(a, b); }",
+            "static int64_t _aether_div_rem = 0;",
+            "static inline int64_t aether_udiv64(int64_t hi, int64_t lo, int64_t d) {",
+            "    uint64_t ud = (uint64_t)d;",
+            "    if (!ud) { _aether_div_rem = 0; return 0; }",
+            "    if (hi == 0) { uint64_t ul = (uint64_t)lo; _aether_div_rem = (int64_t)(ul % ud); return (int64_t)(ul / ud); }",
+            "    uint64_t q = 0, r = (uint64_t)hi, u_lo = (uint64_t)lo;",
+            "    for (int i = 63; i >= 0; --i) {",
+            "        uint64_t c = r >> 63;",
+            "        r = (r << 1) | ((u_lo >> i) & 1ULL);",
+            "        if (c || r >= ud) { r -= ud; q |= (1ULL << i); }",
+            "    }",
+            "    _aether_div_rem = (int64_t)r;",
+            "    return (int64_t)q;",
+            "}",
+            "static inline int64_t aether_udiv32(int64_t hi, int64_t lo, int64_t d) {",
+            "    uint64_t ud = (uint64_t)(uint32_t)d;",
+            "    if (!ud) { _aether_div_rem = 0; return 0; }",
+            "    uint64_t un = ((uint64_t)(uint32_t)hi << 32) | (uint64_t)(uint32_t)lo;",
+            "    _aether_div_rem = (int64_t)(uint32_t)(un % ud);",
+            "    return (int64_t)(uint32_t)(un / ud);",
+            "}",
             "static inline int64_t aether_strcpy(int64_t dst, int64_t src) {",
             "    if (dst && src) {",
             "        size_t n = strlen((const char*)(uintptr_t)src) + 1;",
@@ -3289,6 +3479,30 @@ def reconstruct_project(
         rec_by_rva: Dict[int, Dict[str, Any]] = {}
         callee_sigs: Dict[int, Tuple[bool, bool, bool]] = {}
 
+        ro_sec_base = 0
+        ro_sec_bytes = b""
+        ro_relocs: List[Tuple[int, int]] = []
+        for s_ro in pe.sections:
+            if s_ro.Name.startswith(b".rdata"):
+                s_raw = s_ro.PointerToRawData
+                s_len = min(int(s_ro.Misc_VirtualSize), len(data) - s_raw, 131072)
+                if s_len > 0:
+                    ro_sec_base = int(s_ro.VirtualAddress)
+                    ro_sec_bytes = data[s_raw : s_raw + s_len]
+                break
+        if ro_sec_base > 0 and ro_sec_bytes:
+            ro_sec_end = ro_sec_base + len(ro_sec_bytes)
+            for blk in getattr(pe, "DIRECTORY_ENTRY_BASERELOC", []):
+                for ent in getattr(blk, "entries", []):
+                    if getattr(ent, "type", 0) == 10:
+                        rel_rva = int(ent.rva)
+                        if ro_sec_base <= rel_rva <= ro_sec_end - 8:
+                            rel_off = rel_rva - ro_sec_base
+                            tgt_rva = struct.unpack_from("<Q", ro_sec_bytes, rel_off)[0] - image_base
+                            if (ro_sec_base <= tgt_rva < ro_sec_end) or any(lo <= tgt_rva < hi for lo, hi in exec_ranges):
+                                ro_relocs.append((rel_rva, int(tgt_rva)))
+
+        ro_relocs_enqueued = False
         while q_idx < len(target_queue):
             fn_name, ordinal, rva, is_exported = target_queue[q_idx]
             q_idx += 1
@@ -3376,6 +3590,28 @@ def reconstruct_project(
             }
             records_list.append(rec)
             rec_by_rva[rva] = rec
+
+            if q_idx >= len(target_queue) and not ro_relocs_enqueued and ro_relocs:
+                ro_relocs_enqueued = True
+                ro_sec_end = ro_sec_base + len(ro_sec_bytes)
+                has_ro_sec_lea = any(
+                    ro_sec_base <= r_l < ro_sec_end
+                    for r_rec in records_list
+                    for r_l in r_rec.get("ro_lea_rvas", {}).values()
+                )
+                if has_ro_sec_lea:
+                    for _, tgt_rva in ro_relocs:
+                        if (
+                            any(lo <= tgt_rva < hi for lo, hi in exec_ranges)
+                            and tgt_rva not in crt_alloc_map
+                            and tgt_rva not in seen_rvas
+                            and internal_helpers_added < 128
+                        ):
+                            seen_rvas.add(tgt_rva)
+                            sub_name = f"sub_{tgt_rva:x}"
+                            rva_to_symbol[tgt_rva] = sub_name
+                            target_queue.append((sub_name, next_vt_ord + internal_helpers_added, tgt_rva, False))
+                            internal_helpers_added += 1
 
         # Pass 2: Propagate Win64 float-ABI signatures into callers that call float-ABI callees
         for rec in records_list:
@@ -3725,17 +3961,81 @@ def reconstruct_project(
             "    return ((aether_vfn_t)(uintptr_t)fn_ptr)(a0, a1, a2, a3);",
             "}",
         ])
-        for r_rva, r_bytes in sorted(ro_bytes_map.items()):
-            b_arr = ", ".join(f"0x{b:02x}" for b in r_bytes) if r_bytes else "0x00"
-            header_lines.append(f"static const uint8_t aether_ro_{r_rva:x}[{max(1, len(r_bytes))}] = {{ {b_arr} }};")
-        header_lines.append("static inline int64_t aether_ro_ptr(int64_t rva) {")
-        for r_rva in sorted(ro_bytes_map.keys()):
-            header_lines.append(f"    if (rva == 0x{r_rva:x}) return (int64_t)(uintptr_t)aether_ro_{r_rva:x};")
-        header_lines.extend([
-            "    (void)rva;",
-            "    return 0;",
-            "}",
-        ])
+        _math_unary_emit = (
+            "acos", "asin", "atan", "ceil", "cos", "cosh", "exp", "fabs",
+            "floor", "log", "log10", "sin", "sinh", "sqrt", "tan", "tanh",
+        )
+        for _mn in _math_unary_emit:
+            header_lines.append(f"static inline double aether_{_mn}(double x) {{ return {_mn}(x); }}")
+        header_lines.append("static inline double aether_atan2(double y, double x) { return atan2(y, x); }")
+        header_lines.append("static inline double aether_pow(double a, double b);")
+        header_lines.append("static inline double aether_fmod(double a, double b);")
+
+        use_ro_sec = bool(
+            ro_relocs
+            and ro_sec_bytes
+            and any(ro_sec_base <= r_rva < ro_sec_base + len(ro_sec_bytes) for r_rva in ro_bytes_map)
+        )
+        if use_ro_sec:
+            header_lines.append(f"static uint8_t aether_ro_sec[{len(ro_sec_bytes)}] = {{")
+            for _chunk_i in range(0, len(ro_sec_bytes), 32):
+                _chunk = ro_sec_bytes[_chunk_i : _chunk_i + 32]
+                header_lines.append("    " + ", ".join(f"0x{b:02x}" for b in _chunk) + ",")
+            header_lines.append("};")
+            header_lines.extend([
+                "static int aether_ro_inited = 0;",
+                "static inline void aether_ro_init(void) {",
+                "    if (aether_ro_inited) return;",
+                "    aether_ro_inited = 1;",
+            ])
+            ro_sec_end = ro_sec_base + len(ro_sec_bytes)
+            for rel_rva, tgt_rva in ro_relocs:
+                rel_off = rel_rva - ro_sec_base
+                if ro_sec_base <= tgt_rva < ro_sec_end:
+                    tgt_off = tgt_rva - ro_sec_base
+                    header_lines.append(
+                        f"    {{ int64_t _p = (int64_t)(uintptr_t)(aether_ro_sec + 0x{tgt_off:x}); memcpy(aether_ro_sec + 0x{rel_off:x}, &_p, 8); }}"
+                    )
+                elif tgt_rva in crt_alloc_map:
+                    _c_nm = crt_alloc_map[tgt_rva]
+                    header_lines.append(
+                        f"    {{ int64_t _p = (int64_t)(uintptr_t)&aether_{_c_nm}; memcpy(aether_ro_sec + 0x{rel_off:x}, &_p, 8); }}"
+                    )
+                elif tgt_rva in defined_rvas:
+                    _f_sym = rva_to_symbol.get(tgt_rva, f"sub_{tgt_rva:x}")
+                    header_lines.append(
+                        f"    {{ int64_t _p = (int64_t)(uintptr_t)&{_f_sym}; memcpy(aether_ro_sec + 0x{rel_off:x}, &_p, 8); }}"
+                    )
+            header_lines.append("}")
+            for r_rva, r_bytes in sorted(ro_bytes_map.items()):
+                if not (ro_sec_base <= r_rva < ro_sec_end):
+                    b_arr = ", ".join(f"0x{b:02x}" for b in r_bytes) if r_bytes else "0x00"
+                    header_lines.append(f"static const uint8_t aether_ro_{r_rva:x}[{max(1, len(r_bytes))}] = {{ {b_arr} }};")
+            header_lines.append("static inline int64_t aether_ro_ptr(int64_t rva) {")
+            header_lines.append("    aether_ro_init();")
+            header_lines.append(
+                f"    if (rva >= 0x{ro_sec_base:x} && rva < 0x{ro_sec_end:x}) return (int64_t)(uintptr_t)(aether_ro_sec + (rva - 0x{ro_sec_base:x}));"
+            )
+            for r_rva in sorted(ro_bytes_map.keys()):
+                if not (ro_sec_base <= r_rva < ro_sec_end):
+                    header_lines.append(f"    if (rva == 0x{r_rva:x}) return (int64_t)(uintptr_t)aether_ro_{r_rva:x};")
+            header_lines.extend([
+                "    (void)rva;",
+                "    return 0;",
+                "}",
+            ])
+        else:
+            for r_rva, r_bytes in sorted(ro_bytes_map.items()):
+                b_arr = ", ".join(f"0x{b:02x}" for b in r_bytes) if r_bytes else "0x00"
+                header_lines.append(f"static const uint8_t aether_ro_{r_rva:x}[{max(1, len(r_bytes))}] = {{ {b_arr} }};")
+            header_lines.append("static inline int64_t aether_ro_ptr(int64_t rva) {")
+            for r_rva in sorted(ro_bytes_map.keys()):
+                header_lines.append(f"    if (rva == 0x{r_rva:x}) return (int64_t)(uintptr_t)aether_ro_{r_rva:x};")
+            header_lines.extend([
+                "    (void)rva;",
+                "    return 0;",
+                "}",
+            ])
         all_fn_leas = sorted({r for rec in records_list for r in rec.get("fn_lea_rvas", {}).values()})
         header_lines.append("static inline int64_t aether_fn_ptr(int64_t rva) {")
         for f_rva in all_fn_leas:

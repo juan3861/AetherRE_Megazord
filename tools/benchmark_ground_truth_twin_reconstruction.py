@@ -551,6 +551,27 @@ def _run_compiled_twin_interop_checks(reconstructed_dir: Path) -> List[Dict[str,
         "match": interp_orig == interp_twin and interp_twin == [14.0, 43.0, 1025.0] and [v5, v10] == [36.0, 121.0],
     })
 
+    # Live .rdata relocated functions[] math builtins in compiled twin tinyexpr
+    builtin_exprs = (
+        b"sin(pi/2) + sqrt(16) * 3.5 + pow(2, 5)",
+        b"ln(e) + abs(-7.25) + cos(0) + floor(3.9) + ceil(2.1) + fac(5) + ncr(5, 2)",
+        b"atan2(1, 1) * 4",
+    )
+    b_orig: List[float] = []
+    b_twin: List[float] = []
+    for expr_b_full in builtin_exprs:
+        eo_b = ctypes.c_int(-1)
+        et_b = ctypes.c_int(-1)
+        b_orig.append(round(orig_te.te_interp(expr_b_full, ctypes.byref(eo_b)), 10))
+        b_twin.append(round(twin_te.te_interp(expr_b_full, ctypes.byref(et_b)), 10))
+
+    checks.append({
+        "target": "compiled twin tinyexpr :: Live .rdata Relocated Builtins te_interp(sin/pi/sqrt/pow/ln/e/abs/cos/floor/ceil/fac/ncr/atan2)",
+        "original_dll_outputs": b_orig,
+        "compiled_twin_outputs": b_twin,
+        "match": b_orig == b_twin and b_twin[:2] == [47.0, 145.25],
+    })
+
     return checks
 
 
@@ -714,7 +735,7 @@ def main() -> int:
         "## 4. Limitações Reais Observadas (Verdade Radical)",
         "",
         "- Todos os 4 projetos C gêmeos gerados (`cjson`, `tinyexpr`, `poly_test`, `multi_poly`) compilam nativamente em MSVC x64 `/O2` sem erros (incluindo resolução de até 128 sub-rotinas internas `.text`, tabelas RVA de `switch`, globais mutáveis `.data` via `aether_data_ptr`, constantes `.rdata` via `aether_ro_ptr`, ponteiros de função `.text` via `aether_fn_ptr`, despacho virtual C++ RTTI via `aether_vtable_ptr`/`aether_vcall`, callbacks float-ABI via `aether_fcall_f64`/`aether_cfcall_f64` e chamadas indiretas via `aether_icall`).",
-        f"- Em `cjson.dll`, **{cj_lifted}/{cj_total}** exports (**100%** da superfície exportada!) são elevados com **100.0%** de congruência e **78/78** enriquecidos via Ghidra — incluindo `cJSON_Parse*` (via CRT `strtod` + `strncmp` + `.rdata` BOM), `cJSON_Print*` (via SSE `pcmpeqb`/`andnps`/`paddq`/`setp` + `sscanf`/`sprintf` + `.data` `global_hooks` pré-semeado), `cJSON_Version` (`'1.7.19'`), `cJSON_GetErrorPtr`/`cJSON_InitHooks`, `cJSON_Compare` via SIMD, `cJSON_Minify` com jump-table RVA, `cJSON_CreateIntArray`/`CreateFloatArray`, `cJSON_SetValuestring`, construtores, DOM, `cJSON_Delete` recursivo, `cJSON_Duplicate`, `cJSON_GetObjectItem*`, `cJSON_ReplaceItem*` e XMM/CRT. Em `poly_test.dll` (**9/10**) e `multi_poly.dll` (**10/11**), todos os factories, wrappers polimórficos e destrutores virtuais são 100% elevados (restando apenas `_purecall`); na `tinyexpr.dll`, **{te_lifted}/{te_total}** (`te_eval` com 16 callbacks indiretos float-ABI/closure, `te_free` com switch `sub_3410` e `te_print` via `aether_printf`) atingem 100% e executam ASTs matemáticas reais ao vivo na CPU host, enquanto `te_compile`/`te_interp` dependem de `bsearch`/`isspace`/`pow` CRT internos.",
+        f"- Em `cjson.dll`, **{cj_lifted}/{cj_total}** exports (**100%** da superfície exportada!) são elevados com **100.0%** de congruência e **78/78** enriquecidos via Ghidra — incluindo `cJSON_Parse*` (via CRT `strtod` + `strncmp` + `.rdata` BOM), `cJSON_Print*` (via SSE `pcmpeqb`/`andnps`/`paddq`/`setp` + `sscanf`/`sprintf` + `.data` `global_hooks` pré-semeado), `cJSON_Version` (`'1.7.19'`), `cJSON_GetErrorPtr`/`cJSON_InitHooks`, `cJSON_Compare` via SIMD, `cJSON_Minify` com jump-table RVA, `cJSON_CreateIntArray`/`CreateFloatArray`, `cJSON_SetValuestring`, construtores, DOM, `cJSON_Delete` recursivo, `cJSON_Duplicate`, `cJSON_GetObjectItem*`, `cJSON_ReplaceItem*` e XMM/CRT. Em `poly_test.dll` (**9/10**) e `multi_poly.dll` (**10/11**), todos os factories, wrappers polimórficos e destrutores virtuais são 100% elevados (restando apenas `_purecall`); na `tinyexpr.dll`, **{te_lifted}/{te_total}** (**100%** dos exports e **5/5** C-Tree: `te_compile`, `te_eval`, `te_free`, `te_interp`, `te_print`) atingem **100.0%** e executam ASTs completas com tabela `.rdata` `functions[]` relocada (`sin`/`cos`/`sqrt`/`pow`/`ln`/`abs`/`floor`/`ceil`/`fac`/`ncr`/`atan2`) ao vivo na CPU host.",
         "",
     ])
     md_out.write_text("\n".join(md_lines), encoding="utf-8")
