@@ -88,8 +88,8 @@ def _format_c_i64(val: int) -> str:
     return str(val)
 
 
-def _extract_identifiers(expr: str) -> Set[str]:
-    return {m.group(1) for m in _IDENT_RE.finditer(expr) if m.group(1) in _TRACKED_SET}
+def _extract_identifiers(expr: str, tracked: Set[str] = _TRACKED_SET) -> Set[str]:
+    return {m.group(1) for m in _IDENT_RE.finditer(expr) if m.group(1) in tracked}
 
 
 def _is_pure_rhs(expr: str) -> bool:
@@ -210,7 +210,7 @@ def _simplify_call_wrappers(expr: str) -> str:
     return out
 
 
-def _simplify_expr(expr: str) -> str:
+def _simplify_expr(expr: str, tracked: Set[str] = _TRACKED_SET) -> str:
     """Applies safe algebraic simplifications without altering C or Python semantics."""
     cur = expr.strip()
     for _ in range(4):
@@ -218,7 +218,7 @@ def _simplify_expr(expr: str) -> str:
         # Simplify (int64_t)(var_or_literal) -> var_or_literal (canonical regs are already int64_t)
         def _repl_i64(m: re.Match[str]) -> str:
             tok = m.group(1)
-            if tok in _TRACKED_SET or _INT_LIT_RE.fullmatch(tok):
+            if tok in tracked or _INT_LIT_RE.fullmatch(tok):
                 return tok
             return m.group(0)
 
@@ -279,7 +279,7 @@ def _subst_vars(expr: str, mapping: Dict[str, str]) -> str:
     return _IDENT_RE.sub(_repl, expr)
 
 
-def _eval_const_condition(cond: str, consts: Dict[str, int]) -> Optional[bool]:
+def _eval_const_condition(cond: str, consts: Dict[str, int], tracked: Set[str] = _TRACKED_SET) -> Optional[bool]:
     """Evaluates pure constant comparison conditions, returning True/False or None."""
     if cond.strip() == "1":
         return True
@@ -288,7 +288,7 @@ def _eval_const_condition(cond: str, consts: Dict[str, int]) -> Optional[bool]:
     sub = _subst_vars(cond, {k: str(v) for k, v in consts.items()})
     sub = _simplify_call_wrappers(sub)
     # Only evaluate if zero variables remain
-    if _extract_identifiers(sub) or _CALL_RE.search(sub):
+    if _extract_identifiers(sub, tracked) or _CALL_RE.search(sub):
         return None
     py_cond = (
         sub.replace("0xffffffffffffffff", str(0xFFFFFFFFFFFFFFFF))
@@ -535,7 +535,282 @@ def _cleanup_cfg(blocks: List[_IRBlock], returns_double: bool) -> List[_IRBlock]
     return blocks
 
 
-def _forward_const_and_copy_prop(blocks: List[_IRBlock]) -> int:
+_BASE_DISP_RE = re.compile(r"^\s*(rbp|rsp)\s*(?:([+-])\s*(0x[0-9a-fA-F]+|\d+))?\s*$")
+
+
+def _split_top_args(arg_str: str) -> List[str]:
+    args: List[str] = []
+    depth = 0
+    start = 0
+    for i, ch in enumerate(arg_str):
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        elif ch == "," and depth == 0:
+            args.append(arg_str[start:i].strip())
+            start = i + 1
+    args.append(arg_str[start:].strip())
+    return args
+
+
+def _rewrite_mem_ops_in_expr(
+    expr: str,
+    slot_map: Dict[Tuple[str, int], Tuple[str, int]],
+    promoted_used: Set[str],
+) -> Tuple[str, bool]:
+    """Rewrites pure scalar aether_mem_read(base +/- disp, w) calls into promoted slot reads."""
+    out = expr
+    changed = False
+    idx = 0
+    while True:
+        pos = out.find("aether_mem_read(", idx)
+        if pos < 0:
+            break
+        if pos > 0 and (out[pos - 1].isalnum() or out[pos - 1] == "_"):
+            idx = pos + 16
+            continue
+        open_p = pos + len("aether_mem_read")
+        close_p = _find_matching_paren(out, open_p)
+        if close_p < 0:
+            break
+        args = _split_top_args(out[open_p + 1 : close_p])
+        if len(args) == 2:
+            m_bd = _BASE_DISP_RE.fullmatch(args[0])
+            w_val = _parse_int_const(args[1])
+            if m_bd and w_val in (4, 8):
+                base = m_bd.group(1)
+                sign = m_bd.group(2)
+                disp_raw = m_bd.group(3)
+                off = 0 if not disp_raw else int(disp_raw, 0)
+                if sign == "-":
+                    off = -off
+                info = slot_map.get((base, off))
+                if info and info[1] == w_val:
+                    slot_var = info[0]
+                    promoted_used.add(slot_var)
+                    rep = f"aether_u32({slot_var})" if w_val == 4 else slot_var
+                    out = out[:pos] + rep + out[close_p + 1 :]
+                    changed = True
+                    continue
+        idx = pos + 16
+    return out, changed
+
+
+def _promote_stack_slots(blocks: List[_IRBlock]) -> Tuple[Set[str], int]:
+    """Promotes non-escaping local stack slots ([rbp-off] / [rsp+off]) to SSA virtual scalars."""
+    if not blocks:
+        return set(), 0
+
+    # Collect all aether_mem_read / aether_mem_write base+offset accesses and check escape safety
+    accesses: Dict[str, Dict[int, List[int]]] = {"rbp": {}, "rsp": {}}
+    written_offs: Dict[str, Set[int]] = {"rbp": set(), "rsp": set()}
+    escaped: Dict[str, bool] = {"rbp": False, "rsp": False}
+
+    # Verify rbp/rsp mutation regions & compute prolog stack frame size (`rsp_frame_bytes`):
+    # - rbp may only be assigned once in blocks[0] (`rbp = rsp` or `rbp = (int64_t)(rsp)`)
+    # - rsp may only be mutated in blocks[0] (prolog) and return blocks (epilog), never in middle blocks
+    rbp_writes = 0
+    rsp_frame_ready_idx = 0
+    rsp_frame_bytes = 0
+    for bi, b in enumerate(blocks):
+        for si, st in enumerate(b.stmts):
+            m_as = _SIMPLE_ASSIGN_RE.match(st)
+            m_cmp = _COMPOUND_ASSIGN_RE.match(st)
+            lhs_w = m_as.group(1) if m_as else (m_cmp.group(1) if m_cmp else None)
+            if lhs_w == "rbp":
+                if bi == 0 and m_as and _strip_outer_parens(m_as.group(2).replace("(int64_t)", "").strip()) == "rsp":
+                    rbp_writes += 1
+                else:
+                    escaped["rbp"] = True
+            elif lhs_w == "rsp":
+                if bi == 0:
+                    rsp_frame_ready_idx = si + 1
+                    if m_cmp and m_cmp.group(2) == "-=":
+                        dv = _parse_int_const(m_cmp.group(3))
+                        if dv is not None and dv > 0:
+                            # `rsp -= 8` pushes sit above local `sub rsp, N`
+                            pass
+                        else:
+                            escaped["rsp"] = True
+                    elif m_as:
+                        rhs_s = _strip_outer_parens(m_as.group(2).replace("(int64_t)", "").strip())
+                        sp = _split_top_binop(rhs_s)
+                        if sp and sp[1] == "-" and _strip_outer_parens(sp[0]) == "rsp":
+                            dv = _parse_int_const(sp[2])
+                            if dv is not None and dv > 0:
+                                rsp_frame_bytes += dv
+                            else:
+                                escaped["rsp"] = True
+                        else:
+                            escaped["rsp"] = True
+                    else:
+                        escaped["rsp"] = True
+                elif b.term_kind != "return":
+                    escaped["rsp"] = True
+    if rbp_writes != 1:
+        escaped["rbp"] = True
+
+    def _scan_stmt_for_mem_and_escape(bi: int, si: int, st: str) -> None:
+        # Mask out valid frame prolog/epilog/mem accesses and check if rbp/rsp escapes elsewhere
+        masked = st
+        # Strip valid stack-arg/sp save/prolog/epilog uses when checking escape
+        if bi == 0 and st in ("rbp = rsp", "rbp = (int64_t)(rsp)"):
+            return
+        if re.fullmatch(r"_aether_sp\s*=\s*rsp", st):
+            return
+        if bi == 0 and si < rsp_frame_ready_idx and re.match(r"^rsp\s*(?:=|\+=|-=)", st):
+            masked = re.sub(r"\brsp\b", "", st, count=1) if st.startswith("rsp =") else ""
+        elif blocks[bi].term_kind == "return" and re.match(r"^rsp\s*(?:=|\+=|-=)", st):
+            masked = ""
+
+        # Collect aether_mem_write(addr, w, val)
+        if masked.startswith("aether_mem_write(") and masked.endswith(")"):
+            args = _split_top_args(masked[len("aether_mem_write(") : -1])
+            if len(args) == 3:
+                m_bd = _BASE_DISP_RE.fullmatch(args[0])
+                w_val = _parse_int_const(args[1])
+                if m_bd:
+                    base = m_bd.group(1)
+                    off = 0 if not m_bd.group(3) else int(m_bd.group(3), 0)
+                    if m_bd.group(2) == "-":
+                        off = -off
+                    if base == "rsp" and ((bi == 0 and si < rsp_frame_ready_idx) or off < 0x40):
+                        # Prolog save or Win64 shadow/stack-arg home: do not promote, not an escape if < 0x40
+                        pass
+                    elif w_val in (1, 2, 4, 8):
+                        accesses[base].setdefault(off, []).append(w_val)
+                        written_offs[base].add(off)
+                    else:
+                        escaped[base] = True
+                    masked = args[2]
+
+        # Scan all aether_mem_read(addr, w)
+        scan_s = masked
+        while True:
+            pos = scan_s.find("aether_mem_read(")
+            if pos < 0:
+                break
+            close_p = _find_matching_paren(scan_s, pos + len("aether_mem_read"))
+            if close_p < 0:
+                break
+            args = _split_top_args(scan_s[pos + len("aether_mem_read(") : close_p])
+            if len(args) == 2:
+                m_bd = _BASE_DISP_RE.fullmatch(args[0])
+                w_val = _parse_int_const(args[1])
+                if m_bd:
+                    base = m_bd.group(1)
+                    off = 0 if not m_bd.group(3) else int(m_bd.group(3), 0)
+                    if m_bd.group(2) == "-":
+                        off = -off
+                    if base == "rsp" and ((bi == 0 and si < rsp_frame_ready_idx) or off < 0x40):
+                        pass
+                    elif w_val in (1, 2, 4, 8):
+                        accesses[base].setdefault(off, []).append(w_val)
+                    else:
+                        escaped[base] = True
+                    scan_s = scan_s[:pos] + "0" + scan_s[close_p + 1 :]
+                    continue
+            scan_s = scan_s[:pos] + "MEM_OTHER" + scan_s[pos + len("aether_mem_read(") :]
+
+        # If rbp or rsp still appears in scan_s (e.g. `rdx = rbp - 0x40` or `mem_read(rsp + rax)`), escaped!
+        if re.search(r"\brbp\b", scan_s):
+            escaped["rbp"] = True
+        if re.search(r"\brsp\b", scan_s):
+            # Ignore `rsp` in epilog return-block restore `r14 = mem_read(rsp, 8)` already masked above
+            if not (bi == 0 and si < rsp_frame_ready_idx):
+                escaped["rsp"] = True
+
+    for bi, b in enumerate(blocks):
+        for si, st in enumerate(b.stmts):
+            _scan_stmt_for_mem_and_escape(bi, si, st)
+        if b.term_kind == "cbranch":
+            if re.search(r"\brbp\b", b.term_cond):
+                escaped["rbp"] = True
+            if re.search(r"\brsp\b", b.term_cond):
+                escaped["rsp"] = True
+
+    slot_map: Dict[Tuple[str, int], Tuple[str, int]] = {}
+    for base in ("rbp", "rsp"):
+        if escaped[base] or not accesses[base]:
+            continue
+        sorted_offs = sorted(accesses[base].keys())
+        # Filter uniform 4/8-byte non-overlapping slots
+        ranges: List[Tuple[int, int]] = []
+        for off in sorted_offs:
+            widths = set(accesses[base][off])
+            if len(widths) != 1:
+                continue
+            w = next(iter(widths))
+            if w not in (4, 8):
+                continue
+            ranges.append((off, off + w))
+        for off in sorted_offs:
+            if off not in written_offs[base]:
+                continue
+            widths = set(accesses[base][off])
+            if len(widths) != 1:
+                continue
+            w = next(iter(widths))
+            if w not in (4, 8):
+                continue
+            if base == "rbp" and off >= 0:
+                continue
+            if base == "rsp" and (off < 0x40 or off + w > rsp_frame_bytes):
+                continue
+            # Check no overlap with any other access offset under same base
+            overlaps = False
+            for off2, widths2 in accesses[base].items():
+                if off2 == off:
+                    continue
+                for w2 in widths2:
+                    if not (off + w <= off2 or off2 + w2 <= off):
+                        overlaps = True
+                        break
+                if overlaps:
+                    break
+            if not overlaps:
+                tag = f"n{-off:x}" if off < 0 else f"p{off:x}"
+                slot_map[(base, off)] = (f"aether_slot_{base}_{tag}", w)
+
+    if not slot_map:
+        return set(), 0
+
+    promoted_vars: Set[str] = set()
+    rewrites = 0
+    for b in blocks:
+        new_stmts: List[str] = []
+        for st in b.stmts:
+            st_cur, ch1 = _rewrite_mem_ops_in_expr(st, slot_map, promoted_vars)
+            if ch1:
+                rewrites += 1
+            if st_cur.startswith("aether_mem_write(") and st_cur.endswith(")"):
+                args = _split_top_args(st_cur[len("aether_mem_write(") : -1])
+                if len(args) == 3:
+                    m_bd = _BASE_DISP_RE.fullmatch(args[0])
+                    w_val = _parse_int_const(args[1])
+                    if m_bd and w_val in (4, 8):
+                        base = m_bd.group(1)
+                        off = 0 if not m_bd.group(3) else int(m_bd.group(3), 0)
+                        if m_bd.group(2) == "-":
+                            off = -off
+                        info = slot_map.get((base, off))
+                        if info and info[1] == w_val:
+                            slot_var = info[0]
+                            promoted_vars.add(slot_var)
+                            val_expr = args[2]
+                            st_cur = f"{slot_var} = aether_u32({val_expr})" if w_val == 4 else f"{slot_var} = {val_expr}"
+                            rewrites += 1
+            new_stmts.append(st_cur)
+        b.stmts = new_stmts
+
+    return promoted_vars, rewrites
+
+
+def _forward_const_and_copy_prop(
+    blocks: List[_IRBlock],
+    tracked: Set[str] = _TRACKED_SET,
+) -> int:
     """Kildall forward CFG constant propagation + safe intra-block copy propagation."""
     name_map, succs = _block_successors(blocks)
     preds: Dict[str, List[str]] = {b.name: [] for b in blocks}
@@ -559,7 +834,7 @@ def _forward_const_and_copy_prop(blocks: List[_IRBlock]) -> int:
         def _active_sub_map() -> Dict[str, str]:
             m: Dict[str, str] = {k: _format_c_i64(v) for k, v in consts.items()}
             for k, src in copies.items():
-                if k not in m and src not in _TRACKED_SET or (src in _TRACKED_SET and k not in m):
+                if k not in m and src not in tracked or (src in tracked and k not in m):
                     if src in consts:
                         m[k] = _format_c_i64(consts[src])
                     else:
@@ -572,15 +847,15 @@ def _forward_const_and_copy_prop(blocks: List[_IRBlock]) -> int:
                 cond_part = stmt[4 : stmt.index(") {")].strip()
                 body_part = stmt[stmt.index(") {") + 3 : -1].strip()
                 sub = _active_sub_map()
-                cond_s = _simplify_expr(_subst_vars(cond_part, sub))
+                cond_s = _simplify_expr(_subst_vars(cond_part, sub), tracked)
                 body_items = [s.strip() for s in body_part.split(";") if s.strip()]
                 new_body: List[str] = []
-                cond_ev = _eval_const_condition(cond_s, consts)
+                cond_ev = _eval_const_condition(cond_s, consts, tracked)
                 for bi in body_items:
                     m_a = _SIMPLE_ASSIGN_RE.match(bi)
                     if m_a:
                         lhs_b, rhs_b = m_a.group(1), m_a.group(2).strip()
-                        rhs_bs = _simplify_expr(_subst_vars(rhs_b, sub))
+                        rhs_bs = _simplify_expr(_subst_vars(rhs_b, sub), tracked)
                         if cond_ev is not False:
                             new_body.append(f"{lhs_b} = {rhs_bs}")
                         _invalidate(lhs_b)
@@ -605,7 +880,7 @@ def _forward_const_and_copy_prop(blocks: List[_IRBlock]) -> int:
             if m_cmp:
                 lhs, op, rhs = m_cmp.group(1), m_cmp.group(2), m_cmp.group(3).strip()
                 sub = _active_sub_map()
-                rhs_s = _simplify_expr(_subst_vars(rhs, sub))
+                rhs_s = _simplify_expr(_subst_vars(rhs, sub), tracked)
                 rc = _parse_int_const(rhs_s)
                 lc = consts.get(lhs)
                 _invalidate(lhs)
@@ -626,18 +901,18 @@ def _forward_const_and_copy_prop(blocks: List[_IRBlock]) -> int:
             if m_as:
                 lhs, rhs = m_as.group(1), m_as.group(2).strip()
                 sub = _active_sub_map()
-                rhs_s = _simplify_expr(_subst_vars(rhs, sub))
-                if lhs == rhs_s and lhs in _TRACKED_SET:
+                rhs_s = _simplify_expr(_subst_vars(rhs, sub), tracked)
+                if lhs == rhs_s and lhs in tracked:
                     # Redundant self-assign (`rax = rax;`)
                     if apply_edits:
                         edits += 1
                     continue
                 _invalidate(lhs)
-                if lhs in _TRACKED_SET:
+                if lhs in tracked:
                     cval = _parse_int_const(rhs_s)
                     if cval is not None:
                         consts[lhs] = cval
-                    elif _TYPE_CAST_IDENT_ONLY_RE.fullmatch(rhs_s) and rhs_s in _TRACKED_SET and rhs_s != lhs:
+                    elif _TYPE_CAST_IDENT_ONLY_RE.fullmatch(rhs_s) and rhs_s in tracked and rhs_s != lhs:
                         copies[lhs] = rhs_s
                 if apply_edits:
                     nstmt = f"{lhs} = {rhs_s}"
@@ -658,11 +933,11 @@ def _forward_const_and_copy_prop(blocks: List[_IRBlock]) -> int:
             b.stmts = new_stmts
             if b.term_kind == "cbranch":
                 sub = _active_sub_map()
-                cond_s = _simplify_expr(_subst_vars(b.term_cond, sub))
+                cond_s = _simplify_expr(_subst_vars(b.term_cond, sub), tracked)
                 if cond_s != b.term_cond:
                     b.term_cond = cond_s
                     edits += 1
-                ce = _eval_const_condition(cond_s, consts)
+                ce = _eval_const_condition(cond_s, consts, tracked)
                 if ce is True:
                     b.term_kind = "goto"
                     b.term_cond = ""
@@ -728,35 +1003,37 @@ def _forward_const_and_copy_prop(blocks: List[_IRBlock]) -> int:
     return total_edits
 
 
-def _stmt_use_def(stmt: str) -> Tuple[Set[str], Optional[str], bool]:
+def _stmt_use_def(stmt: str, tracked: Set[str] = _TRACKED_SET) -> Tuple[Set[str], Optional[str], bool]:
     """Returns (uses, must_def_or_None, is_eliminable_if_dead)."""
     if stmt.startswith("if (") and ") {" in stmt:
         cond_part = stmt[4 : stmt.index(") {")].strip()
         body_part = stmt[stmt.index(") {") + 3 : -1].strip()
-        uses = _extract_identifiers(cond_part)
+        uses = _extract_identifiers(cond_part, tracked)
         for bi in [s.strip() for s in body_part.split(";") if s.strip()]:
-            uses |= _extract_identifiers(bi)
+            uses |= _extract_identifiers(bi, tracked)
         return uses, None, False
 
     m_cmp = _COMPOUND_ASSIGN_RE.match(stmt)
     if m_cmp:
         lhs, rhs = m_cmp.group(1), m_cmp.group(3).strip()
-        uses = _extract_identifiers(rhs) | ({lhs} if lhs in _TRACKED_SET else set())
-        elim = (lhs in _TRACKED_SET) and _is_pure_rhs(rhs)
-        return uses, (lhs if lhs in _TRACKED_SET else None), elim
+        uses = _extract_identifiers(rhs, tracked) | ({lhs} if lhs in tracked else set())
+        elim = (lhs in tracked) and _is_pure_rhs(rhs)
+        return uses, (lhs if lhs in tracked else None), elim
 
     m_as = _SIMPLE_ASSIGN_RE.match(stmt)
     if m_as:
         lhs, rhs = m_as.group(1), m_as.group(2).strip()
-        uses = _extract_identifiers(rhs)
-        must_def = lhs if lhs in _TRACKED_SET else None
-        elim = (lhs in _TRACKED_SET) and _is_pure_rhs(rhs)
+        uses = _extract_identifiers(rhs, tracked)
+        must_def = lhs if lhs in tracked else None
+        elim = (lhs in tracked) and _is_pure_rhs(rhs)
         return uses, must_def, elim
 
-    return _extract_identifiers(stmt), None, False
+    return _extract_identifiers(stmt, tracked), None, False
 
 
-def _backward_liveness_dce(blocks: List[_IRBlock], returns_double: bool) -> Tuple[int, int]:
+def _backward_liveness_dce(
+    blocks: List[_IRBlock], returns_double: bool, tracked: Set[str] = _TRACKED_SET
+) -> Tuple[int, int]:
     """Eliminates dead flag updates (`cmp_lhs`/`cmp_rhs`) and dead register writes across CFG."""
     _, succs = _block_successors(blocks)
     live_in: Dict[str, Set[str]] = {b.name: set() for b in blocks}
@@ -768,7 +1045,7 @@ def _backward_liveness_dce(blocks: List[_IRBlock], returns_double: bool) -> Tupl
         changed = False
         for b in reversed(blocks):
             if b.term_kind == "return":
-                live: Set[str] = _extract_identifiers(b.term_ret) or {default_ret}
+                live: Set[str] = _extract_identifiers(b.term_ret, tracked) or {default_ret}
                 out_s: Set[str] = set()
             else:
                 out_s = set()
@@ -776,10 +1053,10 @@ def _backward_liveness_dce(blocks: List[_IRBlock], returns_double: bool) -> Tupl
                     out_s |= live_in[s]
                 live = set(out_s)
                 if b.term_kind == "cbranch":
-                    live |= _extract_identifiers(b.term_cond)
+                    live |= _extract_identifiers(b.term_cond, tracked)
 
             for stmt in reversed(b.stmts):
-                uses, must_def, elim = _stmt_use_def(stmt)
+                uses, must_def, elim = _stmt_use_def(stmt, tracked)
                 if elim and must_def is not None and must_def not in live:
                     continue
                 if must_def is not None:
@@ -795,15 +1072,15 @@ def _backward_liveness_dce(blocks: List[_IRBlock], returns_double: bool) -> Tupl
     dead_assigns = 0
     for b in blocks:
         if b.term_kind == "return":
-            live = _extract_identifiers(b.term_ret) or {default_ret}
+            live = _extract_identifiers(b.term_ret, tracked) or {default_ret}
         else:
             live = set(live_out[b.name])
             if b.term_kind == "cbranch":
-                live |= _extract_identifiers(b.term_cond)
+                live |= _extract_identifiers(b.term_cond, tracked)
 
         kept_rev: List[str] = []
         for stmt in reversed(b.stmts):
-            uses, must_def, elim = _stmt_use_def(stmt)
+            uses, must_def, elim = _stmt_use_def(stmt, tracked)
             if elim and must_def is not None and must_def not in live:
                 if must_def in ("cmp_lhs", "cmp_rhs"):
                     dead_flags += 1
@@ -821,7 +1098,7 @@ def _backward_liveness_dce(blocks: List[_IRBlock], returns_double: bool) -> Tupl
 
 
 def optimize_lifted_c_via_ssa(c_code: str) -> Tuple[str, Dict[str, int]]:
-    """Runs iterative CFG cleanup, constant/copy propagation, algebraic fold, and DCE."""
+    """Runs iterative CFG cleanup, stack-slot mem2reg, constant/copy propagation, algebraic fold, and DCE."""
     parsed = _parse_c_function(c_code)
     if parsed is None:
         return c_code, {"skipped": 1}
@@ -831,14 +1108,18 @@ def optimize_lifted_c_via_ssa(c_code: str) -> Tuple[str, Dict[str, int]]:
     raw_stmts = sum(len(b.stmts) for b in blocks)
     blocks_before = len(blocks)
 
+    blocks = _cleanup_cfg(blocks, returns_double)
+    promoted_slots, slot_rewrites = _promote_stack_slots(blocks)
+    tracked_vars: Set[str] = _TRACKED_SET | promoted_slots
+
     dead_flags_total = 0
     dead_assigns_total = 0
     prop_edits_total = 0
 
     for _ in range(4):
         blocks = _cleanup_cfg(blocks, returns_double)
-        p_edits = _forward_const_and_copy_prop(blocks)
-        df, da = _backward_liveness_dce(blocks, returns_double)
+        p_edits = _forward_const_and_copy_prop(blocks, tracked_vars)
+        df, da = _backward_liveness_dce(blocks, returns_double, tracked_vars)
         prop_edits_total += p_edits
         dead_flags_total += df
         dead_assigns_total += da
@@ -846,7 +1127,18 @@ def optimize_lifted_c_via_ssa(c_code: str) -> Tuple[str, Dict[str, int]]:
             break
     blocks = _cleanup_cfg(blocks, returns_double)
 
-    out_lines: List[str] = list(header_lines)
+    active_slots = sorted(
+        sv for sv in promoted_slots if any(sv in st for b in blocks for st in b.stmts)
+    )
+    out_lines: List[str] = []
+    inserted_slots = False
+    for hl in header_lines:
+        if active_slots and not inserted_slots and hl.strip().startswith(("xmm0 =", "xmm1 =")):
+            out_lines.append("    int64_t " + ", ".join(f"{sv} = 0" for sv in active_slots) + ";")
+            inserted_slots = True
+        out_lines.append(hl)
+    if active_slots and not inserted_slots:
+        out_lines.append("    int64_t " + ", ".join(f"{sv} = 0" for sv in active_slots) + ";")
     for i, b in enumerate(blocks):
         if i == 0 and b.label:
             out_lines.append(f"{b.label}: ; /* entry */")
@@ -869,6 +1161,8 @@ def optimize_lifted_c_via_ssa(c_code: str) -> Tuple[str, Dict[str, int]]:
         "opt_stmts": opt_stmts,
         "blocks_before": blocks_before,
         "blocks_after": len(blocks),
+        "stack_slots_promoted": len(promoted_slots),
+        "stack_slot_rewrites": slot_rewrites,
         "dead_flags_removed": dead_flags_total,
         "dead_assigns_removed": dead_assigns_total,
         "prop_edits": prop_edits_total,

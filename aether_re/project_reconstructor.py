@@ -45,7 +45,8 @@ from aether_re.cpp_rtti import recover_cpp_rtti
 from aether_re.ctree_structuring import structure_control_flow
 from aether_re.electron_asar_forensics import analyze_asar_bytes
 from aether_re.ir_optimizer import optimize_lifted_c
-from aether_re.struct_recovery import recover_struct_layouts
+from aether_re.llvm_backend import compile_project_to_llvm_ir
+from aether_re.struct_recovery import annotate_c_with_struct_fields, recover_struct_layouts
 
 
 @dataclass
@@ -95,6 +96,9 @@ class ProjectReconstructionReport:
     struct_layouts_count: int = 0
     struct_declarations: List[str] = field(default_factory=list)
     imported_dlls: List[str] = field(default_factory=list)
+    llvm_ir_verified: bool = False
+    llvm_o3_functions: int = 0
+    llvm_coff_obj_bytes: int = 0
     error: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
@@ -369,6 +373,12 @@ class _MemoryArena:
 
     def digest(self) -> str:
         return hashlib.sha256(self.buf).hexdigest()
+
+    def observable_digest(self, stack_base: int = 0x4E000) -> str:
+        """Hashes heap/vtables/.data/.rdata + caller stack (>= stack_base), ignoring dead callee scratch below stack_base."""
+        lo_end = max(0, min(self.size, 0x1E800 - self.base))
+        hi_start = max(lo_end, min(self.size, stack_base - self.base))
+        return hashlib.sha256(self.buf[:lo_end] + self.buf[hi_start:]).hexdigest()
 
 
 def _to_int64(val: int) -> int:
@@ -2854,6 +2864,8 @@ def _execute_lifted_c_ast(
         env[xr] = 0
     for xh in _XMM_HI_REGS:
         env[xh] = 0
+    for sv in re.findall(r"\baether_slot_[A-Za-z0-9_]+\b", "\n".join(lines[:16])):
+        env[sv] = 0
     env.update({
         "rcx": 0 if takes_double_arg0 else _to_int64(rcx),
         "rdx": _to_int64(rdx), "r8": _to_int64(r8), "r9": _to_int64(r9),
@@ -3048,7 +3060,7 @@ def _execute_lifted_c_ast(
                     for st in [s.strip() for s in body_str.split(";") if s.strip()]:
                         exec(_compile_exec_cached(_clean_c_stmt(st)), {"__builtins__": {}}, env)
                         m_lhs = _AST_LHS_ASSIGN_RE.match(st)
-                        if m_lhs and m_lhs.group(1) in _AST_NORM_REGS:
+                        if m_lhs and (m_lhs.group(1) in _AST_NORM_REGS or m_lhs.group(1).startswith("aether_slot_")):
                             env[m_lhs.group(1)] = _fast_i64(env[m_lhs.group(1)])
             pc += 1
             continue
@@ -3056,7 +3068,7 @@ def _execute_lifted_c_ast(
         for st in stmts:
             exec(_compile_exec_cached(_clean_c_stmt(st)), {"__builtins__": {}}, env)
             m_lhs = _AST_LHS_ASSIGN_RE.match(st)
-            if m_lhs and m_lhs.group(1) in _AST_NORM_REGS:
+            if m_lhs and (m_lhs.group(1) in _AST_NORM_REGS or m_lhs.group(1).startswith("aether_slot_")):
                 env[m_lhs.group(1)] = _fast_i64(env[m_lhs.group(1)])
         pc += 1
     if halt_info is not None and steps >= 4000 and pc < len(lines):
@@ -3201,6 +3213,8 @@ def _structure_lifted_c_to_ctree(c_ident: str, c_code: str) -> Dict[str, Any]:
         declarations.append("long long rcx = 0;")
     if takes_double_arg1:
         declarations.append("long long rdx = 0;")
+    for sv in sorted(set(re.findall(r"\baether_slot_[A-Za-z0-9_]+\b", c_code))):
+        declarations.append(f"long long {sv} = 0;")
     if uses_xmm or returns_double:
         for xr in _XMM_REGS:
             if xr == "xmm0" and takes_double_arg0:
@@ -3235,9 +3249,13 @@ def _get_msvc_x64_env(vcvars_path: Path) -> Optional[Dict[str, str]]:
     key = str(vcvars_path)
     if key in _MSVC_X64_ENV_CACHE:
         return _MSVC_X64_ENV_CACHE[key]
+    bat_path: Optional[Path] = None
     try:
+        with tempfile.NamedTemporaryFile("w", suffix=".bat", delete=False, encoding="utf-8") as tf:
+            tf.write(f'@echo off\r\ncall "{vcvars_path}" >nul\r\nset\r\n')
+            bat_path = Path(tf.name)
         out = subprocess.check_output(
-            ["cmd", "/c", f'call "{vcvars_path}" >nul && set'],
+            ["cmd", "/c", str(bat_path)],
             text=True,
             encoding="utf-8",
             errors="replace",
@@ -3254,6 +3272,9 @@ def _get_msvc_x64_env(vcvars_path: Path) -> Optional[Dict[str, str]]:
             return env_map
     except Exception:
         pass
+    finally:
+        if bat_path is not None:
+            bat_path.unlink(missing_ok=True)
     return None
 
 
@@ -4325,7 +4346,7 @@ def reconstruct_project(
                         if c_halt.get("fuel_exhausted") and total_vecs > 1:
                             total_vecs -= 1
                             continue
-                    elif not c_halt.get("fuel_exhausted") and asm_out == c_out and a_asm.digest() == a_c.digest():
+                    elif not c_halt.get("fuel_exhausted") and asm_out == c_out and a_asm.observable_digest() == a_c.observable_digest():
                         passed_vecs += 1
                 total_congruence_passed += passed_vecs
                 total_congruence_checks += total_vecs
@@ -4567,11 +4588,26 @@ def reconstruct_project(
             ]
         )
 
+        structured_annotated = annotate_c_with_struct_fields(
+            "\n".join(structured_source_lines),
+            struct_res.get("structs", []),
+        )
         (inc_dir / "reconstructed_api.h").write_text("\n".join(header_lines), encoding="utf-8")
         (src_dir / "reconstructed_project.c").write_text("\n".join(c_source_lines), encoding="utf-8")
-        (src_dir / "reconstructed_structured.c").write_text("\n".join(structured_source_lines), encoding="utf-8")
+        (src_dir / "reconstructed_structured.c").write_text(structured_annotated, encoding="utf-8")
         (src_dir / "exports.def").write_text("\n".join(def_lines) + "\n", encoding="utf-8")
         (out_root / "CMakeLists.txt").write_text(cmake_content, encoding="utf-8")
+
+        llvm_res = compile_project_to_llvm_ir(
+            records_list,
+            out_root / "ir",
+            ro_table_fns_map=ro_table_fns_map,
+            unresolved_rvas=sorted(called_rvas - defined_rvas),
+            rva_to_symbol=rva_to_symbol,
+        )
+        report.llvm_ir_verified = bool(llvm_res.get("llvm_ir_verified"))
+        report.llvm_o3_functions = int(llvm_res.get("llvm_o3_functions", 0))
+        report.llvm_coff_obj_bytes = int(llvm_res.get("coff_obj_bytes", 0))
 
         report.generated_files = [
             "include/reconstructed_api.h",
@@ -4580,7 +4616,12 @@ def reconstruct_project(
             "src/exports.def",
             "CMakeLists.txt",
             "twin_congruence_report.json",
+            "ir/reconstructed_project.ll",
         ]
+        if llvm_res.get("o3_ll_path"):
+            report.generated_files.append("ir/reconstructed_project_o3.ll")
+        if llvm_res.get("obj_path"):
+            report.generated_files.append("ir/reconstructed_project.obj")
         if report.ghidra_enriched_functions > 0:
             (src_dir / "reconstructed_ghidra_reference.c").write_text(
                 "\n".join(ghidra_ref_lines), encoding="utf-8"

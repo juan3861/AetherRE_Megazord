@@ -99,13 +99,16 @@
       "imported_dlls": [
         "KERNEL32.dll"
       ],
-      "reconstruct_ms": 9722.93,
+      "reconstruct_ms": 13111.35,
       "msvc_compiled": true,
       "compiler": "msvc_cl_x64",
       "compiled_twin_dll_bytes": 427008,
-      "compiled_twin_dll_sha256": "6d1c20620952f0135a22e2d5e270e0241794c336dc9609330bfbc1b29e2a7de0",
-      "omni_elapsed_ms": 195.395,
-      "omni_throughput_mb_s": 0.892,
+      "compiled_twin_dll_sha256": "baf5ee2afe037bde91a66662d7d5e7b36c89ca69fc728a62e228af37562d33dc",
+      "llvm_ir_verified": true,
+      "llvm_o3_functions": 206,
+      "llvm_coff_obj_bytes": 171392,
+      "omni_elapsed_ms": 258.77,
+      "omni_throughput_mb_s": 0.674,
       "omni_gears_executed": 12,
       "missing_or_empty_files": []
     },
@@ -220,13 +223,16 @@
       "imported_dlls": [
         "KERNEL32.dll"
       ],
-      "reconstruct_ms": 23622.83,
+      "reconstruct_ms": 28209.55,
       "msvc_compiled": true,
       "compiler": "msvc_cl_x64",
       "compiled_twin_dll_bytes": 448000,
-      "compiled_twin_dll_sha256": "85a9ba99609c1e82f71a5340016369586ca8e9c57e31582b91dcff6042b6aa04",
-      "omni_elapsed_ms": 202.754,
-      "omni_throughput_mb_s": 0.908,
+      "compiled_twin_dll_sha256": "f45e7b48c50457f86dcd1a575b9b194cc164712baa4b024a51e85f0ebcc6b100",
+      "llvm_ir_verified": true,
+      "llvm_o3_functions": 220,
+      "llvm_coff_obj_bytes": 207152,
+      "omni_elapsed_ms": 216.664,
+      "omni_throughput_mb_s": 0.85,
       "omni_gears_executed": 12,
       "missing_or_empty_files": []
     },
@@ -254,13 +260,16 @@
       "imported_dlls": [
         "KERNEL32.dll"
       ],
-      "reconstruct_ms": 2332.11,
+      "reconstruct_ms": 4464.41,
       "msvc_compiled": true,
       "compiler": "msvc_cl_x64",
       "compiled_twin_dll_bytes": 464896,
-      "compiled_twin_dll_sha256": "2043499460950eb3b92238d0e009ec63fceae99c222ee268a12b18b599b7df6c",
-      "omni_elapsed_ms": 211.732,
-      "omni_throughput_mb_s": 0.952,
+      "compiled_twin_dll_sha256": "9dc5c22f4ed7a57c1936be7706f63f086f94bc75c3862fd27beba02767d80563",
+      "llvm_ir_verified": true,
+      "llvm_o3_functions": 133,
+      "llvm_coff_obj_bytes": 108608,
+      "omni_elapsed_ms": 210.882,
+      "omni_throughput_mb_s": 0.956,
       "omni_gears_executed": 12,
       "missing_or_empty_files": []
     },
@@ -297,13 +306,16 @@
       "imported_dlls": [
         "KERNEL32.dll"
       ],
-      "reconstruct_ms": 486.33,
+      "reconstruct_ms": 512.05,
       "msvc_compiled": true,
       "compiler": "msvc_cl_x64",
       "compiled_twin_dll_bytes": 235520,
-      "compiled_twin_dll_sha256": "b193e2029a0511e1d8259a287e6d99449407bee0c5017f07a1943bd666185a81",
-      "omni_elapsed_ms": 162.092,
-      "omni_throughput_mb_s": 0.618,
+      "compiled_twin_dll_sha256": "dc59b9299f020b886c71de41f1d01af969834b84a7af3977ace102593bffec80",
+      "llvm_ir_verified": true,
+      "llvm_o3_functions": 11,
+      "llvm_coff_obj_bytes": 5024,
+      "omni_elapsed_ms": 155.773,
+      "omni_throughput_mb_s": 0.643,
       "omni_gears_executed": 12,
       "missing_or_empty_files": []
     },
@@ -341,13 +353,16 @@
       "imported_dlls": [
         "KERNEL32.dll"
       ],
-      "reconstruct_ms": 492.16,
+      "reconstruct_ms": 445.18,
       "msvc_compiled": true,
       "compiler": "msvc_cl_x64",
       "compiled_twin_dll_bytes": 236032,
-      "compiled_twin_dll_sha256": "7ef18170ede70c6750bdca5c79184eba1e727881efe283114d2419e46723fff1",
-      "omni_elapsed_ms": 153.822,
-      "omni_throughput_mb_s": 0.651,
+      "compiled_twin_dll_sha256": "a3c5195be3d39823ac9b28c72c6f12ec8447688153a7e2e60f60767566df776a",
+      "llvm_ir_verified": true,
+      "llvm_o3_functions": 12,
+      "llvm_coff_obj_bytes": 5384,
+      "omni_elapsed_ms": 154.956,
+      "omni_throughput_mb_s": 0.646,
       "omni_gears_executed": 12,
       "missing_or_empty_files": []
     },
@@ -414,13 +429,16 @@
       "imported_dlls": [
         "KERNEL32.dll"
       ],
-      "reconstruct_ms": 7607.18,
+      "reconstruct_ms": 14627.32,
       "msvc_compiled": true,
       "compiler": "msvc_cl_x64",
-      "compiled_twin_dll_bytes": 423936,
-      "compiled_twin_dll_sha256": "f0e9314d43c017c79a3d3e0a1c1f87b74fa0f90367ec1a8141252fefb4cb789c",
-      "omni_elapsed_ms": 418.651,
-      "omni_throughput_mb_s": 0.352,
+      "compiled_twin_dll_bytes": 423424,
+      "compiled_twin_dll_sha256": "ced09e3cc9251816f6934900155153c3a67d41b4ee0052401d56514a913ce5fe",
+      "llvm_ir_verified": true,
+      "llvm_o3_functions": 172,
+      "llvm_coff_obj_bytes": 251520,
+      "omni_elapsed_ms": 248.827,
+      "omni_throughput_mb_s": 0.593,
       "omni_gears_executed": 12,
       "missing_or_empty_files": []
     }
@@ -503,7 +521,7 @@
         1,
         1,
         1,
-        2341550074992,
+        2196670836416,
         0
       ],
       "compiled_twin_outputs": [
@@ -511,7 +529,7 @@
         1,
         1,
         1,
-        2341550074992,
+        2196670836416,
         0
       ],
       "match": true
@@ -719,6 +737,20 @@
         101,
         101,
         466
+      ],
+      "match": true
+    },
+    {
+      "target": "LLVM O3 MCJIT x64 <-> orig lz4.dll :: Native JIT LZ4_compressBound + LZ4_versionNumber",
+      "original_dll_outputs": [
+        116,
+        483,
+        11102
+      ],
+      "compiled_twin_outputs": [
+        116,
+        483,
+        11102
       ],
       "match": true
     }

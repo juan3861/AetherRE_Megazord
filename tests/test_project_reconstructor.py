@@ -298,5 +298,7 @@ def test_real_cpp_rtti_and_cjson_memory_twin_reconstruction(tmp_path: Path):
         assert lz_rep.fully_lifted_functions == 44
         assert lz_rep.ctree_structured_functions == 44
         assert lz_rep.overall_congruence_pct == 100.0
+        assert lz_rep.llvm_ir_verified is True
+        assert lz_rep.llvm_coff_obj_bytes > 0
         build_lz = compile_reconstructed_project(tmp_path / "lz4_twin")
         assert build_lz["compiled"] is True

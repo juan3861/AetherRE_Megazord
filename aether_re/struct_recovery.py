@@ -22,7 +22,25 @@ SIZE_TO_TYPE = {
 }
 
 
+_F64_MNEMS = {"movsd", "addsd", "subsd", "mulsd", "divsd", "comisd", "ucomisd", "sqrtsd", "minsd", "maxsd"}
+_F32_MNEMS = {"movss", "addss", "subss", "mulss", "divss", "comiss", "ucomiss", "sqrtss", "minss", "maxss"}
+
+
+def _infer_access_type(mnemonic: str, op_str: str, size: int) -> str:
+    m_low = mnemonic.strip().lower()
+    if m_low in _F64_MNEMS:
+        return "double"
+    if m_low in _F32_MNEMS:
+        return "float"
+    return SIZE_TO_TYPE.get(size, "uint32_t")
+
+
 def _infer_access_size(mnemonic: str, op_str: str) -> int:
+    m_low = mnemonic.strip().lower()
+    if m_low in _F64_MNEMS:
+        return 8
+    if m_low in _F32_MNEMS:
+        return 4
     op_lower = op_str.lower()
     if "qword ptr" in op_lower:
         return 8
@@ -73,6 +91,7 @@ def recover_struct_layouts(
                     offset = int(offset_str, 16) if offset_str.lower().startswith("0x") else int(offset_str)
                 
                 size = _infer_access_size(mnem, op_str)
+                inferred_type = _infer_access_type(mnem, op_str, size)
                 if base_reg not in accessed_fields:
                     accessed_fields[base_reg] = {}
                 
@@ -80,15 +99,17 @@ def recover_struct_layouts(
                     accessed_fields[base_reg][offset] = {
                         "offset": offset,
                         "size": size,
-                        "type": SIZE_TO_TYPE.get(size, "uint32_t"),
+                        "type": inferred_type,
                         "access_count": 1,
                     }
                 else:
                     accessed_fields[base_reg][offset]["access_count"] += 1
-                    # Se acessado com tamanho maior, atualiza
+                    # Se acessado com tamanho maior ou tipo float explícito, atualiza
                     if size > accessed_fields[base_reg][offset]["size"]:
                         accessed_fields[base_reg][offset]["size"] = size
-                        accessed_fields[base_reg][offset]["type"] = SIZE_TO_TYPE.get(size, "uint32_t")
+                        accessed_fields[base_reg][offset]["type"] = inferred_type
+                    elif inferred_type in ("double", "float") and size == accessed_fields[base_reg][offset]["size"]:
+                        accessed_fields[base_reg][offset]["type"] = inferred_type
 
     recovered_structs: list[dict[str, Any]] = []
 
@@ -142,3 +163,42 @@ def recover_struct_layouts(
         "total_structs_recovered": len(recovered_structs),
         "structs": recovered_structs,
     }
+
+
+_STRUCT_MEM_ACCESS_RE = re.compile(
+    r"aether_mem_(?:read|write)\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*(?:\+\s*(0x[0-9a-fA-F]+|\d+))?\s*,"
+)
+
+
+def annotate_c_with_struct_fields(c_code: str, structs: Sequence[dict[str, Any]]) -> str:
+    """Annotates C lines accessing recovered struct offsets with semantic field comments."""
+    if not c_code or not structs:
+        return c_code
+    lookup: dict[tuple[str, int], tuple[str, str, str]] = {}
+    for st in structs:
+        reg = str(st.get("base_register", "")).lower()
+        st_name = str(st.get("name", ""))
+        if not reg or not st_name:
+            continue
+        for fld in st.get("fields", []):
+            off = int(fld.get("offset", 0))
+            lookup[(reg, off)] = (st_name, str(fld.get("name", f"field_0x{off:02x}")), str(fld.get("type", "uint64_t")))
+    if not lookup:
+        return c_code
+
+    out_lines: list[str] = []
+    for ln in c_code.splitlines():
+        tags: list[str] = []
+        for m in _STRUCT_MEM_ACCESS_RE.finditer(ln):
+            reg = m.group(1).lower()
+            off = int(m.group(2), 0) if m.group(2) else 0
+            hit = lookup.get((reg, off))
+            if hit:
+                tag = f"{hit[0]}->{hit[1]}:{hit[2]}"
+                if tag not in tags:
+                    tags.append(tag)
+        if tags and "/*" not in ln:
+            out_lines.append(f"{ln} /* {'; '.join(tags)} */")
+        else:
+            out_lines.append(ln)
+    return "\n".join(out_lines)

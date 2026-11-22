@@ -68,3 +68,75 @@ def test_kildall_loop_const_safety_and_dead_branch_folding() -> None:
     assert "999" not in opt
     for n in (0, 1, 5, 12):
         assert _execute_lifted_c_ast(raw, n, 0, 0, 0) == _execute_lifted_c_ast(opt, n, 0, 0, 0) == max(0, n)
+
+
+def test_stack_slot_mem2reg_promotion_and_escape_safety() -> None:
+    safe_raw = "\n".join([
+        "int64_t demo_stack_safe(int64_t rcx, int64_t rdx, int64_t r8, int64_t r9) {",
+        "    int64_t rax = 0, rbx = 0, rbp = 0, rsi = 0, rdi = 0;",
+        "    int64_t r10 = 0, r11 = 0, r12 = 0, r13 = 0, r14 = 0, r15 = 0;",
+        "    int64_t _aether_saved_sp = _aether_sp;",
+        "    int64_t rsp = aether_stack_base();",
+        "    int64_t cmp_lhs = 0, cmp_rhs = 0;",
+        "L_3000: ; /* frame */",
+        "    rbp = rsp;",
+        "    rsp = (int64_t)((rsp) - (64));",
+        "    aether_mem_write(rbp - 0x10, 8, rcx);",
+        "    aether_mem_write(rbp - 0x18, 4, 10);",
+        "    rax = (int64_t)(aether_mem_read(rbp - 0x10, 8));",
+        "    rbx = aether_u32(aether_mem_read(rbp - 0x18, 4));",
+        "    rax = (int64_t)((rax) + (rbx));",
+        "    return rax;",
+        "}",
+    ])
+    opt_safe, m_safe = optimize_lifted_c_via_ssa(safe_raw)
+    assert m_safe["stack_slots_promoted"] == 2
+    assert "aether_mem_read" not in opt_safe
+    assert "aether_mem_write" not in opt_safe
+    for v in (0, 7, -3, 100):
+        assert _execute_lifted_c_ast(safe_raw, v, 0, 0, 0) == _execute_lifted_c_ast(opt_safe, v, 0, 0, 0) == v + 10
+
+    escaped_raw = "\n".join([
+        "int64_t demo_stack_escaped(int64_t rcx, int64_t rdx, int64_t r8, int64_t r9) {",
+        "    int64_t rax = 0, rbx = 0, rbp = 0, rsi = 0, rdi = 0;",
+        "    int64_t r10 = 0, r11 = 0, r12 = 0, r13 = 0, r14 = 0, r15 = 0;",
+        "    int64_t _aether_saved_sp = _aether_sp;",
+        "    int64_t rsp = aether_stack_base();",
+        "    int64_t cmp_lhs = 0, cmp_rhs = 0;",
+        "L_4000: ; /* escaped rbp */",
+        "    rbp = rsp;",
+        "    rsp = (int64_t)((rsp) - (64));",
+        "    aether_mem_write(rbp - 0x10, 8, rcx);",
+        "    rdx = (int64_t)(rbp - 0x10);",
+        "    rax = (int64_t)(aether_mem_read(rdx, 8));",
+        "    return rax;",
+        "}",
+    ])
+    opt_esc, m_esc = optimize_lifted_c_via_ssa(escaped_raw)
+    assert m_esc["stack_slots_promoted"] == 0
+    assert "aether_mem_write(" in opt_esc
+    assert "0x10" in opt_esc
+    assert _execute_lifted_c_ast(escaped_raw, 42, 0, 0, 0) == _execute_lifted_c_ast(opt_esc, 42, 0, 0, 0) == 42
+
+    # Incoming Win64 stack arg above prolog frame (`[rsp + 0xa0]` when frame is `0x58` bytes) must NOT promote
+    stack_arg_raw = "\n".join([
+        "int64_t demo_win64_stack_arg(int64_t rcx, int64_t rdx, int64_t r8, int64_t r9) {",
+        "    int64_t rax = 0, rbx = 0, rbp = 0, rsi = 0, rdi = 0;",
+        "    int64_t r10 = 0, r11 = 0, r12 = 0, r13 = 0, r14 = 0, r15 = 0;",
+        "    int64_t _aether_saved_sp = _aether_sp;",
+        "    int64_t rsp = aether_stack_base();",
+        "    int64_t cmp_lhs = 0, cmp_rhs = 0;",
+        "L_5000: ; /* frame */",
+        "    rsp = (int64_t)((rsp) - (88));",
+        "    aether_mem_write(rsp + 0x48, 8, rcx);",
+        "    rax = (int64_t)(aether_mem_read(rsp + 0xa0, 8));",
+        "    rbx = (int64_t)(aether_mem_read(rsp + 0x48, 8));",
+        "    rax = (int64_t)((rax) + (rbx));",
+        "    return rax;",
+        "}",
+    ])
+    opt_sa, m_sa = optimize_lifted_c_via_ssa(stack_arg_raw)
+    assert m_sa["stack_slots_promoted"] == 1
+    assert "aether_mem_read(rsp + 0xa0" in opt_sa
+    assert "aether_mem_write" not in opt_sa
+    assert "(rax) + (rcx)" in opt_sa or "rcx" in opt_sa
