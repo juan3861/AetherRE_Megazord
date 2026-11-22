@@ -20,11 +20,13 @@ import ctypes
 import hashlib
 import json
 import math
+import os
 import shutil
 import struct
 import sys
 import tempfile
 import time
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -836,7 +838,99 @@ def _run_compiled_twin_interop_checks(reconstructed_dir: Path) -> List[Dict[str,
                 "match": seq_lm == [42, 99],
             })
 
+        typed_lz_path = reconstructed_dir / "lz4" / "reconstructed_typed_twin.dll"
+        if typed_lz_path.is_file():
+            typed_lz = ctypes.CDLL(str(typed_lz_path))
+            typed_lz.LZ4_compressBound.argtypes = [ctypes.c_int]
+            typed_lz.LZ4_compressBound.restype = ctypes.c_int
+            typed_lz.LZ4_compress_default.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_int, ctypes.c_int]
+            typed_lz.LZ4_compress_default.restype = ctypes.c_int
+            typed_lz.LZ4_decompress_safe.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_int, ctypes.c_int]
+            typed_lz.LZ4_decompress_safe.restype = ctypes.c_int
+            t_dst = ctypes.create_string_buffer(bound_o)
+            t_sz = typed_lz.LZ4_compress_default(payload, t_dst, len(payload), bound_o)
+            t_dec = ctypes.create_string_buffer(len(payload))
+            t_dsz = typed_lz.LZ4_decompress_safe(t_dst.raw[:t_sz], t_dec, t_sz, len(payload))
+            t_ok = (t_sz == sz_o and t_dst.raw[:t_sz] == dst_o.raw[:sz_o] and t_dsz == len(payload) and t_dec.raw[:t_dsz] == payload)
+            checks.append({
+                "target": "Typed C Struct DLL <-> orig lz4.dll :: Alias-Propagated reconstructed_typed.c Live Compression & Decompression",
+                "original_dll_outputs": [sz_o, len(payload)],
+                "compiled_twin_outputs": [t_sz, t_dsz if t_ok else -1],
+                "match": t_ok,
+            })
+
     return checks
+
+
+def _benchmark_single_target(args: tuple[str, str, str, str]) -> Dict[str, Any]:
+    """Reconstructs and builds MSVC, typed-C, and LLVM O3 twins for one target binary."""
+    label, bin_path_str, ground_truth_desc, out_base_str = args
+    bin_path = Path(bin_path_str)
+    proj_out = Path(out_base_str) / bin_path.stem
+    t0 = time.perf_counter()
+    rep = reconstruct_project(bin_path, proj_out)
+    recon_ms = round((time.perf_counter() - t0) * 1000.0, 2)
+
+    build_res = compile_reconstructed_project(proj_out)
+    typed_build_res = compile_reconstructed_project(
+        proj_out,
+        output_dll_name="reconstructed_typed_twin.dll",
+        source_rel="src/reconstructed_typed.c",
+    )
+    llvm_build_res = compile_llvm_twin_project(proj_out)
+    omni = scan_file_omni_audit(bin_path)
+
+    typed_c_path = proj_out / "src" / "reconstructed_typed.c"
+    typed_c_bytes = typed_c_path.stat().st_size if typed_c_path.is_file() else 0
+
+    missing_or_empty = [
+        f for f in rep.generated_files
+        if not (proj_out / f).is_file() or (proj_out / f).stat().st_size == 0
+    ]
+
+    user_rtti = [
+        c for c in rep.rtti_classes
+        if "std::" not in c and "type_info" not in c and "exception" not in c
+    ]
+
+    return {
+        "binary": label,
+        "size_bytes": bin_path.stat().st_size,
+        "ground_truth": ground_truth_desc,
+        "status": rep.status,
+        "total_targets_analyzed": rep.total_exports_reconstructed,
+        "fully_lifted_congruent_functions": rep.fully_lifted_functions,
+        "ctree_structured_functions": rep.ctree_structured_functions,
+        "avg_goto_elimination_pct": rep.avg_goto_elimination_pct,
+        "ghidra_enriched_functions": rep.ghidra_enriched_functions,
+        "lifted_function_names": [f["name"] for f in rep.functions if f["is_fully_lifted"]],
+        "differential_congruence_pct_on_lifted": rep.overall_congruence_pct,
+        "rtti_total_classes": len(rep.rtti_classes),
+        "rtti_user_classes": user_rtti,
+        "struct_layouts_recovered": rep.struct_layouts_count,
+        "imported_dlls": rep.imported_dlls,
+        "reconstruct_ms": recon_ms,
+        "msvc_compiled": build_res["compiled"],
+        "compiler": build_res.get("compiler"),
+        "compiled_twin_dll_bytes": build_res.get("dll_size_bytes", 0),
+        "compiled_twin_dll_sha256": build_res.get("dll_sha256"),
+        "typed_c_compiled": typed_build_res["compiled"],
+        "typed_twin_dll_bytes": typed_build_res.get("dll_size_bytes", 0),
+        "llvm_ir_verified": rep.llvm_ir_verified,
+        "llvm_o3_functions": rep.llvm_o3_functions,
+        "llvm_coff_obj_bytes": rep.llvm_coff_obj_bytes,
+        "llvm_twin_compiled": llvm_build_res["compiled"],
+        "llvm_twin_dll_bytes": llvm_build_res.get("dll_size_bytes", 0),
+        "llvm_twin_dll_sha256": llvm_build_res.get("dll_sha256"),
+        "flirt_cfg_matches": rep.flirt_cfg_matches,
+        "win64_unwind_functions": rep.win64_unwind_functions,
+        "win64_ehandlers_count": rep.win64_ehandlers_count,
+        "typed_c_bytes": typed_c_bytes,
+        "omni_elapsed_ms": omni.wall_clock_ms,
+        "omni_throughput_mb_s": omni.throughput_mib_s,
+        "omni_gears_executed": omni.gears_executed_count,
+        "missing_or_empty_files": missing_or_empty,
+    }
 
 
 def main() -> int:
@@ -858,64 +952,10 @@ def main() -> int:
         ("lz4.dll", ROOT / "external_test_repos" / "lz4" / "lz4.dll", "lz4.c (44 exports)"),
     ]
 
-    native_results: List[Dict[str, Any]] = []
-    for label, bin_path, ground_truth_desc in targets:
-        t0 = time.perf_counter()
-        proj_out = out_base / bin_path.stem
-        rep = reconstruct_project(bin_path, proj_out)
-        recon_ms = round((time.perf_counter() - t0) * 1000.0, 2)
-
-        build_res = compile_reconstructed_project(proj_out)
-        llvm_build_res = compile_llvm_twin_project(proj_out)
-        omni = scan_file_omni_audit(bin_path)
-
-        typed_c_path = proj_out / "src" / "reconstructed_typed.c"
-        typed_c_bytes = typed_c_path.stat().st_size if typed_c_path.is_file() else 0
-
-        missing_or_empty = [
-            f for f in rep.generated_files
-            if not (proj_out / f).is_file() or (proj_out / f).stat().st_size == 0
-        ]
-
-        user_rtti = [
-            c for c in rep.rtti_classes
-            if "std::" not in c and "type_info" not in c and "exception" not in c
-        ]
-
-        native_results.append({
-            "binary": label,
-            "size_bytes": bin_path.stat().st_size,
-            "ground_truth": ground_truth_desc,
-            "status": rep.status,
-            "total_targets_analyzed": rep.total_exports_reconstructed,
-            "fully_lifted_congruent_functions": rep.fully_lifted_functions,
-            "ctree_structured_functions": rep.ctree_structured_functions,
-            "avg_goto_elimination_pct": rep.avg_goto_elimination_pct,
-            "ghidra_enriched_functions": rep.ghidra_enriched_functions,
-            "lifted_function_names": [f["name"] for f in rep.functions if f["is_fully_lifted"]],
-            "differential_congruence_pct_on_lifted": rep.overall_congruence_pct,
-            "rtti_total_classes": len(rep.rtti_classes),
-            "rtti_user_classes": user_rtti,
-            "struct_layouts_recovered": rep.struct_layouts_count,
-            "imported_dlls": rep.imported_dlls,
-            "reconstruct_ms": recon_ms,
-            "msvc_compiled": build_res["compiled"],
-            "compiler": build_res.get("compiler"),
-            "compiled_twin_dll_bytes": build_res.get("dll_size_bytes", 0),
-            "compiled_twin_dll_sha256": build_res.get("dll_sha256"),
-            "llvm_ir_verified": rep.llvm_ir_verified,
-            "llvm_o3_functions": rep.llvm_o3_functions,
-            "llvm_coff_obj_bytes": rep.llvm_coff_obj_bytes,
-            "llvm_twin_compiled": llvm_build_res["compiled"],
-            "llvm_twin_dll_bytes": llvm_build_res.get("dll_size_bytes", 0),
-            "llvm_twin_dll_sha256": llvm_build_res.get("dll_sha256"),
-            "flirt_cfg_matches": rep.flirt_cfg_matches,
-            "typed_c_bytes": typed_c_bytes,
-            "omni_elapsed_ms": omni.wall_clock_ms,
-            "omni_throughput_mb_s": omni.throughput_mib_s,
-            "omni_gears_executed": omni.gears_executed_count,
-            "missing_or_empty_files": missing_or_empty,
-        })
+    task_args = [(label, str(bin_path), desc, str(out_base)) for label, bin_path, desc in targets]
+    workers = min(len(task_args), os.cpu_count() or 4)
+    with ProcessPoolExecutor(max_workers=workers) as pool:
+        native_results: List[Dict[str, Any]] = list(pool.map(_benchmark_single_target, task_args))
 
     live_interop_checks = _run_compiled_twin_interop_checks(out_base)
 
@@ -951,11 +991,13 @@ def main() -> int:
             r["status"] == "complete"
             and not r["missing_or_empty_files"]
             and r["msvc_compiled"]
+            and r["typed_c_compiled"]
             and r["llvm_ir_verified"]
             and r["llvm_coff_obj_bytes"] > 0
             and r["llvm_twin_compiled"]
             and r["llvm_twin_dll_bytes"] > 0
             and r["flirt_cfg_matches"] > 0
+            and r["win64_unwind_functions"] > 0
             and r["typed_c_bytes"] > 0
             for r in native_results
         )
@@ -979,18 +1021,19 @@ def main() -> int:
     md_lines = [
         "# Ground-Truth Full-Project Extraction, C-Tree Structuring & Live Compiled Twin Benchmark",
         "",
-        "Verificação empírica real (sem mocks): reconstrução de binários MSVC x64 `/O2`, estruturação C-Tree, reconhecimento CRT FLIRT por CFG, emissão tipada C (`reconstructed_typed.c`), compilação nativa via MSVC `cl.exe` e linkagem LLVM O3 COFF standalone (`reconstructed_twin_llvm.dll`), com execução cruzada em CPU real entre a DLL original, a `reconstructed_twin.dll` e a `reconstructed_twin_llvm.dll`.",
+        "Verificação empírica real (sem mocks): reconstrução de binários MSVC x64 `/O2`, estruturação C-Tree, decodificação Win64 SEH `.pdata`/`.xdata` (`UNWIND_INFO`), reconhecimento CRT FLIRT por CFG, emissão tipada C compilável com propagação de alias (`reconstructed_typed.c`), compilação nativa via MSVC `cl.exe`, linkagem LLVM O3 COFF standalone (`reconstructed_twin_llvm.dll`) e suporte multiarquitetura ELF64 (`x86_64`/`AArch64`) e PE ARM64 (`0xAA64`).",
         "",
-        "## 1. Reconstrução + C-Tree + FLIRT CFG + MSVC + LLVM O3 DLL (`GEAR-23`)",
+        "## 1. Reconstrução + C-Tree + Win64 SEH + FLIRT CFG + Typed C + LLVM O3 DLL (`GEAR-23`)",
         "",
-        "| Binário Real | Alvos | 100% Lifted | C-Tree | FLIRT CFG | Congruência | MSVC Twin DLL | LLVM O3 DLL (COFF Link) | Structs | Tempo (ms) |",
-        "|---|---:|---:|---:|---:|---:|---|---|---:|---:|",
+        "| Binário Real | Alvos | 100% Lifted | C-Tree | Win64 Unwind / SEH | FLIRT CFG | Congruência | MSVC + Typed C DLL | LLVM O3 DLL (COFF Link) | Structs | Tempo (ms) |",
+        "|---|---:|---:|---:|---|---|---:|---|---|---:|---:|",
     ]
     for r in native_results:
-        dll_info = f"PASS ({r['compiled_twin_dll_bytes']} B)" if r["msvc_compiled"] else "FAIL"
+        dll_info = f"PASS ({r['compiled_twin_dll_bytes']} B / typed {r['typed_twin_dll_bytes']} B)" if (r["msvc_compiled"] and r["typed_c_compiled"]) else "FAIL"
         llvm_info = f"PASS ({r['llvm_twin_dll_bytes']} B / obj {r['llvm_coff_obj_bytes']} B)" if r["llvm_twin_compiled"] else "FAIL"
+        unwind_info = f"{r['win64_unwind_functions']} ({r['win64_ehandlers_count']} SEH)"
         md_lines.append(
-            f"| `{r['binary']}` | {r['total_targets_analyzed']} | {r['fully_lifted_congruent_functions']} | {r['ctree_structured_functions']} | {r['flirt_cfg_matches']} | **{r['differential_congruence_pct_on_lifted']}%** | {dll_info} | {llvm_info} | {r['struct_layouts_recovered']} | {r['reconstruct_ms']} |"
+            f"| `{r['binary']}` | {r['total_targets_analyzed']} | {r['fully_lifted_congruent_functions']} | {r['ctree_structured_functions']} | {unwind_info} | {r['flirt_cfg_matches']} | **{r['differential_congruence_pct_on_lifted']}%** | {dll_info} | {llvm_info} | {r['struct_layouts_recovered']} | {r['reconstruct_ms']} |"
         )
 
     md_lines.extend([

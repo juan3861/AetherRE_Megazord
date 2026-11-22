@@ -1,17 +1,17 @@
 # Ground-Truth Full-Project Extraction, C-Tree Structuring & Live Compiled Twin Benchmark
 
-Verificação empírica real (sem mocks): reconstrução de binários MSVC x64 `/O2`, estruturação C-Tree, reconhecimento CRT FLIRT por CFG, emissão tipada C (`reconstructed_typed.c`), compilação nativa via MSVC `cl.exe` e linkagem LLVM O3 COFF standalone (`reconstructed_twin_llvm.dll`), com execução cruzada em CPU real entre a DLL original, a `reconstructed_twin.dll` e a `reconstructed_twin_llvm.dll`.
+Verificação empírica real (sem mocks): reconstrução de binários MSVC x64 `/O2`, estruturação C-Tree, decodificação Win64 SEH `.pdata`/`.xdata` (`UNWIND_INFO`), reconhecimento CRT FLIRT por CFG, emissão tipada C compilável com propagação de alias (`reconstructed_typed.c`), compilação nativa via MSVC `cl.exe`, linkagem LLVM O3 COFF standalone (`reconstructed_twin_llvm.dll`) e suporte multiarquitetura ELF64 (`x86_64`/`AArch64`) e PE ARM64 (`0xAA64`).
 
-## 1. Reconstrução + C-Tree + FLIRT CFG + MSVC + LLVM O3 DLL (`GEAR-23`)
+## 1. Reconstrução + C-Tree + Win64 SEH + FLIRT CFG + Typed C + LLVM O3 DLL (`GEAR-23`)
 
-| Binário Real | Alvos | 100% Lifted | C-Tree | FLIRT CFG | Congruência | MSVC Twin DLL | LLVM O3 DLL (COFF Link) | Structs | Tempo (ms) |
-|---|---:|---:|---:|---:|---:|---|---|---:|---:|
-| `cjson.dll` | 78 | 78 | 78 | 8 | **100.0%** | PASS (427008 B) | PASS (476672 B / obj 161945 B) | 7 | 12507.61 |
-| `cjson_utils.dll` | 92 | 92 | 92 | 8 | **100.0%** | PASS (448000 B) | PASS (498688 B / obj 193718 B) | 7 | 27343.04 |
-| `tinyexpr.dll` | 5 | 5 | 5 | 7 | **100.0%** | PASS (464896 B) | PASS (480768 B / obj 106011 B) | 7 | 4684.78 |
-| `poly_test.dll` | 10 | 10 | 10 | 7 | **100.0%** | PASS (235520 B) | PASS (245248 B / obj 3666 B) | 1 | 654.22 |
-| `multi_poly.dll` | 11 | 11 | 11 | 7 | **100.0%** | PASS (236032 B) | PASS (245248 B / obj 3830 B) | 1 | 572.02 |
-| `lz4.dll` | 44 | 44 | 44 | 7 | **100.0%** | PASS (423424 B) | PASS (465920 B / obj 243309 B) | 7 | 14576.66 |
+| Binário Real | Alvos | 100% Lifted | C-Tree | Win64 Unwind / SEH | FLIRT CFG | Congruência | MSVC + Typed C DLL | LLVM O3 DLL (COFF Link) | Structs | Tempo (ms) |
+|---|---:|---:|---:|---|---|---:|---|---|---:|---:|
+| `cjson.dll` | 78 | 78 | 78 | 510 (73 SEH) | 8 | **100.0%** | PASS (427008 B / typed 420864 B) | PASS (476672 B / obj 161945 B) | 7 | 14556.9 |
+| `cjson_utils.dll` | 92 | 92 | 92 | 547 (73 SEH) | 8 | **100.0%** | PASS (448000 B / typed 440320 B) | PASS (498688 B / obj 193718 B) | 7 | 30526.09 |
+| `tinyexpr.dll` | 5 | 5 | 5 | 528 (69 SEH) | 7 | **100.0%** | PASS (464896 B / typed 461312 B) | PASS (480768 B / obj 106011 B) | 7 | 5219.63 |
+| `poly_test.dll` | 10 | 10 | 10 | 332 (60 SEH) | 7 | **100.0%** | PASS (235520 B / typed 235520 B) | PASS (245248 B / obj 3666 B) | 1 | 691.97 |
+| `multi_poly.dll` | 11 | 11 | 11 | 333 (60 SEH) | 7 | **100.0%** | PASS (236032 B / typed 236032 B) | PASS (245248 B / obj 3830 B) | 1 | 732.21 |
+| `lz4.dll` | 44 | 44 | 44 | 428 (62 SEH) | 7 | **100.0%** | PASS (423424 B / typed 415744 B) | PASS (465920 B / obj 243309 B) | 7 | 19836.35 |
 
 ## 2. Interoperabilidade Ao Vivo em Heap Compartilhado (`DLL Original` <-> `reconstructed_twin.dll`)
 
@@ -22,7 +22,7 @@ Verificação empírica real (sem mocks): reconstrução de binários MSVC x64 `
 | `compiled twin poly_test :: Full C++ VTable Lifecycle (create/execute/reset/destroy x2)` | `[31, 77, 31, 4925, 97, 4925]` | `[31, 77, 31, 4925, 97, 4925]` | **PASS (100%)** |
 | `multi_poly.dll <-> compiled twin :: DualDevice multiple-inheritance heap` | `[100, 777]` | `[100, 777]` | **PASS (100%)** |
 | `compiled twin multi_poly :: Full Multiple-Inheritance Lifecycle (create/read/write/destroy)` | `[42, 42]` | `[42, 42]` | **PASS (100%)** |
-| `cjson.dll <-> compiled twin :: Live cJSON DOM heap traversal & predicates` | `[3, 1, 1, 1, 1796992277440, 0]` | `[3, 1, 1, 1, 1796992277440, 0]` | **PASS (100%)** |
+| `cjson.dll <-> compiled twin :: Live cJSON DOM heap traversal & predicates` | `[3, 1, 1, 1, 1410979147504, 0]` | `[3, 1, 1, 1, 1410979147504, 0]` | **PASS (100%)** |
 | `cjson.dll <-> compiled twin :: IEEE-754 XMM GetNumberValue(3.14159/NULL) & SetNumberHelper(99.75)` | `[3.14159, True, 99.75]` | `[3.14159, True, 99.75]` | **PASS (100%)** |
 | `compiled twin -> orig cjson.dll :: Live CRT Heap DOM Construction (CreateArray+Number+True+Bool+Null) & PrintUnformatted` | `['[42.5,true,false,null]', 4]` | `['[42.5,true,false,null]', 4]` | **PASS (100%)** |
 | `compiled twin -> orig cjson.dll :: Live Object+String+AddTrue+GetObjectItemCS+Delete` | `['aether_v39', '{"msg":"aether_v39","ok":true}']` | `['aether_v39', '{"msg":"aether_v39","ok":true}']` | **PASS (100%)** |
@@ -45,6 +45,7 @@ Verificação empírica real (sem mocks): reconstrução de binários MSVC x64 `
 | `LLVM O3 Linked DLL <-> orig cjson_utils.dll :: Standalone COFF Link SortObject` | `['{"a":1,"z":2}']` | `['{"a":1,"z":2}']` | **PASS (100%)** |
 | `LLVM O3 Linked DLL <-> orig poly_test.dll :: Shared C++ RTTI Heap Cross-Execution` | `[31, 32]` | `[31, 32]` | **PASS (100%)** |
 | `LLVM O3 Linked DLL <-> orig multi_poly.dll :: Standalone COFF Link Multiple-Inheritance Lifecycle` | `[42, 99]` | `[42, 99]` | **PASS (100%)** |
+| `Typed C Struct DLL <-> orig lz4.dll :: Alias-Propagated reconstructed_typed.c Live Compression & Decompression` | `[101, 466]` | `[101, 466]` | **PASS (100%)** |
 
 ## 3. Cópia Perfeita de Projeto Empacotado (Electron ASAR)
 

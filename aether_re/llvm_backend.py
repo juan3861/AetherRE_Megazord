@@ -50,6 +50,8 @@ _TRACKED_LOCALS: Tuple[str, ...] = (
     "xmm8", "xmm9", "xmm10", "xmm11", "xmm12", "xmm13", "xmm14", "xmm15",
     "xmm0_hi", "xmm1_hi", "xmm2_hi", "xmm3_hi", "xmm4_hi", "xmm5_hi", "xmm6_hi", "xmm7_hi",
     "xmm8_hi", "xmm9_hi", "xmm10_hi", "xmm11_hi", "xmm12_hi", "xmm13_hi", "xmm14_hi", "xmm15_hi",
+    "x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15",
+    "x16", "x17", "x18", "x19", "x20", "x21", "x22", "x23", "x24", "x25", "x26", "x27", "x28", "x29", "x30",
     "cmp_lhs", "cmp_rhs", "_aether_saved_sp",
 )
 

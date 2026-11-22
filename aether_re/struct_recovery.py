@@ -119,12 +119,18 @@ def recover_struct_layouts(
         sorted_offsets = sorted(fields_dict.keys())
         struct_name = f"{struct_name_prefix}_{base_reg.upper()}"
         
-        c_lines = [f"typedef struct {struct_name} {{"]
+        c_lines = [
+            "#pragma pack(push, 1)",
+            f"typedef struct {struct_name} {{",
+        ]
         current_offset = 0
         field_list: list[dict[str, Any]] = []
         pad_idx = 0
 
         for off in sorted_offsets:
+            if off < current_offset:
+                # Overlapping byte/word access inside an earlier field: omit from flat packed struct
+                continue
             f = fields_dict[off]
             if off > current_offset:
                 pad_size = off - current_offset
@@ -147,6 +153,7 @@ def recover_struct_layouts(
 
         total_size = current_offset
         c_lines.append(f"}} {struct_name}_t; /* total size: {total_size} bytes (0x{total_size:x}) */")
+        c_lines.append("#pragma pack(pop)")
         c_declaration = "\n".join(c_lines) + "\n"
 
         recovered_structs.append({
@@ -241,25 +248,44 @@ _REG_OFF_EXPR_RE = re.compile(
 _SIMPLE_MEM_READ_RE = re.compile(
     r"aether_mem_read\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*(?:\+\s*(0x[0-9a-fA-F]+|\d+))?\s*,\s*(\d+)\s*\)"
 )
+_FN_SIG_START_RE = re.compile(r"^(?:long long|int64_t|double)\s+[A-Za-z_][A-Za-z0-9_]*\s*\(")
+_REG_COPY_STMT_RE = re.compile(
+    r"^(r[abcd]x|r[sd]i|rbp|r(?:[89]|1[0-5]))\s*=\s*(?:\(\s*(?:long long|int64_t)\s*\)\s*)?(r[abcd]x|r[sd]i|rbp|r(?:[89]|1[0-5]))\s*;\s*(?:/\*.*\*/)?$"
+)
+_REG_ASSIGN_RE = re.compile(r"^(r[abcd]x|r[sd]i|rbp|r(?:[89]|1[0-5]))\s*(?:\+=|-=|=)")
 
 
 def emit_typed_c_from_structured(
     structured_c: str,
     structs: Sequence[dict[str, Any]],
 ) -> str:
-    """Rewrites raw aether_mem_read/write into typed struct pointer dereferences in decompiled C."""
+    """Rewrites raw aether_mem_read/write into typed struct pointer dereferences with intra-procedural alias propagation."""
     if not structured_c or not structs:
         return structured_c
     lookup = _build_struct_field_lookup(structs)
     if not lookup:
         return structured_c
 
+    active_alias: dict[str, str] = {}
+
+    def _resolve_field(reg_name: str, off: int, width: int) -> tuple[str, str, str, int] | None:
+        rlow = reg_name.lower()
+        hit = lookup.get((rlow, off))
+        if hit and hit[3] == width:
+            return hit
+        aliased = active_alias.get(rlow)
+        if aliased:
+            hit_a = lookup.get((aliased, off))
+            if hit_a and hit_a[3] == width:
+                return hit_a
+        return None
+
     def _repl_read(match: re.Match[str]) -> str:
         raw_reg = match.group(1)
         off = int(match.group(2), 0) if match.group(2) else 0
         width = int(match.group(3))
-        hit = lookup.get((raw_reg.lower(), off))
-        if not hit or hit[3] != width:
+        hit = _resolve_field(raw_reg, off, width)
+        if not hit:
             return match.group(0)
         st_name, f_name, f_type, _ = hit
         deref = f"(({st_name}_t*)(uintptr_t)({raw_reg}))->{f_name}"
@@ -271,13 +297,16 @@ def emit_typed_c_from_structured(
 
     out_lines: list[str] = []
     for ln in structured_c.splitlines():
+        st_orig = ln.strip()
+        if _FN_SIG_START_RE.match(st_orig):
+            active_alias.clear()
+
         new_ln = _SIMPLE_MEM_READ_RE.sub(_repl_read, ln)
 
         # Check standalone statement aether_mem_write(addr, width, val);
         stripped = new_ln.strip()
         indent = new_ln[: len(new_ln) - len(new_ln.lstrip())]
         if stripped.startswith("aether_mem_write("):
-            # Extract balanced call ending before ");" (ignore trailing inline comment)
             open_idx = stripped.find("(")
             depth = 0
             close_idx = -1
@@ -298,8 +327,8 @@ def emit_typed_c_from_structured(
                         off = int(m_addr.group(2), 0) if m_addr.group(2) else 0
                         width = int(call_args[1])
                         val_expr = call_args[2]
-                        hit = lookup.get((raw_reg.lower(), off))
-                        if hit and hit[3] == width:
+                        hit = _resolve_field(raw_reg, off, width)
+                        if hit:
                             st_name, f_name, f_type, _ = hit
                             lhs = f"(({st_name}_t*)(uintptr_t)({raw_reg}))->{f_name}"
                             if f_type == "double":
@@ -308,6 +337,27 @@ def emit_typed_c_from_structured(
                                 new_ln = f"{indent}{{ uint32_t _fv = (uint32_t)({val_expr}); memcpy(&{lhs}, &_fv, 4); }}"
                             else:
                                 new_ln = f"{indent}{lhs} = ({f_type})({val_expr});"
+
+        # Update intra-procedural register alias state after rewriting the statement
+        m_copy = _REG_COPY_STMT_RE.match(st_orig)
+        if m_copy:
+            dst_r = m_copy.group(1).lower()
+            src_r = m_copy.group(2).lower()
+            # Invalidate existing aliases pointing to dst_r before reassigning
+            for ak in [k for k, v in active_alias.items() if v == dst_r]:
+                active_alias.pop(ak, None)
+            if dst_r != src_r:
+                active_alias[dst_r] = active_alias.get(src_r, src_r)
+        elif st_orig.startswith("L_") and ":" in st_orig:
+            # Conservative reset on raw branch labels unless sequential entry fallthrough
+            active_alias.clear()
+        else:
+            m_as = _REG_ASSIGN_RE.match(st_orig)
+            if m_as:
+                mut_r = m_as.group(1).lower()
+                active_alias.pop(mut_r, None)
+                for ak in [k for k, v in active_alias.items() if v == mut_r]:
+                    active_alias.pop(ak, None)
 
         out_lines.append(new_ln)
     return "\n".join(out_lines)

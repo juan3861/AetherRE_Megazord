@@ -393,7 +393,7 @@ def structure_control_flow(nodes: Sequence[str], edges: Sequence[tuple[str, str]
             while pending:
                 current = pending.pop()
                 ast_count += 1
-                if ast_count > 20000:
+                if ast_count > 100000:
                     raise ValueError("c_ast_budget_exceeded")
                 if isinstance(current, c_ast.CompoundLiteral):
                     scope_sensitive = True
@@ -437,7 +437,7 @@ def structure_control_flow(nodes: Sequence[str], edges: Sequence[tuple[str, str]
             canonical = []
             for statement in statements:
                 statement_count += 1
-                if statement_count > 2048:
+                if statement_count > 4096:
                     raise ValueError("statement_budget_exceeded")
                 items = one_body(statement)
                 if not items:

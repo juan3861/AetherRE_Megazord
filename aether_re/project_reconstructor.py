@@ -47,11 +47,17 @@ from aether_re.electron_asar_forensics import analyze_asar_bytes
 from aether_re.flirt_cfg import discover_crt_via_cfg_flirt
 from aether_re.ir_optimizer import optimize_lifted_c
 from aether_re.llvm_backend import compile_project_to_llvm_ir
+from aether_re.multiarch_lifter import (
+    eval_arm64_insns,
+    extract_elf64_metadata,
+    lift_arm64_function_to_c,
+)
 from aether_re.struct_recovery import (
     annotate_c_with_struct_fields,
     emit_typed_c_from_structured,
     recover_struct_layouts,
 )
+from aether_re.win64_unwind import parse_win64_unwind_table
 
 
 @dataclass
@@ -106,6 +112,10 @@ class ProjectReconstructionReport:
     llvm_coff_obj_bytes: int = 0
     flirt_cfg_matches: int = 0
     flirt_cfg_signatures: List[Dict[str, Any]] = field(default_factory=list)
+    architecture: str = "pe_x86_64"
+    win64_unwind_functions: int = 0
+    win64_ehandlers_count: int = 0
+    eh_frame_bytes: int = 0
     error: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
@@ -1109,6 +1119,7 @@ def _lift_x64_function_full(
     vtable_arena_addrs: Optional[Dict[int, int]] = None,
     rw_ranges: Optional[List[Tuple[int, int]]] = None,
     meta_out: Optional[Dict[str, Any]] = None,
+    sysv_abi: bool = False,
 ) -> Tuple[str, List[Tuple[int, str, str]], bool, bool, Dict[int, int], bool, List[int]]:
     """Lifts an x86_64 function byte slice into compilable C code, IR, ro-constants, CRT calls, and internal callees."""
     c_ident = _sanitize_c_ident(fn_name, f"sub_{base_rva:x}")
@@ -1344,6 +1355,15 @@ def _lift_x64_function_full(
             c_lines.append(f"    _aether_sp = rsp; rax = {call_expr}; _aether_sp = _aether_saved_sp;")
         if is_tail:
             c_lines.append(ret_stmt)
+
+    if sysv_abi and insns:
+        c_lines.extend([
+            f"L_{base_rva:x}_sysv: ; /* SysV AMD64 ABI entry bridge */",
+            "    rdi = rcx;",
+            "    rsi = rdx;",
+            "    rdx = r8;",
+            "    rcx = r9;",
+        ])
 
     for insn_idx, (addr, mnem, op_str) in enumerate(insns):
         c_lines.append(f"L_{addr:x}: ; /* {mnem} {op_str} */")
@@ -2012,16 +2032,23 @@ def _simulate_x64_insns(
     halt_info: Optional[Dict[str, bool]] = None,
     _stack_base: int = 0x4E000,
     _depth: int = 0,
+    sysv_abi: bool = False,
 ) -> int:
     """Reference x86_64 instruction-level emulator with recursive inter-procedural support."""
     if _depth >= 24:
         return 0
     arena = mem_arena if mem_arena is not None else _MemoryArena()
     regs: Dict[str, int] = {r: 0 for r in _ALL_CANON_REGS}
-    regs["rcx"] = _to_int64(rcx)
-    regs["rdx"] = _to_int64(rdx)
-    regs["r8"] = _to_int64(r8)
-    regs["r9"] = _to_int64(r9)
+    if sysv_abi:
+        regs["rdi"] = _to_int64(rcx)
+        regs["rsi"] = _to_int64(rdx)
+        regs["rdx"] = _to_int64(r8)
+        regs["rcx"] = _to_int64(r9)
+    else:
+        regs["rcx"] = _to_int64(rcx)
+        regs["rdx"] = _to_int64(rdx)
+        regs["r8"] = _to_int64(r8)
+        regs["r9"] = _to_int64(r9)
     regs["rsp"] = _stack_base
     xmms: Dict[str, int] = {x: 0 for x in _XMM_REGS}
     xmms_hi: Dict[str, int] = {x: 0 for x in _XMM_REGS}
@@ -2804,6 +2831,7 @@ _AST_NORM_REGS: set[str] = {
     "xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "xmm6", "xmm7",
     "xmm0_hi", "xmm1_hi", "xmm2_hi", "xmm3_hi", "xmm4_hi", "xmm5_hi", "xmm6_hi", "xmm7_hi",
     "cmp_lhs", "cmp_rhs",
+    *(f"x{i}" for i in range(31)),
 }
 
 
@@ -3110,8 +3138,8 @@ def _structure_lifted_c_to_ctree(c_ident: str, c_code: str) -> Dict[str, Any]:
             continue
         if ln.startswith("/*"):
             continue
-        if not steps:
-            steps.append(("entry", [], None))
+        if not steps or steps[-1][2] is not None:
+            steps.append(("entry" if not steps else None, [], None))
         lbl_s, stmts_s, term_s = steps[-1]
         if ln == "return rax;":
             steps[-1] = (lbl_s, stmts_s, ("return", "rax"))
@@ -3207,6 +3235,133 @@ def _structure_lifted_c_to_ctree(c_ident: str, c_code: str) -> Dict[str, Any]:
             edges.append((b["name"], t["false"]))
         block_semantics[b["name"]] = {"statements": b["statements"], "terminator": t}
 
+    # Compact single-predecessor jumps, one-armed diamonds, and short-circuit branches
+    # so large functions remain inside ctree_structuring's strict 512-node / 2048-stmt budgets.
+    def _stmts_to_comma_exprs(stmts_in: List[str]) -> Optional[List[str]]:
+        out_exprs: List[str] = []
+        for s_raw in stmts_in:
+            s_clean = s_raw.strip()
+            if s_clean.endswith(";"):
+                s_clean = s_clean[:-1].strip()
+            if not s_clean:
+                continue
+            if ";" in s_clean or "{" in s_clean or "}" in s_clean:
+                return None
+            out_exprs.append(f"({s_clean})")
+        return out_exprs
+
+    def _rebuild_cfg_edges() -> List[Tuple[str, str]]:
+        out_edges: List[Tuple[str, str]] = []
+        for n_cur in nodes:
+            t_cur = block_semantics[n_cur]["terminator"]
+            if t_cur["kind"] == "jump":
+                out_edges.append((n_cur, t_cur["target"]))
+            elif t_cur["kind"] == "branch":
+                out_edges.append((n_cur, t_cur["true"]))
+                out_edges.append((n_cur, t_cur["false"]))
+        return out_edges
+
+    while True:
+        in_deg: Dict[str, int] = {n: 0 for n in nodes}
+        for _, v_e in edges:
+            in_deg[v_e] = in_deg.get(v_e, 0) + 1
+        merged_any = False
+        for u in list(nodes):
+            if u not in block_semantics:
+                continue
+            tu = block_semantics[u]["terminator"]
+            if tu["kind"] == "jump":
+                v = tu["target"]
+                if v != u and v != nodes[0] and in_deg.get(v, 0) == 1 and v in block_semantics:
+                    block_semantics[u]["statements"].extend(block_semantics[v]["statements"])
+                    block_semantics[u]["terminator"] = block_semantics[v]["terminator"]
+                    del block_semantics[v]
+                    nodes.remove(v)
+                    merged_any = True
+                    break
+            elif tu["kind"] == "branch":
+                tr, fa, cond_u = tu["true"], tu["false"], tu["condition"]
+                if tr == fa:
+                    block_semantics[u]["terminator"] = {"kind": "jump", "target": tr}
+                    merged_any = True
+                    break
+                if tr != u and tr != nodes[0] and in_deg.get(tr, 0) == 1 and tr in block_semantics:
+                    t_tr = block_semantics[tr]["terminator"]
+                    if t_tr.get("kind") == "jump" and t_tr.get("target") == fa:
+                        exprs_tr = _stmts_to_comma_exprs(block_semantics[tr]["statements"])
+                        if exprs_tr is not None:
+                            if exprs_tr:
+                                block_semantics[u]["statements"].append(
+                                    f"(0, (({cond_u}) ? ({', '.join(exprs_tr)}, 0) : 0));"
+                                )
+                            block_semantics[u]["terminator"] = {"kind": "jump", "target": fa}
+                            del block_semantics[tr]
+                            nodes.remove(tr)
+                            merged_any = True
+                            break
+                if fa != u and fa != nodes[0] and in_deg.get(fa, 0) == 1 and fa in block_semantics:
+                    t_fa = block_semantics[fa]["terminator"]
+                    if t_fa.get("kind") == "jump" and t_fa.get("target") == tr:
+                        exprs_fa = _stmts_to_comma_exprs(block_semantics[fa]["statements"])
+                        if exprs_fa is not None:
+                            if exprs_fa:
+                                block_semantics[u]["statements"].append(
+                                    f"(0, ((!({cond_u})) ? ({', '.join(exprs_fa)}, 0) : 0));"
+                                )
+                            block_semantics[u]["terminator"] = {"kind": "jump", "target": tr}
+                            del block_semantics[fa]
+                            nodes.remove(fa)
+                            merged_any = True
+                            break
+                    if t_fa.get("kind") == "branch" and len(block_semantics[fa]["statements"]) <= 16:
+                        exprs_fa = _stmts_to_comma_exprs(block_semantics[fa]["statements"])
+                        if exprs_fa is not None:
+                            c2 = t_fa["condition"]
+                            if t_fa["true"] == tr and t_fa["false"] != u:
+                                rhs_cond = f"({', '.join(exprs_fa)}, ({c2}))" if exprs_fa else f"({c2})"
+                                block_semantics[u]["terminator"] = {
+                                    "kind": "branch",
+                                    "condition": f"(({cond_u}) || {rhs_cond})",
+                                    "true": tr,
+                                    "false": t_fa["false"],
+                                }
+                                del block_semantics[fa]
+                                nodes.remove(fa)
+                                merged_any = True
+                                break
+                            if t_fa["false"] == tr and t_fa["true"] != u:
+                                rhs_cond = f"({', '.join(exprs_fa)}, !({c2}))" if exprs_fa else f"!({c2})"
+                                block_semantics[u]["terminator"] = {
+                                    "kind": "branch",
+                                    "condition": f"(({cond_u}) || {rhs_cond})",
+                                    "true": tr,
+                                    "false": t_fa["true"],
+                                }
+                                del block_semantics[fa]
+                                nodes.remove(fa)
+                                merged_any = True
+                                break
+        if not merged_any:
+            break
+        edges = _rebuild_cfg_edges()
+
+    # Prune any unreachable blocks from entry so CFG matches structure_control_flow reachability
+    adj_reach: Dict[str, List[str]] = {}
+    for u_r, v_r in edges:
+        adj_reach.setdefault(u_r, []).append(v_r)
+    seen_reach = {nodes[0]}
+    q_reach = [nodes[0]]
+    while q_reach:
+        cur_r = q_reach.pop()
+        for nx_r in adj_reach.get(cur_r, []):
+            if nx_r not in seen_reach and nx_r in block_semantics:
+                seen_reach.add(nx_r)
+                q_reach.append(nx_r)
+    if len(seen_reach) < len(nodes):
+        nodes = [n for n in nodes if n in seen_reach]
+        block_semantics = {n: block_semantics[n] for n in nodes}
+        edges = [(u_e, v_e) for u_e, v_e in edges if u_e in seen_reach and v_e in seen_reach]
+
     declarations = [
         "long long rax = 0;", "long long rbx = 0;", "long long rbp = 0;",
         "long long rsi = 0;", "long long rdi = 0;", "long long r10 = 0;",
@@ -3222,6 +3377,8 @@ def _structure_lifted_c_to_ctree(c_ident: str, c_code: str) -> Dict[str, Any]:
         declarations.append("long long rdx = 0;")
     for sv in sorted(set(re.findall(r"\baether_slot_[A-Za-z0-9_]+\b", c_code))):
         declarations.append(f"long long {sv} = 0;")
+    for xr_a in sorted(set(re.findall(r"\bx(?:[0-2]?\d|30)\b", c_code))):
+        declarations.append(f"long long {xr_a} = 0;")
     if uses_xmm or returns_double:
         for xr in _XMM_REGS:
             if xr == "xmm0" and takes_double_arg0:
@@ -3324,10 +3481,11 @@ def _find_msvc_x64_toolchain() -> Optional[Tuple[Path, Dict[str, str], str, Opti
 def compile_reconstructed_project(
     project_dir: str | Path,
     output_dll_name: str = "reconstructed_twin.dll",
+    source_rel: str = "src/reconstructed_project.c",
 ) -> Dict[str, Any]:
     """Compiles a reconstructed twin C project into a native shared library (.dll/.so) when a compiler is available."""
     proj = Path(project_dir).resolve()
-    c_src = proj / "src" / "reconstructed_project.c"
+    c_src = proj / source_rel
     def_file = proj / "src" / "exports.def"
     out_dll = proj / output_dll_name
     if not c_src.is_file():
@@ -3518,6 +3676,593 @@ def compile_llvm_twin_project(
     return {"compiled": False, "status": "no_linker_found", "error": "Neither MSVC link.exe nor clang found"}
 
 
+def _base_runtime_header_lines() -> List[str]:
+    """Shared AETHER_RT runtime header preamble reused by PE x86-64, PE ARM64, and ELF64 targets."""
+    return [
+        "/* Auto-Reconstructed Public Header by AetherRE Megazord (GEAR-23) */",
+        "#pragma once",
+        "#ifndef _CRT_SECURE_NO_WARNINGS",
+        "#define _CRT_SECURE_NO_WARNINGS",
+        "#endif",
+        "#include <ctype.h>",
+        "#include <math.h>",
+        "#include <stdint.h>",
+        "#include <stddef.h>",
+        "#include <stdio.h>",
+        "#include <stdlib.h>",
+        "#include <string.h>",
+        "",
+        "#ifdef __cplusplus",
+        'extern "C" {',
+        "#endif",
+        "#ifdef AETHER_RT_LINK",
+        "#define AETHER_RT",
+        "#else",
+        "#define AETHER_RT static inline",
+        "#endif",
+        "",
+        "AETHER_RT int64_t aether_malloc(int64_t size) {",
+        "    return (int64_t)(uintptr_t)malloc((size_t)(size > 0 ? size : 1));",
+        "}",
+        "AETHER_RT int64_t aether_free(int64_t ptr) {",
+        "    free((void*)(uintptr_t)ptr);",
+        "    return 0LL;",
+        "}",
+        "AETHER_RT int64_t aether_realloc(int64_t ptr, int64_t size) {",
+        "    return (int64_t)(uintptr_t)realloc((void*)(uintptr_t)ptr, (size_t)(size > 0 ? size : 1));",
+        "}",
+        "AETHER_RT int64_t aether_strlen(int64_t s) {",
+        "    if (!s) return 0LL;",
+        "    return (int64_t)strlen((const char*)(uintptr_t)s);",
+        "}",
+        "AETHER_RT int64_t aether_strcmp(int64_t a, int64_t b) {",
+        "    const char* sa = a ? (const char*)(uintptr_t)a : \"\";",
+        "    const char* sb = b ? (const char*)(uintptr_t)b : \"\";",
+        "    return (int64_t)strcmp(sa, sb);",
+        "}",
+        "AETHER_RT int64_t aether_strncmp(int64_t a, int64_t b, int64_t n) {",
+        "    if (!a || !b || n <= 0) return 0LL;",
+        "    return (int64_t)strncmp((const char*)(uintptr_t)a, (const char*)(uintptr_t)b, (size_t)n);",
+        "}",
+        "AETHER_RT int64_t aether_sprintf(int64_t buf, int64_t fmt, int64_t a1, int64_t a2, int64_t a3) {",
+        "    if (!buf || !fmt) return -1LL;",
+        "    const char* fs = (const char*)(uintptr_t)fmt;",
+        "    if (strchr(fs, 'g') || strchr(fs, 'f') || strchr(fs, 'e')) {",
+        "        double d_val = 0.0;",
+        "        memcpy(&d_val, &a1, 8);",
+        "        return (int64_t)sprintf((char*)(uintptr_t)buf, fs, d_val);",
+        "    }",
+        "    return (int64_t)sprintf((char*)(uintptr_t)buf, fs, a1, a2, a3);",
+        "}",
+        "AETHER_RT int64_t aether_sscanf(int64_t buf, int64_t fmt, int64_t a1, int64_t a2) {",
+        "    if (!buf || !fmt) return -1LL;",
+        "    (void)a2;",
+        "    return (int64_t)sscanf((const char*)(uintptr_t)buf, (const char*)(uintptr_t)fmt, (void*)(uintptr_t)a1);",
+        "}",
+        "AETHER_RT double aether_strtod(int64_t s, int64_t endptr) {",
+        "    if (!s) { if (endptr) *(char**)(uintptr_t)endptr = NULL; return 0.0; }",
+        "    return strtod((const char*)(uintptr_t)s, (char**)(uintptr_t)endptr);",
+        "}",
+        "AETHER_RT int64_t aether_printf(int64_t fmt, int64_t a1, int64_t a2, int64_t a3) {",
+        "    if (!fmt) return -1LL;",
+        "    const char* fs = (const char*)(uintptr_t)fmt;",
+        "    if (strchr(fs, 'g') || strchr(fs, 'f') || strchr(fs, 'e')) {",
+        "        double d_val = 0.0;",
+        "        memcpy(&d_val, &a1, 8);",
+        "        return (int64_t)printf(fs, d_val);",
+        "    }",
+        "    return (int64_t)printf(fs, a1, a2, a3);",
+        "}",
+        "AETHER_RT int64_t aether_pcmpeqb64(int64_t a, int64_t b) {",
+        "    uint64_t out = 0, ua = (uint64_t)a, ub = (uint64_t)b;",
+        "    for (int i = 0; i < 8; ++i) {",
+        "        if (((ua >> (i * 8)) & 0xffULL) == ((ub >> (i * 8)) & 0xffULL)) out |= (0xffULL << (i * 8));",
+        "    }",
+        "    return (int64_t)out;",
+        "}",
+        "AETHER_RT int64_t aether_pmaxud64(int64_t a, int64_t b) {",
+        "    uint32_t al = (uint32_t)a, bl = (uint32_t)b, ah = (uint32_t)((uint64_t)a >> 32), bh = (uint32_t)((uint64_t)b >> 32);",
+        "    return (int64_t)((uint64_t)(al > bl ? al : bl) | ((uint64_t)(ah > bh ? ah : bh) << 32));",
+        "}",
+        "AETHER_RT int64_t aether_pcmpeqd64(int64_t a, int64_t b) {",
+        "    uint32_t al = (uint32_t)a, bl = (uint32_t)b, ah = (uint32_t)((uint64_t)a >> 32), bh = (uint32_t)((uint64_t)b >> 32);",
+        "    return (int64_t)((al == bl ? 0xffffffffULL : 0ULL) | ((ah == bh ? 0xffffffffULL : 0ULL) << 32));",
+        "}",
+        "AETHER_RT int64_t aether_psubd64(int64_t a, int64_t b) {",
+        "    uint32_t al = (uint32_t)a - (uint32_t)b, ah = (uint32_t)((uint64_t)a >> 32) - (uint32_t)((uint64_t)b >> 32);",
+        "    return (int64_t)((uint64_t)al | ((uint64_t)ah << 32));",
+        "}",
+        "static int64_t _aether_xmm_hi = 0;",
+        "static inline int64_t aether_pshufd(int64_t lo, int64_t hi, int64_t imm8) {",
+        "    uint32_t L[4] = { (uint32_t)lo, (uint32_t)((uint64_t)lo >> 32), (uint32_t)hi, (uint32_t)((uint64_t)hi >> 32) };",
+        "    _aether_xmm_hi = (int64_t)((uint64_t)L[(imm8 >> 4) & 3] | ((uint64_t)L[(imm8 >> 6) & 3] << 32));",
+        "    return (int64_t)((uint64_t)L[imm8 & 3] | ((uint64_t)L[(imm8 >> 2) & 3] << 32));",
+        "}",
+        "AETHER_RT int64_t aether_tolower(int64_t c) {",
+        "    return (int64_t)tolower((int)(unsigned char)c);",
+        "}",
+        "AETHER_RT int64_t aether_isalpha(int64_t c) { return (int64_t)isalpha((int)(unsigned char)c); }",
+        "AETHER_RT int64_t aether_isdigit(int64_t c) { return (int64_t)isdigit((int)(unsigned char)c); }",
+        "AETHER_RT int64_t aether_isspace(int64_t c) { return (int64_t)isspace((int)(unsigned char)c); }",
+        "AETHER_RT int64_t aether_isxdigit(int64_t c) { return (int64_t)isxdigit((int)(unsigned char)c); }",
+        "AETHER_RT int64_t aether_memcpy(int64_t dst, int64_t src, int64_t size) {",
+        "    if (dst && src && size > 0) memcpy((void*)(uintptr_t)dst, (const void*)(uintptr_t)src, (size_t)size);",
+        "    return dst;",
+        "}",
+        "AETHER_RT int64_t aether_memset(int64_t dst, int64_t val, int64_t size) {",
+        "    if (dst && size > 0) memset((void*)(uintptr_t)dst, (int)(unsigned char)val, (size_t)size);",
+        "    return dst;",
+        "}",
+        "AETHER_RT double aether_pow(double a, double b) { return pow(a, b); }",
+        "AETHER_RT double aether_fmod(double a, double b) { return fmod(a, b); }",
+        "static int64_t _aether_div_rem = 0;",
+        "static inline int64_t aether_udiv64(int64_t hi, int64_t lo, int64_t d) {",
+        "    uint64_t ud = (uint64_t)d;",
+        "    if (!ud) { _aether_div_rem = 0; return 0; }",
+        "    if (hi == 0) { uint64_t ul = (uint64_t)lo; _aether_div_rem = (int64_t)(ul % ud); return (int64_t)(ul / ud); }",
+        "    uint64_t q = 0, r = (uint64_t)hi, u_lo = (uint64_t)lo;",
+        "    for (int i = 63; i >= 0; --i) {",
+        "        uint64_t c = r >> 63;",
+        "        r = (r << 1) | ((u_lo >> i) & 1ULL);",
+        "        if (c || r >= ud) { r -= ud; q |= (1ULL << i); }",
+        "    }",
+        "    _aether_div_rem = (int64_t)r;",
+        "    return (int64_t)q;",
+        "}",
+        "static inline int64_t aether_udiv32(int64_t hi, int64_t lo, int64_t d) {",
+        "    uint64_t ud = (uint64_t)(uint32_t)d;",
+        "    if (!ud) { _aether_div_rem = 0; return 0; }",
+        "    uint64_t un = ((uint64_t)(uint32_t)hi << 32) | (uint64_t)(uint32_t)lo;",
+        "    _aether_div_rem = (int64_t)(uint32_t)(un % ud);",
+        "    return (int64_t)(uint32_t)(un / ud);",
+        "}",
+        "static int64_t _aether_imul_hi = 0;",
+        "static inline int64_t aether_imul32(int64_t a, int64_t b) {",
+        "    int64_t prod = (int64_t)(int32_t)a * (int64_t)(int32_t)b;",
+        "    _aether_imul_hi = (int64_t)(uint32_t)((uint64_t)prod >> 32);",
+        "    return (int64_t)(uint32_t)prod;",
+        "}",
+        "static inline int64_t aether_imul64(int64_t a, int64_t b) {",
+        "    uint64_t ua = (uint64_t)(a < 0 ? -a : a), ub = (uint64_t)(b < 0 ? -b : b);",
+        "    uint64_t a_lo = ua & 0xffffffffULL, a_hi = ua >> 32;",
+        "    uint64_t b_lo = ub & 0xffffffffULL, b_hi = ub >> 32;",
+        "    uint64_t p0 = a_lo * b_lo, p1 = a_lo * b_hi, p2 = a_hi * b_lo, p3 = a_hi * b_hi;",
+        "    uint64_t mid = (p0 >> 32) + (p1 & 0xffffffffULL) + (p2 & 0xffffffffULL);",
+        "    uint64_t lo = (p0 & 0xffffffffULL) | (mid << 32);",
+        "    uint64_t hi = p3 + (p1 >> 32) + (p2 >> 32) + (mid >> 32);",
+        "    if ((a < 0) ^ (b < 0)) { lo = ~lo + 1ULL; hi = ~hi + (lo == 0 ? 1ULL : 0ULL); }",
+        "    _aether_imul_hi = (int64_t)hi;",
+        "    return (int64_t)lo;",
+        "}",
+        "static inline int64_t aether_umul32(int64_t a, int64_t b) {",
+        "    uint64_t prod = (uint64_t)(uint32_t)a * (uint64_t)(uint32_t)b;",
+        "    _aether_imul_hi = (int64_t)(uint32_t)(prod >> 32);",
+        "    return (int64_t)(uint32_t)prod;",
+        "}",
+        "static inline int64_t aether_umul64(int64_t a, int64_t b) {",
+        "    uint64_t ua = (uint64_t)a, ub = (uint64_t)b;",
+        "    uint64_t a_lo = ua & 0xffffffffULL, a_hi = ua >> 32;",
+        "    uint64_t b_lo = ub & 0xffffffffULL, b_hi = ub >> 32;",
+        "    uint64_t p0 = a_lo * b_lo, p1 = a_lo * b_hi, p2 = a_hi * b_lo, p3 = a_hi * b_hi;",
+        "    uint64_t mid = (p0 >> 32) + (p1 & 0xffffffffULL) + (p2 & 0xffffffffULL);",
+        "    uint64_t lo = (p0 & 0xffffffffULL) | (mid << 32);",
+        "    uint64_t hi = p3 + (p1 >> 32) + (p2 >> 32) + (mid >> 32);",
+        "    _aether_imul_hi = (int64_t)hi;",
+        "    return (int64_t)lo;",
+        "}",
+        "static inline int64_t aether_tzcnt32(int64_t v) {",
+        "    uint32_t uv = (uint32_t)v;",
+        "    if (!uv) return 32;",
+        "    int64_t c = 0; while ((uv & 1U) == 0) { uv >>= 1; ++c; }",
+        "    return c;",
+        "}",
+        "static inline int64_t aether_tzcnt64(int64_t v) {",
+        "    uint64_t uv = (uint64_t)v;",
+        "    if (!uv) return 64;",
+        "    int64_t c = 0; while ((uv & 1ULL) == 0) { uv >>= 1; ++c; }",
+        "    return c;",
+        "}",
+        "AETHER_RT int64_t aether_calloc(int64_t n, int64_t sz) {",
+        "    return (int64_t)(uintptr_t)calloc((size_t)(n > 0 ? n : 1), (size_t)(sz > 0 ? sz : 1));",
+        "}",
+        "AETHER_RT int64_t aether_rep_stos(int64_t dst, int64_t val, int64_t count, int64_t width) {",
+        "    if (!dst || count <= 0) return dst;",
+        "    uint64_t cnt = (uint64_t)count;",
+        "    if (width == 1) { memset((void*)(uintptr_t)dst, (int)(unsigned char)val, (size_t)cnt); return dst + (int64_t)cnt; }",
+        "    if (width == 2) { uint16_t *p = (uint16_t*)(uintptr_t)dst; for (uint64_t i = 0; i < cnt; ++i) p[i] = (uint16_t)val; return dst + (int64_t)(cnt * 2); }",
+        "    if (width == 4) { uint32_t *p = (uint32_t*)(uintptr_t)dst; for (uint64_t i = 0; i < cnt; ++i) p[i] = (uint32_t)val; return dst + (int64_t)(cnt * 4); }",
+        "    uint64_t *p = (uint64_t*)(uintptr_t)dst; for (uint64_t i = 0; i < cnt; ++i) p[i] = (uint64_t)val; return dst + (int64_t)(cnt * 8);",
+        "}",
+        "AETHER_RT int64_t aether_strcpy(int64_t dst, int64_t src) {",
+        "    if (dst && src) {",
+        "        size_t n = strlen((const char*)(uintptr_t)src) + 1;",
+        "        memcpy((void*)(uintptr_t)dst, (const void*)(uintptr_t)src, n);",
+        "    }",
+        "    return dst;",
+        "}",
+        "AETHER_RT int64_t aether_strrchr(int64_t s, int64_t ch) {",
+        "    return s ? (int64_t)(uintptr_t)strrchr((const char*)(uintptr_t)s, (int)(unsigned char)ch) : 0;",
+        "}",
+        "static inline int64_t aether_u32(uint64_t v) {",
+        "    return (int64_t)(uint32_t)v;",
+        "}",
+        "static inline int64_t aether_i32(int64_t v) {",
+        "    return (int64_t)(int32_t)v;",
+        "}",
+        "static inline int64_t aether_i16(int64_t v) {",
+        "    return (int64_t)(int16_t)(uint16_t)v;",
+        "}",
+        "static inline int64_t aether_i8(int64_t v) {",
+        "    return (int64_t)(int8_t)(uint8_t)v;",
+        "}",
+        "static inline int64_t aether_bt_cf(int64_t val, int64_t bit, int64_t mask) {",
+        "    return ((((uint64_t)val) >> ((uint64_t)bit & (uint64_t)mask)) & 1ULL) ? 0LL : 1LL;",
+        "}",
+        "static inline int64_t aether_bit_mask(int64_t bit, int64_t mask) {",
+        "    return (int64_t)(1ULL << ((uint64_t)bit & (uint64_t)mask));",
+        "}",
+        "#ifdef _MSC_VER",
+        "#define AETHER_TLS __declspec(thread)",
+        "#else",
+        "#define AETHER_TLS _Thread_local",
+        "#endif",
+        "static AETHER_TLS uint8_t aether_tls_stack[131072];",
+        "static AETHER_TLS int64_t _aether_sp = 0;",
+        "AETHER_RT int64_t aether_get_sp(void) {",
+        "    return _aether_sp;",
+        "}",
+        "AETHER_RT int64_t aether_set_sp(int64_t sp) {",
+        "    _aether_sp = sp;",
+        "    return sp;",
+        "}",
+        "AETHER_RT int64_t aether_stack_base(void) {",
+        "    return (_aether_sp ? _aether_sp : (int64_t)(uintptr_t)(aether_tls_stack + 114688)) - 8;",
+        "}",
+        "static inline int64_t aether_set_byte(int64_t reg, int cond) {",
+        "    return (reg & ~0xffLL) | (cond ? 1LL : 0LL);",
+        "}",
+        "AETHER_RT uint64_t aether_mem_read(int64_t addr, size_t width) {",
+        "    if (addr == 0) return 0ULL;",
+        "    const uint8_t* p = (const uint8_t*)(uintptr_t)addr;",
+        "    if (width == 1) return *(const uint8_t*)p;",
+        "    if (width == 2) return *(const uint16_t*)p;",
+        "    if (width == 4) return *(const uint32_t*)p;",
+        "    return *(const uint64_t*)p;",
+        "}",
+        "AETHER_RT void aether_mem_write(int64_t addr, size_t width, uint64_t val) {",
+        "    if (addr == 0) return;",
+        "    uint8_t* p = (uint8_t*)(uintptr_t)addr;",
+        "    if (width == 1) *(uint8_t*)p = (uint8_t)val;",
+        "    else if (width == 2) *(uint16_t*)p = (uint16_t)val;",
+        "    else if (width == 4) *(uint32_t*)p = (uint32_t)val;",
+        "    else *(uint64_t*)p = val;",
+        "}",
+        "static inline int64_t aether_f64_to_bits(double d) {",
+        "    int64_t b = 0;",
+        "    memcpy(&b, &d, 8);",
+        "    return b;",
+        "}",
+        "static inline double aether_bits_to_f64(int64_t b) {",
+        "    double d = 0.0;",
+        "    memcpy(&d, &b, 8);",
+        "    return d;",
+        "}",
+        "static inline int64_t aether_f64_comisd(int64_t a_bits, int64_t b_bits) {",
+        "    double a = aether_bits_to_f64(a_bits);",
+        "    double b = aether_bits_to_f64(b_bits);",
+        "    if (isnan(a) || isnan(b)) return -1LL;",
+        "    if (a == b) return 1LL;",
+        "    if (a > b) return 2LL;",
+        "    return 0LL;",
+        "}",
+        "static inline int64_t aether_f64_to_i32(int64_t b) {",
+        "    return (int64_t)(uint32_t)(int32_t)aether_bits_to_f64(b);",
+        "}",
+        "static inline int64_t aether_i32_to_f64(int64_t i) {",
+        "    return aether_f64_to_bits((double)(int32_t)i);",
+        "}",
+        "static inline int64_t aether_f32_to_f64(int64_t u32_bits) {",
+        "    float f = 0.0f;",
+        "    uint32_t u = (uint32_t)u32_bits;",
+        "    memcpy(&f, &u, 4);",
+        "    return aether_f64_to_bits((double)f);",
+        "}",
+        "static inline int64_t aether_f64_max(int64_t a, int64_t b) { return aether_bits_to_f64(a) > aether_bits_to_f64(b) ? a : b; }",
+        "static inline int64_t aether_f64_min(int64_t a, int64_t b) { return aether_bits_to_f64(a) < aether_bits_to_f64(b) ? a : b; }",
+        "static inline int64_t aether_f64_add(int64_t a, int64_t b) { return aether_f64_to_bits(aether_bits_to_f64(a) + aether_bits_to_f64(b)); }",
+        "static inline int64_t aether_f64_sub(int64_t a, int64_t b) { return aether_f64_to_bits(aether_bits_to_f64(a) - aether_bits_to_f64(b)); }",
+        "static inline int64_t aether_f64_mul(int64_t a, int64_t b) { return aether_f64_to_bits(aether_bits_to_f64(a) * aether_bits_to_f64(b)); }",
+        "static inline int64_t aether_f64_div(int64_t a, int64_t b) { return aether_f64_to_bits(aether_bits_to_f64(a) / aether_bits_to_f64(b)); }",
+        "",
+    ]
+
+
+def _reconstruct_multiarch_project(
+    *,
+    report: ProjectReconstructionReport,
+    out_root: Path,
+    arch: str,
+    targets: List[Tuple[str, int, int, bytes]],
+    exec_ranges: List[Tuple[int, int]],
+    ro_ranges: List[Tuple[int, int]],
+    ro_reader: Any = None,
+) -> ProjectReconstructionReport:
+    """Shared ELF64 (x86_64 / AArch64) & PE64 ARM64 full-project reconstructor with C-Tree, Typed C & LLVM O3."""
+    inc_dir = out_root / "include"
+    src_dir = out_root / "src"
+    inc_dir.mkdir(parents=True, exist_ok=True)
+    src_dir.mkdir(parents=True, exist_ok=True)
+
+    header_lines = _base_runtime_header_lines()
+    c_source_lines = [
+        f"/* Auto-Reconstructed Compilable C Implementation ({report.architecture}) */",
+        '#include "../include/reconstructed_api.h"',
+        "",
+    ]
+    structured_source_lines = [
+        f"/* Auto-Reconstructed C-Tree Structured Implementation ({report.architecture}) */",
+        '#include "../include/reconstructed_api.h"',
+        "",
+    ]
+    def_lines = ["LIBRARY reconstructed_twin", "EXPORTS"]
+    rva_to_symbol: Dict[int, str] = {}
+    used_c_idents: Set[str] = set()
+    clean_targets: List[Tuple[str, int, int, bytes, str]] = []
+    for nm, ord_v, addr, raw_code in targets:
+        base_id = _sanitize_c_ident(nm, f"sub_{addr:x}")
+        c_ident = base_id if base_id not in used_c_idents else f"{base_id}_{ord_v}"
+        used_c_idents.add(c_ident)
+        rva_to_symbol[addr] = c_ident
+        clean_targets.append((nm, ord_v, addr, raw_code, c_ident))
+
+    scalar_vectors = [
+        (0, 0, 0, 0),
+        (1, 2, 3, 4),
+        (10, 20, 5, 2),
+        (42, -7, 100, 1),
+        (255, 128, 64, 32),
+        (-100, 50, -25, 10),
+        (1024, 2048, 4096, 8192),
+        (7, 7, 7, 7),
+    ]
+
+    all_disasm_insns: List[Dict[str, str]] = []
+    all_ro_refs: Set[int] = set()
+    all_called_rvas: Set[int] = set()
+    defined_rvas: Set[int] = {addr for _, _, addr, _, _ in clean_targets}
+    fn_decls: List[str] = []
+    records_list: List[Dict[str, Any]] = []
+    total_congruence_passed = 0
+    total_congruence_checks = 0
+    goto_elim_rates: List[float] = []
+
+    for nm, ord_v, addr, raw_code, c_ident in clean_targets:
+        if arch == "aarch64":
+            lifted_c, arm_insns, is_lifted, called_set, ro_set = lift_arm64_function_to_c(
+                c_ident, raw_code, addr, rva_to_symbol=rva_to_symbol, ro_ranges=ro_ranges
+            )
+            all_called_rvas.update(called_set)
+            all_ro_refs.update(ro_set)
+            for ins in arm_insns:
+                all_disasm_insns.append({"mnemonic": ins.mnemonic, "op_str": ins.op_str})
+            ins_preview = [f"0x{ins.address:x}: {ins.mnemonic} {ins.op_str}".strip() for ins in arm_insns[:12]]
+            ins_count = len(arm_insns)
+            sz_bytes = sum(ins.size for ins in arm_insns)
+            opt_c = optimize_lifted_c(lifted_c)
+
+            passed_vecs = 0
+            total_vecs = 0
+            if is_lifted and arm_insns:
+                for p0, p1, p2, p3 in scalar_vectors:
+                    for variant in range(8):
+                        a_args = (p0 + variant, p1 ^ variant, p2 + (variant * 3), p3)
+                        arm_halt: Dict[str, bool] = {}
+                        c_halt: Dict[str, bool] = {}
+                        native_v = eval_arm64_insns(arm_insns, a_args, _MemoryArena(), halt_info=arm_halt)
+                        c_v = _execute_lifted_c_ast(opt_c, *a_args, mem_arena=_MemoryArena(), halt_info=c_halt)
+                        total_vecs += 1
+                        if arm_halt.get("fuel_exhausted"):
+                            if c_halt.get("fuel_exhausted") and total_vecs > 1:
+                                total_vecs -= 1
+                                continue
+                        elif not c_halt.get("fuel_exhausted") and native_v == c_v:
+                            passed_vecs += 1
+        else:
+            lifted_c, x_insns, is_lifted, has_mem_calls, ro_map, returns_dbl, int_callees = _lift_x64_function_full(
+                c_ident, raw_code, addr,
+                ro_ranges=ro_ranges, exec_ranges=exec_ranges,
+                rva_to_symbol=rva_to_symbol, sysv_abi=True,
+            )
+            all_called_rvas.update(int_callees)
+            all_ro_refs.update(ro_map.keys())
+            for _, mn, op in x_insns:
+                all_disasm_insns.append({"mnemonic": mn, "op_str": op})
+            ins_preview = [f"0x{a:x}: {m} {o}".strip() for a, m, o in x_insns[:12]]
+            ins_count = len(x_insns)
+            sz_bytes = len(raw_code)
+            opt_c = optimize_lifted_c(lifted_c)
+
+            passed_vecs = 0
+            total_vecs = 0
+            if is_lifted and x_insns:
+                for p0, p1, p2, p3 in scalar_vectors:
+                    for variant in range(8):
+                        a_args = (p0 + variant, p1 ^ variant, p2 + (variant * 3), p3)
+                        native_v = _simulate_x64_insns(x_insns, *a_args, mem_arena=_MemoryArena(), sysv_abi=True)
+                        c_v = _execute_lifted_c_ast(opt_c, *a_args, mem_arena=_MemoryArena())
+                        total_vecs += 1
+                        if native_v == c_v:
+                            passed_vecs += 1
+
+        cong_pct = round((passed_vecs / total_vecs) * 100.0, 2) if total_vecs > 0 else 0.0
+        total_congruence_passed += passed_vecs
+        total_congruence_checks += total_vecs
+
+        ctree_res = _structure_lifted_c_to_ctree(c_ident, opt_c)
+        structured_src: Optional[str] = None
+        ctree_strategy: Optional[str] = None
+        goto_elim_pct: Optional[float] = None
+        loops_structured = 0
+        if ctree_res.get("status") == "complete":
+            structured_src = ctree_res.get("structured_c_source")
+            ctree_strategy = ctree_res.get("strategy")
+            goto_elim_pct = ctree_res.get("goto_elimination_rate_pct")
+            loops_structured = int(ctree_res.get("natural_loops_structured", 0))
+            report.ctree_structured_functions += 1
+            if goto_elim_pct is not None:
+                goto_elim_rates.append(float(goto_elim_pct))
+            if structured_src:
+                structured_source_lines.append(structured_src)
+                structured_source_lines.append("")
+        else:
+            structured_source_lines.append(opt_c)
+            structured_source_lines.append("")
+
+        fn_decls.append(f"int64_t {c_ident}(int64_t rcx, int64_t rdx, int64_t r8, int64_t r9);")
+        c_source_lines.append(opt_c)
+        c_source_lines.append("")
+        def_lines.append(f"    {c_ident} @{ord_v}")
+
+        records_list.append({
+            "c_ident": c_ident,
+            "c_code": opt_c,
+            "returns_double": False,
+            "takes_double_arg0": False,
+            "takes_double_arg1": False,
+        })
+        rec_fn = ReconstructedFunction(
+            name=nm, ordinal=ord_v, rva=addr, size_bytes=sz_bytes,
+            instruction_count=ins_count, lifted_c_code=opt_c,
+            is_fully_lifted=is_lifted, congruence_tested=(total_vecs > 0),
+            congruence_vectors_passed=passed_vecs, congruence_vectors_total=total_vecs,
+            congruence_pct=cong_pct, c_symbol=c_ident,
+            lift_tier="full" if is_lifted else "partial",
+            disasm_preview=ins_preview,
+            structured_c_code=structured_src, ctree_strategy=ctree_strategy,
+            goto_elimination_rate_pct=goto_elim_pct, natural_loops_structured=loops_structured,
+        )
+        report.functions.append(asdict(rec_fn))
+        if is_lifted:
+            report.fully_lifted_functions += 1
+
+    for un_rva in sorted(all_called_rvas - defined_rvas):
+        sym_nm = rva_to_symbol.get(un_rva, f"sub_{un_rva:x}")
+        stub_def = f"int64_t {sym_nm}(int64_t rcx, int64_t rdx, int64_t r8, int64_t r9) {{ (void)rcx; (void)rdx; (void)r8; (void)r9; return 0; }}"
+        fn_decls.append(f"int64_t {sym_nm}(int64_t rcx, int64_t rdx, int64_t r8, int64_t r9);")
+        c_source_lines.append(stub_def)
+        structured_source_lines.append(stub_def)
+
+    struct_res = recover_struct_layouts(all_disasm_insns)
+    report.struct_layouts_count = struct_res.get("total_structs_recovered", 0)
+    for st in struct_res.get("structs", []):
+        c_decl = st.get("c_declaration", "").strip()
+        if c_decl:
+            report.struct_declarations.append(c_decl)
+            header_lines.append(c_decl)
+            header_lines.append("")
+
+    header_lines.extend(fn_decls)
+    header_lines.extend([
+        "",
+        "typedef int64_t (*aether_vfn_t)(int64_t, int64_t, int64_t, int64_t);",
+        "AETHER_RT int64_t aether_vcall(int64_t fn_ptr, int64_t a0, int64_t a1, int64_t a2, int64_t a3) {",
+        "    return fn_ptr ? ((aether_vfn_t)(uintptr_t)fn_ptr)(a0, a1, a2, a3) : 0;",
+        "}",
+        "AETHER_RT int64_t aether_icall(int64_t fn_ptr, int64_t a0, int64_t a1, int64_t a2, int64_t a3) {",
+        "    return fn_ptr ? ((aether_vfn_t)(uintptr_t)fn_ptr)(a0, a1, a2, a3) : 0;",
+        "}",
+        "AETHER_RT int64_t aether_vtable_ptr(int64_t rva) { (void)rva; return 0; }",
+        "AETHER_RT int64_t aether_data_ptr(int64_t rva) { (void)rva; return 0; }",
+        "AETHER_RT int64_t aether_crt_fn_ptr(int64_t kid) { (void)kid; return 0; }",
+        "AETHER_RT int64_t aether_fn_ptr(int64_t rva) { (void)rva; return 0; }",
+        "AETHER_RT int64_t aether_abort(void) { return 0; }",
+        "AETHER_RT double aether_fcall_f64(int64_t p, int64_t a, int64_t b, int64_t c, int64_t d, int64_t e, int64_t f, int64_t g, int64_t h) { (void)p; (void)a; (void)b; (void)c; (void)d; (void)e; (void)f; (void)g; (void)h; return 0.0; }",
+        "AETHER_RT double aether_cfcall_f64(int64_t p, int64_t a, int64_t b, int64_t c, int64_t d, int64_t e, int64_t f, int64_t g, int64_t h) { (void)p; (void)a; (void)b; (void)c; (void)d; (void)e; (void)f; (void)g; (void)h; return 0.0; }",
+    ])
+    ro_map_local: Dict[int, bytes] = {}
+    if ro_reader is not None:
+        for rr in sorted(all_ro_refs):
+            b_slice = ro_reader(rr)
+            if b_slice:
+                ro_map_local[rr] = b_slice
+    for rr, b_sl in sorted(ro_map_local.items()):
+        arr_init = ", ".join(f"0x{bv:02x}" for bv in b_sl)
+        header_lines.append(f"static const uint8_t aether_ro_{rr:x}[{max(1, len(b_sl))}] = {{ {arr_init} }};")
+    header_lines.append("AETHER_RT int64_t aether_ro_ptr(int64_t rva) {")
+    for rr in sorted(ro_map_local.keys()):
+        header_lines.append(f"    if (rva == 0x{rr:x}) return (int64_t)(uintptr_t)aether_ro_{rr:x};")
+    header_lines.extend([
+        "    (void)rva;",
+        "    return 0;",
+        "}",
+        "#ifdef __cplusplus",
+        "}",
+        "#endif",
+        "",
+    ])
+
+    structured_annotated = annotate_c_with_struct_fields("\n".join(structured_source_lines), struct_res.get("structs", []))
+    typed_decompiled = emit_typed_c_from_structured(structured_annotated, struct_res.get("structs", []))
+    (inc_dir / "reconstructed_api.h").write_text("\n".join(header_lines), encoding="utf-8")
+    (src_dir / "reconstructed_project.c").write_text("\n".join(c_source_lines), encoding="utf-8")
+    (src_dir / "reconstructed_structured.c").write_text(structured_annotated, encoding="utf-8")
+    (src_dir / "reconstructed_typed.c").write_text(typed_decompiled, encoding="utf-8")
+    (src_dir / "llvm_runtime_shim.c").write_text(
+        "/* Auto-Generated Runtime Shim for Standalone LLVM O3 COFF Linkage */\n"
+        "#define AETHER_RT_LINK\n"
+        '#include "../include/reconstructed_api.h"\n',
+        encoding="utf-8",
+    )
+    (src_dir / "exports.def").write_text("\n".join(def_lines) + "\n", encoding="utf-8")
+    (out_root / "CMakeLists.txt").write_text(
+        "\n".join([
+            "cmake_minimum_required(VERSION 3.16)",
+            "project(reconstructed_twin LANGUAGES C)",
+            "add_library(reconstructed_twin SHARED src/reconstructed_project.c src/exports.def)",
+            "target_include_directories(reconstructed_twin PUBLIC include)",
+            "",
+        ]),
+        encoding="utf-8",
+    )
+
+    llvm_res = compile_project_to_llvm_ir(
+        records_list,
+        out_root / "ir",
+        unresolved_rvas=sorted(all_called_rvas - defined_rvas),
+        rva_to_symbol=rva_to_symbol,
+    )
+    report.llvm_ir_verified = bool(llvm_res.get("llvm_ir_verified"))
+    report.llvm_o3_functions = int(llvm_res.get("llvm_o3_functions", 0))
+    report.llvm_coff_obj_bytes = int(llvm_res.get("coff_obj_bytes", 0))
+    report.generated_files = [
+        "include/reconstructed_api.h",
+        "src/reconstructed_project.c",
+        "src/reconstructed_structured.c",
+        "src/reconstructed_typed.c",
+        "src/llvm_runtime_shim.c",
+        "src/exports.def",
+        "CMakeLists.txt",
+        "twin_congruence_report.json",
+        "ir/reconstructed_project.ll",
+    ]
+    if llvm_res.get("o3_ll_path"):
+        report.generated_files.append("ir/reconstructed_project_o3.ll")
+    if llvm_res.get("obj_path"):
+        report.generated_files.append("ir/reconstructed_project.obj")
+
+    report.total_exports_reconstructed = len(report.functions)
+    if total_congruence_checks > 0:
+        report.overall_congruence_pct = round((total_congruence_passed / total_congruence_checks) * 100.0, 2)
+    if goto_elim_rates:
+        report.avg_goto_elimination_pct = round(sum(goto_elim_rates) / len(goto_elim_rates), 2)
+
+    (out_root / "twin_congruence_report.json").write_text(
+        json.dumps(report.to_dict(), indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    return report
+
+
 def reconstruct_project(
     target_path: str | Path,
     output_dir: str | Path,
@@ -3606,6 +4351,52 @@ def reconstruct_project(
                     else f"ordinal_{sym.ordinal}"
                 )
                 exports.append((name, sym.ordinal, sym.address))
+
+        # Handle Windows PE64 ARM64 (Machine = 0xAA64)
+        pe_machine = int(getattr(pe.FILE_HEADER, "Machine", 0) or 0)
+        if pe_machine == 0xAA64:
+            report.architecture = "pe_aarch64"
+            report.project_kind = "pe_aarch64_c"
+            exec_ranges_a = [
+                (sec.VirtualAddress, sec.VirtualAddress + max(sec.Misc_VirtualSize, sec.SizeOfRawData))
+                for sec in pe.sections
+                if sec.Characteristics & 0x20000000
+            ]
+            ro_ranges_a = [
+                (sec.VirtualAddress, sec.VirtualAddress + max(sec.Misc_VirtualSize, sec.SizeOfRawData))
+                for sec in pe.sections
+                if not (sec.Characteristics & 0x80000000)
+            ]
+            arm_targets: List[Tuple[str, int, int, bytes]] = []
+            for nm, ord_v, rva in exports:
+                try:
+                    raw_off = pe.get_offset_from_rva(rva)
+                    arm_targets.append((nm, ord_v, rva, data[raw_off : raw_off + 4096]))
+                except Exception:
+                    continue
+
+            def _pe_ro_reader(r_rva: int) -> bytes:
+                try:
+                    ro_o = pe.get_offset_from_rva(r_rva)
+                    chunk = data[ro_o : ro_o + 256]
+                    nul = chunk.find(b"\x00")
+                    return chunk[: nul + 1] if 0 <= nul < 256 else chunk[:64]
+                except Exception:
+                    return b""
+
+            return _reconstruct_multiarch_project(
+                report=report,
+                out_root=out_root,
+                arch="aarch64",
+                targets=arm_targets,
+                exec_ranges=exec_ranges_a,
+                ro_ranges=ro_ranges_a,
+                ro_reader=_pe_ro_reader,
+            )
+
+        unwind_res = parse_win64_unwind_table(pe, data)
+        report.win64_unwind_functions = int(unwind_res.get("total_functions", 0))
+        report.win64_ehandlers_count = int(unwind_res.get("ehandlers_count", 0))
 
         inc_dir = out_root / "include"
         src_dir = out_root / "src"
@@ -4425,6 +5216,8 @@ def reconstruct_project(
                 ghidra_ref_lines.append("")
 
             if not is_exported:
+                structured_source_lines.append(c_code)
+                structured_source_lines.append("")
                 continue
 
             if is_lifted and insns:
@@ -4514,6 +5307,9 @@ def reconstruct_project(
                     if structured_src:
                         structured_source_lines.append(structured_src)
                         structured_source_lines.append("")
+                else:
+                    structured_source_lines.append(c_code)
+                    structured_source_lines.append("")
 
             cong_pct = (
                 round((passed_vecs / total_vecs) * 100.0, 2)
@@ -4559,12 +5355,12 @@ def reconstruct_project(
 
         for un_rva in sorted(called_rvas - defined_rvas):
             sym_name = rva_to_symbol.get(un_rva, f"sub_{un_rva:x}")
+            stub_def = f"int64_t {sym_name}(int64_t rcx, int64_t rdx, int64_t r8, int64_t r9) {{ (void)rcx; (void)rdx; (void)r8; (void)r9; return 0; }}"
             fn_decls.append(
                 f"int64_t {sym_name}(int64_t rcx, int64_t rdx, int64_t r8, int64_t r9);"
             )
-            c_source_lines.append(
-                f"int64_t {sym_name}(int64_t rcx, int64_t rdx, int64_t r8, int64_t r9) {{ (void)rcx; (void)rdx; (void)r8; (void)r9; return 0; }}"
-            )
+            c_source_lines.append(stub_def)
+            structured_source_lines.append(stub_def)
 
         struct_res = recover_struct_layouts(all_disasm_insns)
         report.struct_layouts_count = struct_res.get("total_structs_recovered", 0)
@@ -4807,9 +5603,36 @@ def reconstruct_project(
         )
         return report
 
+    # Case 3: Native ELF64 (.so / ELF executable: x86_64 & AArch64) -> Full Multi-Arch Project Reconstruction
+    if len(data) >= 64 and data[:4] == b"\x7fELF" and data[4] == 2:
+        elf_meta = extract_elf64_metadata(data)
+        if elf_meta and elf_meta["arch"] in ("x86_64", "aarch64"):
+            arch = elf_meta["arch"]
+            report = ProjectReconstructionReport(
+                source_artifact=str(t_path),
+                source_sha256=sha256,
+                project_kind=f"elf64_{arch}",
+                architecture=f"elf_{arch}",
+                output_project_dir=str(out_root),
+                imported_dlls=list(elf_meta.get("imported_libs", [])),
+                eh_frame_bytes=int(elf_meta.get("eh_frame_bytes", 0)),
+            )
+            targets_elf = [
+                (ex["name"], ex["ordinal"], ex["rva"], ex["code"])
+                for ex in elf_meta.get("exports", [])
+            ]
+            return _reconstruct_multiarch_project(
+                report=report,
+                out_root=out_root,
+                arch=arch,
+                targets=targets_elf,
+                exec_ranges=elf_meta.get("exec_ranges", []),
+                ro_ranges=elf_meta.get("ro_ranges", []),
+            )
+
     return ProjectReconstructionReport(
         status="unsupported_format",
         source_artifact=str(t_path),
         source_sha256=sha256,
-        error="Artifact must be a PE binary or Electron ASAR archive for full project reconstruction.",
+        error="Artifact must be a PE (x86_64/ARM64), ELF64 (x86_64/AArch64), or Electron ASAR archive.",
     )

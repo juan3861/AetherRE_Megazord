@@ -85,3 +85,24 @@ def test_emit_typed_c_from_structured():
     assert "((RecoveredStruct_RCX_t*)(uintptr_t)(rcx))->field_0x18 = (uint32_t)((rax + 1));" in typed
     assert "((RecoveredStruct_RCX_t*)(uintptr_t)(rcx))->field_0x30 = aether_bits_to_f64(aether_f64_add(xmm0, xmm1));" in typed
     assert "aether_mem_read(rcx + 0x99, 8)" in typed
+
+
+def test_emit_typed_c_alias_propagation():
+    insns = [
+        {"mnemonic": "mov", "op_str": "eax, dword ptr [rcx + 0x18]"},
+        {"mnemonic": "movsd", "op_str": "xmm0, qword ptr [rcx + 0x30]"},
+    ]
+    rep = recover_struct_layouts(insns, base_registers={"rcx"})
+    c_body = "\n".join([
+        "long long fn_alias(long long rcx, long long rdx, long long r8, long long r9) {",
+        "    rbx = rcx;",
+        "    rax = aether_mem_read(rbx + 0x18, 4);",
+        "    aether_mem_write(rbx + 0x30, 8, xmm0);",
+        "    rbx = 0;",
+        "    rdx = aether_mem_read(rbx + 0x18, 4);",
+        "}",
+    ])
+    typed = emit_typed_c_from_structured(c_body, rep["structs"])
+    assert "((RecoveredStruct_RCX_t*)(uintptr_t)(rbx))->field_0x18" in typed
+    assert "((RecoveredStruct_RCX_t*)(uintptr_t)(rbx))->field_0x30 = aether_bits_to_f64(xmm0);" in typed
+    assert "rdx = aether_mem_read(rbx + 0x18, 4);" in typed
