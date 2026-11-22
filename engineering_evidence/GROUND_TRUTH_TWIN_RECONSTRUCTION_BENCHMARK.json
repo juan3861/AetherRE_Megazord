@@ -99,16 +99,21 @@
       "imported_dlls": [
         "KERNEL32.dll"
       ],
-      "reconstruct_ms": 13111.35,
+      "reconstruct_ms": 12507.61,
       "msvc_compiled": true,
       "compiler": "msvc_cl_x64",
       "compiled_twin_dll_bytes": 427008,
-      "compiled_twin_dll_sha256": "baf5ee2afe037bde91a66662d7d5e7b36c89ca69fc728a62e228af37562d33dc",
+      "compiled_twin_dll_sha256": "c1d9b99ed3cd12a86ee12eaa7df16de999a7b3ff78dec6c57931773e2e9c0fe4",
       "llvm_ir_verified": true,
       "llvm_o3_functions": 206,
-      "llvm_coff_obj_bytes": 171392,
-      "omni_elapsed_ms": 258.77,
-      "omni_throughput_mb_s": 0.674,
+      "llvm_coff_obj_bytes": 161945,
+      "llvm_twin_compiled": true,
+      "llvm_twin_dll_bytes": 476672,
+      "llvm_twin_dll_sha256": "90ba0cb2f101c9e050cac1bf4f1aa75392482b2aa8032072673a62197e6fb47a",
+      "flirt_cfg_matches": 8,
+      "typed_c_bytes": 140406,
+      "omni_elapsed_ms": 205.989,
+      "omni_throughput_mb_s": 0.846,
       "omni_gears_executed": 12,
       "missing_or_empty_files": []
     },
@@ -223,16 +228,21 @@
       "imported_dlls": [
         "KERNEL32.dll"
       ],
-      "reconstruct_ms": 28209.55,
+      "reconstruct_ms": 27343.04,
       "msvc_compiled": true,
       "compiler": "msvc_cl_x64",
       "compiled_twin_dll_bytes": 448000,
-      "compiled_twin_dll_sha256": "f45e7b48c50457f86dcd1a575b9b194cc164712baa4b024a51e85f0ebcc6b100",
+      "compiled_twin_dll_sha256": "7fbc9fc3fed5713a6b54785e5460e092028dff043215f350ff6a644ac75287fa",
       "llvm_ir_verified": true,
       "llvm_o3_functions": 220,
-      "llvm_coff_obj_bytes": 207152,
-      "omni_elapsed_ms": 216.664,
-      "omni_throughput_mb_s": 0.85,
+      "llvm_coff_obj_bytes": 193718,
+      "llvm_twin_compiled": true,
+      "llvm_twin_dll_bytes": 498688,
+      "llvm_twin_dll_sha256": "48fb07647bbc13f567afdd1e70a054738480bd508ea451b0ab1c72bb194f735f",
+      "flirt_cfg_matches": 8,
+      "typed_c_bytes": 153960,
+      "omni_elapsed_ms": 225.976,
+      "omni_throughput_mb_s": 0.815,
       "omni_gears_executed": 12,
       "missing_or_empty_files": []
     },
@@ -260,16 +270,21 @@
       "imported_dlls": [
         "KERNEL32.dll"
       ],
-      "reconstruct_ms": 4464.41,
+      "reconstruct_ms": 4684.78,
       "msvc_compiled": true,
       "compiler": "msvc_cl_x64",
       "compiled_twin_dll_bytes": 464896,
-      "compiled_twin_dll_sha256": "9dc5c22f4ed7a57c1936be7706f63f086f94bc75c3862fd27beba02767d80563",
+      "compiled_twin_dll_sha256": "b62a1ed3d7149817696aef790a34690aceee1493d2efd6e88b6642550bfbc1d5",
       "llvm_ir_verified": true,
       "llvm_o3_functions": 133,
-      "llvm_coff_obj_bytes": 108608,
-      "omni_elapsed_ms": 210.882,
-      "omni_throughput_mb_s": 0.956,
+      "llvm_coff_obj_bytes": 106011,
+      "llvm_twin_compiled": true,
+      "llvm_twin_dll_bytes": 480768,
+      "llvm_twin_dll_sha256": "078cbb87627b91cf1a2edbf11855e3265a3bd4013bbd34f829116d288470e015",
+      "flirt_cfg_matches": 7,
+      "typed_c_bytes": 36622,
+      "omni_elapsed_ms": 214.216,
+      "omni_throughput_mb_s": 0.941,
       "omni_gears_executed": 12,
       "missing_or_empty_files": []
     },
@@ -306,16 +321,21 @@
       "imported_dlls": [
         "KERNEL32.dll"
       ],
-      "reconstruct_ms": 512.05,
+      "reconstruct_ms": 654.22,
       "msvc_compiled": true,
       "compiler": "msvc_cl_x64",
       "compiled_twin_dll_bytes": 235520,
-      "compiled_twin_dll_sha256": "dc59b9299f020b886c71de41f1d01af969834b84a7af3977ace102593bffec80",
+      "compiled_twin_dll_sha256": "3c9e9e266bbf047c5017dc768de0daa5ae6a7cf80d6646aa3ebd20ec0bb4f89c",
       "llvm_ir_verified": true,
       "llvm_o3_functions": 11,
-      "llvm_coff_obj_bytes": 5024,
-      "omni_elapsed_ms": 155.773,
-      "omni_throughput_mb_s": 0.643,
+      "llvm_coff_obj_bytes": 3666,
+      "llvm_twin_compiled": true,
+      "llvm_twin_dll_bytes": 245248,
+      "llvm_twin_dll_sha256": "a7cf50e3ae7988f208d2af05af6d09b5e47e03bc3dd70a75d79504c4ca9560b3",
+      "flirt_cfg_matches": 7,
+      "typed_c_bytes": 7830,
+      "omni_elapsed_ms": 164.007,
+      "omni_throughput_mb_s": 0.61,
       "omni_gears_executed": 12,
       "missing_or_empty_files": []
     },
@@ -353,16 +373,21 @@
       "imported_dlls": [
         "KERNEL32.dll"
       ],
-      "reconstruct_ms": 445.18,
+      "reconstruct_ms": 572.02,
       "msvc_compiled": true,
       "compiler": "msvc_cl_x64",
       "compiled_twin_dll_bytes": 236032,
-      "compiled_twin_dll_sha256": "a3c5195be3d39823ac9b28c72c6f12ec8447688153a7e2e60f60767566df776a",
+      "compiled_twin_dll_sha256": "6f3fd98a6475f0f980a555a0ed1274a39ed0942582945819f4c544d43ceced58",
       "llvm_ir_verified": true,
       "llvm_o3_functions": 12,
-      "llvm_coff_obj_bytes": 5384,
-      "omni_elapsed_ms": 154.956,
-      "omni_throughput_mb_s": 0.646,
+      "llvm_coff_obj_bytes": 3830,
+      "llvm_twin_compiled": true,
+      "llvm_twin_dll_bytes": 245248,
+      "llvm_twin_dll_sha256": "dcdeeb03f9ea73ba2534633d4eaf4c60a5622a35eb7d940c5fae57cecafa861d",
+      "flirt_cfg_matches": 7,
+      "typed_c_bytes": 8203,
+      "omni_elapsed_ms": 165.87,
+      "omni_throughput_mb_s": 0.603,
       "omni_gears_executed": 12,
       "missing_or_empty_files": []
     },
@@ -429,16 +454,21 @@
       "imported_dlls": [
         "KERNEL32.dll"
       ],
-      "reconstruct_ms": 14627.32,
+      "reconstruct_ms": 14576.66,
       "msvc_compiled": true,
       "compiler": "msvc_cl_x64",
       "compiled_twin_dll_bytes": 423424,
-      "compiled_twin_dll_sha256": "ced09e3cc9251816f6934900155153c3a67d41b4ee0052401d56514a913ce5fe",
+      "compiled_twin_dll_sha256": "57ed43092b4ac89be1918a9b0be91ae4429314c8aa2722b2fd9ecf183f918377",
       "llvm_ir_verified": true,
       "llvm_o3_functions": 172,
-      "llvm_coff_obj_bytes": 251520,
-      "omni_elapsed_ms": 248.827,
-      "omni_throughput_mb_s": 0.593,
+      "llvm_coff_obj_bytes": 243309,
+      "llvm_twin_compiled": true,
+      "llvm_twin_dll_bytes": 465920,
+      "llvm_twin_dll_sha256": "3bb6ae3e2cc03c40190ac50f41154e034ec3b1634cf4ff3bf1db5c556a628dbd",
+      "flirt_cfg_matches": 7,
+      "typed_c_bytes": 62388,
+      "omni_elapsed_ms": 268.23,
+      "omni_throughput_mb_s": 0.55,
       "omni_gears_executed": 12,
       "missing_or_empty_files": []
     }
@@ -521,7 +551,7 @@
         1,
         1,
         1,
-        2196670836416,
+        1796992277440,
         0
       ],
       "compiled_twin_outputs": [
@@ -529,7 +559,7 @@
         1,
         1,
         1,
-        2196670836416,
+        1796992277440,
         0
       ],
       "match": true
@@ -751,6 +781,74 @@
         116,
         483,
         11102
+      ],
+      "match": true
+    },
+    {
+      "target": "LLVM O3 Linked DLL <-> orig lz4.dll :: Standalone COFF Link compress_default + cross decompress_safe",
+      "original_dll_outputs": [
+        101,
+        466
+      ],
+      "compiled_twin_outputs": [
+        101,
+        466
+      ],
+      "match": true
+    },
+    {
+      "target": "LLVM O3 Linked DLL <-> orig cjson.dll :: Standalone COFF Link Parse + PrintUnformatted + Delete",
+      "original_dll_outputs": [
+        "{\"engine\":\"AetherRE\",\"llvm_o3\":true,\"score\":99.5}"
+      ],
+      "compiled_twin_outputs": [
+        "{\"engine\":\"AetherRE\",\"llvm_o3\":true,\"score\":99.5}"
+      ],
+      "match": true
+    },
+    {
+      "target": "LLVM O3 Linked DLL <-> orig tinyexpr.dll :: Standalone COFF Link te_interp(.rdata Math Builtins)",
+      "original_dll_outputs": [
+        47.0,
+        145.25
+      ],
+      "compiled_twin_outputs": [
+        47.0,
+        145.25
+      ],
+      "match": true
+    },
+    {
+      "target": "LLVM O3 Linked DLL <-> orig cjson_utils.dll :: Standalone COFF Link SortObject",
+      "original_dll_outputs": [
+        "{\"a\":1,\"z\":2}"
+      ],
+      "compiled_twin_outputs": [
+        "{\"a\":1,\"z\":2}"
+      ],
+      "match": true
+    },
+    {
+      "target": "LLVM O3 Linked DLL <-> orig poly_test.dll :: Shared C++ RTTI Heap Cross-Execution",
+      "original_dll_outputs": [
+        31,
+        32
+      ],
+      "compiled_twin_outputs": [
+        31,
+        32
+      ],
+      "match": true
+    },
+    {
+      "target": "LLVM O3 Linked DLL <-> orig multi_poly.dll :: Standalone COFF Link Multiple-Inheritance Lifecycle",
+      "original_dll_outputs": [
+        42,
+        99
+      ],
+      "compiled_twin_outputs": [
+        42,
+        99
       ],
       "match": true
     }

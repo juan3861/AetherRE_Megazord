@@ -2,10 +2,18 @@
 
 from __future__ import annotations
 
+import ctypes
 from pathlib import Path
 
 from aether_re.llvm_backend import MCJITSession, compile_project_to_llvm_ir
-from aether_re.project_reconstructor import _MemoryArena, _execute_lifted_c_ast, _f64_to_bits, _bits_to_f64, reconstruct_project
+from aether_re.project_reconstructor import (
+    _MemoryArena,
+    _bits_to_f64,
+    _execute_lifted_c_ast,
+    _f64_to_bits,
+    compile_llvm_twin_project,
+    reconstruct_project,
+)
 
 
 def test_llvm_ir_lowering_o3_coff_and_mcjit_scalar_and_float(tmp_path: Path) -> None:
@@ -103,3 +111,30 @@ def test_reconstruct_project_llvm_o3_mcjit_on_lz4_and_cjson(tmp_path: Path) -> N
             assert sess.invoke("LZ4_versionNumber", 0, 0, 0, 0, mem_arena=a) >= 10900
         finally:
             sess.close()
+
+
+def test_llvm_o3_linked_dll_live_execution(tmp_path: Path) -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    lz_dll = repo_root / "external_test_repos" / "lz4" / "lz4.dll"
+    if lz_dll.is_file():
+        proj_dir = tmp_path / "lz4_linked"
+        rep = reconstruct_project(lz_dll, proj_dir)
+        assert "src/llvm_runtime_shim.c" in rep.generated_files
+        assert "src/reconstructed_typed.c" in rep.generated_files
+        assert rep.flirt_cfg_matches >= 6
+        assert (proj_dir / "src" / "reconstructed_typed.c").is_file()
+
+        link_res = compile_llvm_twin_project(proj_dir)
+        if link_res["compiled"]:
+            llvm_dll = ctypes.CDLL(str(link_res["dll_path"]))
+            assert llvm_dll.LZ4_versionNumber() >= 10900
+            assert llvm_dll.LZ4_compressBound(100) == 116
+            payload = b"AetherRE LLVM O3 native linked COFF test payload! " * 4
+            bound = llvm_dll.LZ4_compressBound(len(payload))
+            comp_buf = ctypes.create_string_buffer(bound)
+            dec_buf = ctypes.create_string_buffer(len(payload))
+            csz = llvm_dll.LZ4_compress_default(payload, comp_buf, len(payload), bound)
+            assert csz > 0
+            dsz = llvm_dll.LZ4_decompress_safe(comp_buf.raw[:csz], dec_buf, csz, len(payload))
+            assert dsz == len(payload)
+            assert dec_buf.raw[:dsz] == payload

@@ -333,7 +333,7 @@ def _parse_c_function(c_code: str) -> Optional[Tuple[List[str], List[_IRBlock], 
         if not st or st == "}" or st.startswith("/*"):
             continue
         if st.startswith("L_") and ":" in st:
-            if cur_lbl is not None and (cur_lbl in branch_targets or cur_pinned):
+            if cur_lbl is not None:
                 raw_items.append((cur_lbl, cur_pinned, "empty", ""))
             lbl = st.split(":", 1)[0].strip()
             rest = st.split(":", 1)[1].strip()

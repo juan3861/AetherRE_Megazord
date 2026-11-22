@@ -56,9 +56,11 @@ _TRACKED_LOCALS: Tuple[str, ...] = (
 # Helper prototypes for runtime / arena external symbols: (arg_types, ret_type)
 _EXT_HELPER_SIGS: Dict[str, Tuple[Tuple[ir.Type, ...], ir.Type]] = {
     "aether_stack_base": ((), _I64),
+    "aether_get_sp": ((), _I64),
+    "aether_set_sp": ((_I64,), _I64),
     "aether_abort": ((), _I64),
     "aether_mem_read": ((_I64, _I64), _I64),
-    "aether_mem_write": ((_I64, _I64, _I64), _I64),
+    "aether_mem_write": ((_I64, _I64, _I64), _VOID),
     "aether_malloc": ((_I64,), _I64),
     "aether_free": ((_I64,), _I64),
     "aether_realloc": ((_I64, _I64), _I64),
@@ -221,6 +223,8 @@ class _FunctionLowerer:
 
         if isinstance(node, ast.Name):
             ident = node.id
+            if ident == "_aether_sp":
+                return self.builder.call(self._get_ext("aether_get_sp", (), _I64), [])
             if ident in self.allocas:
                 return self.builder.load(self.allocas[ident])
             if ident in self.globals_map:
@@ -547,6 +551,9 @@ class _FunctionLowerer:
         if m_as:
             lhs, rhs = m_as.group(1), _clean_expr_for_ast(m_as.group(2))
             rv = self._ensure_i64(self._eval_ast(ast.parse(rhs, mode="eval").body))
+            if lhs == "_aether_sp":
+                self.builder.call(self._get_ext("aether_set_sp", (_I64,), _I64), [rv])
+                return
             ptr = self.allocas.get(lhs) or self.globals_map.get(lhs)
             if ptr is not None:
                 self.builder.store(rv, ptr)
@@ -581,7 +588,8 @@ class _FunctionLowerer:
             elif vname == "xmm1" and self.takes_double_arg1:
                 self.builder.store(self.builder.bitcast(self.fn.args[1], _I64), ptr)
             elif vname == "_aether_saved_sp":
-                self.builder.store(self.builder.load(self.globals_map["_aether_sp"]), ptr)
+                gsp_fn = self._get_ext("aether_get_sp", (), _I64)
+                self.builder.store(self.builder.call(gsp_fn, []), ptr)
             elif vname == "rsp":
                 sb_fn = self._get_ext("aether_stack_base", (), _I64)
                 self.builder.store(self.builder.call(sb_fn, []), ptr)
@@ -668,7 +676,7 @@ def build_llvm_module_from_records(
     mod.triple = llvm.get_default_triple()
 
     globals_map: Dict[str, ir.GlobalVariable] = {}
-    for gname in ("_aether_sp", "_aether_div_rem", "_aether_imul_hi", "_aether_xmm_hi"):
+    for gname in ("_aether_div_rem", "_aether_imul_hi", "_aether_xmm_hi"):
         gv = ir.GlobalVariable(mod, _I64, name=gname)
         gv.linkage = "internal"
         gv.initializer = _i64_const(0)
@@ -808,7 +816,9 @@ def compile_project_to_llvm_ir(
         lm.verify()
         verified = True
 
-        tm = llvm.Target.from_default_triple().create_target_machine()
+        tm = llvm.Target.from_default_triple().create_target_machine(
+            opt=opt_level, codemodel="default"
+        )
         pto = llvm.create_pipeline_tuning_options(speed_level=opt_level, size_level=0)
         pb = llvm.create_pass_builder(tm, pto)
         mpm = pb.getModulePassManager()
@@ -845,6 +855,7 @@ def compile_project_to_llvm_ir(
 _MCJIT_RUNTIME_CTX: Dict[str, Any] = {
     "arena": None,
     "stack_base": 0x4E000,
+    "sp": 0,
     "ro_addrs": {},
     "vt_addrs": {},
     "rw_base": 0,
@@ -865,7 +876,19 @@ def _ensure_mcjit_symbols_registered() -> None:
 
     @ctypes.CFUNCTYPE(ctypes.c_int64)
     def cb_stack_base() -> int:
+        sp = int(_MCJIT_RUNTIME_CTX.get("sp") or 0)
+        if sp:
+            return max(0x1E800, sp - 8)
         return int(_MCJIT_RUNTIME_CTX["stack_base"])
+
+    @ctypes.CFUNCTYPE(ctypes.c_int64)
+    def cb_get_sp() -> int:
+        return int(_MCJIT_RUNTIME_CTX.get("sp") or 0)
+
+    @ctypes.CFUNCTYPE(ctypes.c_int64, ctypes.c_int64)
+    def cb_set_sp(sp: int) -> int:
+        _MCJIT_RUNTIME_CTX["sp"] = int(sp)
+        return int(sp)
 
     @ctypes.CFUNCTYPE(ctypes.c_int64)
     def cb_abort() -> int:
@@ -876,12 +899,11 @@ def _ensure_mcjit_symbols_registered() -> None:
         a = _ctx_arena()
         return a.read(int(addr), int(width)) if a is not None else 0
 
-    @ctypes.CFUNCTYPE(ctypes.c_int64, ctypes.c_int64, ctypes.c_int64, ctypes.c_int64)
-    def cb_mem_write(addr: int, width: int, val: int) -> int:
+    @ctypes.CFUNCTYPE(None, ctypes.c_int64, ctypes.c_int64, ctypes.c_int64)
+    def cb_mem_write(addr: int, width: int, val: int) -> None:
         a = _ctx_arena()
         if a is not None:
             a.write(int(addr), int(width), int(val))
-        return 0
 
     @ctypes.CFUNCTYPE(ctypes.c_int64, ctypes.c_int64)
     def cb_malloc(sz: int) -> int:
@@ -1124,6 +1146,8 @@ def _ensure_mcjit_symbols_registered() -> None:
 
     mapping = {
         "aether_stack_base": cb_stack_base,
+        "aether_get_sp": cb_get_sp,
+        "aether_set_sp": cb_set_sp,
         "aether_abort": cb_abort,
         "aether_mem_read": cb_mem_read,
         "aether_mem_write": cb_mem_write,
@@ -1218,6 +1242,7 @@ class MCJITSession:
         ret_f64, p0_f64, p1_f64 = self.fn_sigs.get(fn_name, (False, False, False))
         _MCJIT_RUNTIME_CTX["arena"] = mem_arena
         _MCJIT_RUNTIME_CTX["stack_base"] = stack_base
+        _MCJIT_RUNTIME_CTX["sp"] = 0
         _MCJIT_RUNTIME_CTX["ro_addrs"] = self.ro_arena_addrs
         _MCJIT_RUNTIME_CTX["vt_addrs"] = self.vtable_arena_addrs
         _MCJIT_RUNTIME_CTX["rw_base"] = self.rw_data_base

@@ -8,6 +8,7 @@ from aether_re.struct_recovery import (
     SCHEMA,
     _infer_access_size,
     annotate_c_with_struct_fields,
+    emit_typed_c_from_structured,
     recover_struct_layouts,
 )
 
@@ -65,3 +66,22 @@ def test_recover_float_fields_and_annotate_c():
     annotated = annotate_c_with_struct_fields(sample_c, rep["structs"])
     assert "RecoveredStruct_RCX->field_0x30:double" in annotated
     assert "RecoveredStruct_RCX->field_0x18:uint32_t" in annotated
+
+
+def test_emit_typed_c_from_structured():
+    insns = [
+        {"mnemonic": "mov", "op_str": "eax, dword ptr [rcx + 0x18]"},
+        {"mnemonic": "movsd", "op_str": "xmm0, qword ptr [rcx + 0x30]"},
+    ]
+    rep = recover_struct_layouts(insns, base_registers={"rcx"})
+    structured_c = "\n".join([
+        "    xmm0 = aether_mem_read(rcx + 0x30, 8);",
+        "    aether_mem_write(rcx + 0x18, 4, (rax + 1));",
+        "    aether_mem_write(rcx + 0x30, 8, aether_f64_add(xmm0, xmm1));",
+        "    rdx = aether_mem_read(rcx + 0x99, 8);",
+    ])
+    typed = emit_typed_c_from_structured(structured_c, rep["structs"])
+    assert "aether_f64_to_bits(((RecoveredStruct_RCX_t*)(uintptr_t)(rcx))->field_0x30)" in typed
+    assert "((RecoveredStruct_RCX_t*)(uintptr_t)(rcx))->field_0x18 = (uint32_t)((rax + 1));" in typed
+    assert "((RecoveredStruct_RCX_t*)(uintptr_t)(rcx))->field_0x30 = aether_bits_to_f64(aether_f64_add(xmm0, xmm1));" in typed
+    assert "aether_mem_read(rcx + 0x99, 8)" in typed

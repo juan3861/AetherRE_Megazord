@@ -44,9 +44,14 @@ import pefile
 from aether_re.cpp_rtti import recover_cpp_rtti
 from aether_re.ctree_structuring import structure_control_flow
 from aether_re.electron_asar_forensics import analyze_asar_bytes
+from aether_re.flirt_cfg import discover_crt_via_cfg_flirt
 from aether_re.ir_optimizer import optimize_lifted_c
 from aether_re.llvm_backend import compile_project_to_llvm_ir
-from aether_re.struct_recovery import annotate_c_with_struct_fields, recover_struct_layouts
+from aether_re.struct_recovery import (
+    annotate_c_with_struct_fields,
+    emit_typed_c_from_structured,
+    recover_struct_layouts,
+)
 
 
 @dataclass
@@ -99,6 +104,8 @@ class ProjectReconstructionReport:
     llvm_ir_verified: bool = False
     llvm_o3_functions: int = 0
     llvm_coff_obj_bytes: int = 0
+    flirt_cfg_matches: int = 0
+    flirt_cfg_signatures: List[Dict[str, Any]] = field(default_factory=list)
     error: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
@@ -3278,19 +3285,8 @@ def _get_msvc_x64_env(vcvars_path: Path) -> Optional[Dict[str, str]]:
     return None
 
 
-def compile_reconstructed_project(
-    project_dir: str | Path,
-    output_dll_name: str = "reconstructed_twin.dll",
-) -> Dict[str, Any]:
-    """Compiles a reconstructed twin C project into a native shared library (.dll/.so) when a compiler is available."""
-    proj = Path(project_dir).resolve()
-    c_src = proj / "src" / "reconstructed_project.c"
-    def_file = proj / "src" / "exports.def"
-    out_dll = proj / output_dll_name
-    if not c_src.is_file():
-        return {"compiled": False, "status": "missing_source", "error": f"Not found: {c_src}"}
-
-    # 1. Windows MSVC via vswhere.exe + vcvars64.bat + cl.exe
+def _find_msvc_x64_toolchain() -> Optional[Tuple[Path, Dict[str, str], str, Optional[str]]]:
+    """Locates MSVC vcvars64, cached x64 environment, cl.exe, and link.exe."""
     vswhere = Path(r"C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe")
     vcvars_candidates: List[Path] = []
     if vswhere.is_file():
@@ -3309,11 +3305,38 @@ def compile_reconstructed_project(
     default_vc = Path(r"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat")
     if default_vc.is_file() and default_vc not in vcvars_candidates:
         vcvars_candidates.append(default_vc)
+    if not vcvars_candidates:
+        return None
+    vc = vcvars_candidates[0]
+    cached_env = _get_msvc_x64_env(vc)
+    if not cached_env:
+        return vc, {}, "", None
+    path_str = cached_env.get("Path") or cached_env.get("PATH") or ""
+    cl_in_env = shutil.which("cl", path=path_str) or ""
+    link_in_env = shutil.which("link", path=path_str)
+    if cl_in_env and not link_in_env:
+        cand_link = Path(cl_in_env).with_name("link.exe")
+        if cand_link.is_file():
+            link_in_env = str(cand_link)
+    return vc, cached_env, cl_in_env, link_in_env
 
-    if vcvars_candidates:
-        vc = vcvars_candidates[0]
-        cached_env = _get_msvc_x64_env(vc)
-        cl_in_env = shutil.which("cl", path=(cached_env.get("Path") or cached_env.get("PATH") or "") if cached_env else "")
+
+def compile_reconstructed_project(
+    project_dir: str | Path,
+    output_dll_name: str = "reconstructed_twin.dll",
+) -> Dict[str, Any]:
+    """Compiles a reconstructed twin C project into a native shared library (.dll/.so) when a compiler is available."""
+    proj = Path(project_dir).resolve()
+    c_src = proj / "src" / "reconstructed_project.c"
+    def_file = proj / "src" / "exports.def"
+    out_dll = proj / output_dll_name
+    if not c_src.is_file():
+        return {"compiled": False, "status": "missing_source", "error": f"Not found: {c_src}"}
+
+    # 1. Windows MSVC via vswhere.exe + vcvars64.bat + cl.exe
+    vc_info = _find_msvc_x64_toolchain()
+    if vc_info is not None:
+        vc, cached_env, cl_in_env, _ = vc_info
         if cached_env and cl_in_env:
             cmd_args = [cl_in_env, "/nologo", "/LD", "/O2", str(c_src), f"/Fe:{out_dll}"]
             if def_file.is_file():
@@ -3382,6 +3405,117 @@ def compile_reconstructed_project(
         }
 
     return {"compiled": False, "status": "no_compiler_found", "error": "Neither MSVC cl.exe nor clang/gcc found"}
+
+
+def compile_llvm_twin_project(
+    project_dir: str | Path,
+    output_dll_name: str = "reconstructed_twin_llvm.dll",
+) -> Dict[str, Any]:
+    """Links LLVM O3 COFF object (ir/reconstructed_project.obj) with MSVC runtime shim into a standalone native DLL."""
+    proj = Path(project_dir).resolve()
+    ir_obj = proj / "ir" / "reconstructed_project.obj"
+    shim_c = proj / "src" / "llvm_runtime_shim.c"
+    shim_obj = proj / "ir" / "llvm_runtime_shim.obj"
+    def_file = proj / "src" / "exports.def"
+    out_dll = proj / output_dll_name
+
+    if not ir_obj.is_file():
+        return {"compiled": False, "status": "missing_llvm_obj", "error": f"Not found: {ir_obj}"}
+    if not shim_c.is_file():
+        return {"compiled": False, "status": "missing_shim_source", "error": f"Not found: {shim_c}"}
+
+    vc_info = _find_msvc_x64_toolchain()
+    if vc_info is not None:
+        vc, cached_env, cl_in_env, link_in_env = vc_info
+        if cached_env and cl_in_env and link_in_env:
+            cl_cmd = [cl_in_env, "/nologo", "/c", "/O2", f"/Fo:{shim_obj}", str(shim_c)]
+            cl_proc = subprocess.run(
+                cl_cmd,
+                cwd=str(proj),
+                env=cached_env,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=120,
+            )
+            if cl_proc.returncode != 0 or not shim_obj.is_file():
+                return {
+                    "compiled": False,
+                    "status": "shim_compile_failed",
+                    "compiler": "llvm_o3_msvc_link",
+                    "returncode": cl_proc.returncode,
+                    "build_output": (cl_proc.stdout + "\n" + cl_proc.stderr).strip()[:1000],
+                }
+            link_cmd = [link_in_env, "/nologo", "/DLL", f"/OUT:{out_dll}"]
+            if def_file.is_file():
+                link_cmd.append(f"/DEF:{def_file}")
+            link_cmd.extend([str(ir_obj), str(shim_obj)])
+            proc = subprocess.run(
+                link_cmd,
+                cwd=str(proj),
+                env=cached_env,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=120,
+            )
+        else:
+            def_arg = f'/DEF:"{def_file}"' if def_file.is_file() else ""
+            bat_body = (
+                "@echo off\n"
+                f'call "{vc}" >nul\n'
+                f'cd /d "{proj}"\n'
+                f'cl /nologo /c /O2 /Fo:"{shim_obj}" "{shim_c}"\n'
+                f'if errorlevel 1 exit /b %errorlevel%\n'
+                f'link /nologo /DLL /OUT:"{out_dll}" {def_arg} "{ir_obj}" "{shim_obj}"\n'
+            )
+            with tempfile.NamedTemporaryFile("w", suffix=".bat", delete=False, encoding="utf-8") as tf:
+                tf.write(bat_body)
+                bat_path = Path(tf.name)
+            try:
+                proc = subprocess.run(
+                    ["cmd", "/c", str(bat_path)],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=120,
+                )
+            finally:
+                bat_path.unlink(missing_ok=True)
+        ok = proc.returncode == 0 and out_dll.is_file() and out_dll.stat().st_size > 0
+        return {
+            "compiled": ok,
+            "status": "compiled" if ok else "link_failed",
+            "compiler": "llvm_o3_msvc_link",
+            "dll_path": str(out_dll) if ok else None,
+            "dll_size_bytes": out_dll.stat().st_size if ok else 0,
+            "dll_sha256": hashlib.sha256(out_dll.read_bytes()).hexdigest() if ok else None,
+            "returncode": proc.returncode,
+            "build_output": (proc.stdout + "\n" + proc.stderr).strip()[:1000],
+        }
+
+    cc = shutil.which("clang")
+    if cc:
+        cmd = [cc, "-shared", "-O2", str(ir_obj), str(shim_c), "-o", str(out_dll)]
+        if def_file.is_file():
+            cmd.append(str(def_file))
+        proc = subprocess.run(cmd, cwd=str(proj), capture_output=True, text=True, timeout=60)
+        ok = proc.returncode == 0 and out_dll.is_file() and out_dll.stat().st_size > 0
+        return {
+            "compiled": ok,
+            "status": "compiled" if ok else "link_failed",
+            "compiler": "llvm_o3_clang_link",
+            "dll_path": str(out_dll) if ok else None,
+            "dll_size_bytes": out_dll.stat().st_size if ok else 0,
+            "dll_sha256": hashlib.sha256(out_dll.read_bytes()).hexdigest() if ok else None,
+            "returncode": proc.returncode,
+            "build_output": (proc.stdout + "\n" + proc.stderr).strip()[:1000],
+        }
+
+    return {"compiled": False, "status": "no_linker_found", "error": "Neither MSVC link.exe nor clang found"}
 
 
 def reconstruct_project(
@@ -3495,31 +3629,36 @@ def reconstruct_project(
             "#ifdef __cplusplus",
             'extern "C" {',
             "#endif",
+            "#ifdef AETHER_RT_LINK",
+            "#define AETHER_RT",
+            "#else",
+            "#define AETHER_RT static inline",
+            "#endif",
             "",
-            "static inline int64_t aether_malloc(int64_t size) {",
+            "AETHER_RT int64_t aether_malloc(int64_t size) {",
             "    return (int64_t)(uintptr_t)malloc((size_t)(size > 0 ? size : 1));",
             "}",
-            "static inline int64_t aether_free(int64_t ptr) {",
+            "AETHER_RT int64_t aether_free(int64_t ptr) {",
             "    free((void*)(uintptr_t)ptr);",
             "    return 0LL;",
             "}",
-            "static inline int64_t aether_realloc(int64_t ptr, int64_t size) {",
+            "AETHER_RT int64_t aether_realloc(int64_t ptr, int64_t size) {",
             "    return (int64_t)(uintptr_t)realloc((void*)(uintptr_t)ptr, (size_t)(size > 0 ? size : 1));",
             "}",
-            "static inline int64_t aether_strlen(int64_t s) {",
+            "AETHER_RT int64_t aether_strlen(int64_t s) {",
             "    if (!s) return 0LL;",
             "    return (int64_t)strlen((const char*)(uintptr_t)s);",
             "}",
-            "static inline int64_t aether_strcmp(int64_t a, int64_t b) {",
+            "AETHER_RT int64_t aether_strcmp(int64_t a, int64_t b) {",
             "    const char* sa = a ? (const char*)(uintptr_t)a : \"\";",
             "    const char* sb = b ? (const char*)(uintptr_t)b : \"\";",
             "    return (int64_t)strcmp(sa, sb);",
             "}",
-            "static inline int64_t aether_strncmp(int64_t a, int64_t b, int64_t n) {",
+            "AETHER_RT int64_t aether_strncmp(int64_t a, int64_t b, int64_t n) {",
             "    if (!a || !b || n <= 0) return 0LL;",
             "    return (int64_t)strncmp((const char*)(uintptr_t)a, (const char*)(uintptr_t)b, (size_t)n);",
             "}",
-            "static inline int64_t aether_sprintf(int64_t buf, int64_t fmt, int64_t a1, int64_t a2, int64_t a3) {",
+            "AETHER_RT int64_t aether_sprintf(int64_t buf, int64_t fmt, int64_t a1, int64_t a2, int64_t a3) {",
             "    if (!buf || !fmt) return -1LL;",
             "    const char* fs = (const char*)(uintptr_t)fmt;",
             "    if (strchr(fs, 'g') || strchr(fs, 'f') || strchr(fs, 'e')) {",
@@ -3529,16 +3668,16 @@ def reconstruct_project(
             "    }",
             "    return (int64_t)sprintf((char*)(uintptr_t)buf, fs, a1, a2, a3);",
             "}",
-            "static inline int64_t aether_sscanf(int64_t buf, int64_t fmt, int64_t a1, int64_t a2) {",
+            "AETHER_RT int64_t aether_sscanf(int64_t buf, int64_t fmt, int64_t a1, int64_t a2) {",
             "    if (!buf || !fmt) return -1LL;",
             "    (void)a2;",
             "    return (int64_t)sscanf((const char*)(uintptr_t)buf, (const char*)(uintptr_t)fmt, (void*)(uintptr_t)a1);",
             "}",
-            "static inline double aether_strtod(int64_t s, int64_t endptr) {",
+            "AETHER_RT double aether_strtod(int64_t s, int64_t endptr) {",
             "    if (!s) { if (endptr) *(char**)(uintptr_t)endptr = NULL; return 0.0; }",
             "    return strtod((const char*)(uintptr_t)s, (char**)(uintptr_t)endptr);",
             "}",
-            "static inline int64_t aether_printf(int64_t fmt, int64_t a1, int64_t a2, int64_t a3) {",
+            "AETHER_RT int64_t aether_printf(int64_t fmt, int64_t a1, int64_t a2, int64_t a3) {",
             "    if (!fmt) return -1LL;",
             "    const char* fs = (const char*)(uintptr_t)fmt;",
             "    if (strchr(fs, 'g') || strchr(fs, 'f') || strchr(fs, 'e')) {",
@@ -3548,22 +3687,22 @@ def reconstruct_project(
             "    }",
             "    return (int64_t)printf(fs, a1, a2, a3);",
             "}",
-            "static inline int64_t aether_pcmpeqb64(int64_t a, int64_t b) {",
+            "AETHER_RT int64_t aether_pcmpeqb64(int64_t a, int64_t b) {",
             "    uint64_t out = 0, ua = (uint64_t)a, ub = (uint64_t)b;",
             "    for (int i = 0; i < 8; ++i) {",
             "        if (((ua >> (i * 8)) & 0xffULL) == ((ub >> (i * 8)) & 0xffULL)) out |= (0xffULL << (i * 8));",
             "    }",
             "    return (int64_t)out;",
             "}",
-            "static inline int64_t aether_pmaxud64(int64_t a, int64_t b) {",
+            "AETHER_RT int64_t aether_pmaxud64(int64_t a, int64_t b) {",
             "    uint32_t al = (uint32_t)a, bl = (uint32_t)b, ah = (uint32_t)((uint64_t)a >> 32), bh = (uint32_t)((uint64_t)b >> 32);",
             "    return (int64_t)((uint64_t)(al > bl ? al : bl) | ((uint64_t)(ah > bh ? ah : bh) << 32));",
             "}",
-            "static inline int64_t aether_pcmpeqd64(int64_t a, int64_t b) {",
+            "AETHER_RT int64_t aether_pcmpeqd64(int64_t a, int64_t b) {",
             "    uint32_t al = (uint32_t)a, bl = (uint32_t)b, ah = (uint32_t)((uint64_t)a >> 32), bh = (uint32_t)((uint64_t)b >> 32);",
             "    return (int64_t)((al == bl ? 0xffffffffULL : 0ULL) | ((ah == bh ? 0xffffffffULL : 0ULL) << 32));",
             "}",
-            "static inline int64_t aether_psubd64(int64_t a, int64_t b) {",
+            "AETHER_RT int64_t aether_psubd64(int64_t a, int64_t b) {",
             "    uint32_t al = (uint32_t)a - (uint32_t)b, ah = (uint32_t)((uint64_t)a >> 32) - (uint32_t)((uint64_t)b >> 32);",
             "    return (int64_t)((uint64_t)al | ((uint64_t)ah << 32));",
             "}",
@@ -3573,23 +3712,23 @@ def reconstruct_project(
             "    _aether_xmm_hi = (int64_t)((uint64_t)L[(imm8 >> 4) & 3] | ((uint64_t)L[(imm8 >> 6) & 3] << 32));",
             "    return (int64_t)((uint64_t)L[imm8 & 3] | ((uint64_t)L[(imm8 >> 2) & 3] << 32));",
             "}",
-            "static inline int64_t aether_tolower(int64_t c) {",
+            "AETHER_RT int64_t aether_tolower(int64_t c) {",
             "    return (int64_t)tolower((int)(unsigned char)c);",
             "}",
-            "static inline int64_t aether_isalpha(int64_t c) { return (int64_t)isalpha((int)(unsigned char)c); }",
-            "static inline int64_t aether_isdigit(int64_t c) { return (int64_t)isdigit((int)(unsigned char)c); }",
-            "static inline int64_t aether_isspace(int64_t c) { return (int64_t)isspace((int)(unsigned char)c); }",
-            "static inline int64_t aether_isxdigit(int64_t c) { return (int64_t)isxdigit((int)(unsigned char)c); }",
-            "static inline int64_t aether_memcpy(int64_t dst, int64_t src, int64_t size) {",
+            "AETHER_RT int64_t aether_isalpha(int64_t c) { return (int64_t)isalpha((int)(unsigned char)c); }",
+            "AETHER_RT int64_t aether_isdigit(int64_t c) { return (int64_t)isdigit((int)(unsigned char)c); }",
+            "AETHER_RT int64_t aether_isspace(int64_t c) { return (int64_t)isspace((int)(unsigned char)c); }",
+            "AETHER_RT int64_t aether_isxdigit(int64_t c) { return (int64_t)isxdigit((int)(unsigned char)c); }",
+            "AETHER_RT int64_t aether_memcpy(int64_t dst, int64_t src, int64_t size) {",
             "    if (dst && src && size > 0) memcpy((void*)(uintptr_t)dst, (const void*)(uintptr_t)src, (size_t)size);",
             "    return dst;",
             "}",
-            "static inline int64_t aether_memset(int64_t dst, int64_t val, int64_t size) {",
+            "AETHER_RT int64_t aether_memset(int64_t dst, int64_t val, int64_t size) {",
             "    if (dst && size > 0) memset((void*)(uintptr_t)dst, (int)(unsigned char)val, (size_t)size);",
             "    return dst;",
             "}",
-            "static inline double aether_pow(double a, double b) { return pow(a, b); }",
-            "static inline double aether_fmod(double a, double b) { return fmod(a, b); }",
+            "AETHER_RT double aether_pow(double a, double b) { return pow(a, b); }",
+            "AETHER_RT double aether_fmod(double a, double b) { return fmod(a, b); }",
             "static int64_t _aether_div_rem = 0;",
             "static inline int64_t aether_udiv64(int64_t hi, int64_t lo, int64_t d) {",
             "    uint64_t ud = (uint64_t)d;",
@@ -3657,10 +3796,10 @@ def reconstruct_project(
             "    int64_t c = 0; while ((uv & 1ULL) == 0) { uv >>= 1; ++c; }",
             "    return c;",
             "}",
-            "static inline int64_t aether_calloc(int64_t n, int64_t sz) {",
+            "AETHER_RT int64_t aether_calloc(int64_t n, int64_t sz) {",
             "    return (int64_t)(uintptr_t)calloc((size_t)(n > 0 ? n : 1), (size_t)(sz > 0 ? sz : 1));",
             "}",
-            "static inline int64_t aether_rep_stos(int64_t dst, int64_t val, int64_t count, int64_t width) {",
+            "AETHER_RT int64_t aether_rep_stos(int64_t dst, int64_t val, int64_t count, int64_t width) {",
             "    if (!dst || count <= 0) return dst;",
             "    uint64_t cnt = (uint64_t)count;",
             "    if (width == 1) { memset((void*)(uintptr_t)dst, (int)(unsigned char)val, (size_t)cnt); return dst + (int64_t)cnt; }",
@@ -3668,14 +3807,14 @@ def reconstruct_project(
             "    if (width == 4) { uint32_t *p = (uint32_t*)(uintptr_t)dst; for (uint64_t i = 0; i < cnt; ++i) p[i] = (uint32_t)val; return dst + (int64_t)(cnt * 4); }",
             "    uint64_t *p = (uint64_t*)(uintptr_t)dst; for (uint64_t i = 0; i < cnt; ++i) p[i] = (uint64_t)val; return dst + (int64_t)(cnt * 8);",
             "}",
-            "static inline int64_t aether_strcpy(int64_t dst, int64_t src) {",
+            "AETHER_RT int64_t aether_strcpy(int64_t dst, int64_t src) {",
             "    if (dst && src) {",
             "        size_t n = strlen((const char*)(uintptr_t)src) + 1;",
             "        memcpy((void*)(uintptr_t)dst, (const void*)(uintptr_t)src, n);",
             "    }",
             "    return dst;",
             "}",
-            "static inline int64_t aether_strrchr(int64_t s, int64_t ch) {",
+            "AETHER_RT int64_t aether_strrchr(int64_t s, int64_t ch) {",
             "    return s ? (int64_t)(uintptr_t)strrchr((const char*)(uintptr_t)s, (int)(unsigned char)ch) : 0;",
             "}",
             "static inline int64_t aether_u32(uint64_t v) {",
@@ -3703,13 +3842,20 @@ def reconstruct_project(
             "#endif",
             "static AETHER_TLS uint8_t aether_tls_stack[131072];",
             "static AETHER_TLS int64_t _aether_sp = 0;",
-            "static inline int64_t aether_stack_base(void) {",
+            "AETHER_RT int64_t aether_get_sp(void) {",
+            "    return _aether_sp;",
+            "}",
+            "AETHER_RT int64_t aether_set_sp(int64_t sp) {",
+            "    _aether_sp = sp;",
+            "    return sp;",
+            "}",
+            "AETHER_RT int64_t aether_stack_base(void) {",
             "    return (_aether_sp ? _aether_sp : (int64_t)(uintptr_t)(aether_tls_stack + 114688)) - 8;",
             "}",
             "static inline int64_t aether_set_byte(int64_t reg, int cond) {",
             "    return (reg & ~0xffLL) | (cond ? 1LL : 0LL);",
             "}",
-            "static inline uint64_t aether_mem_read(int64_t addr, size_t width) {",
+            "AETHER_RT uint64_t aether_mem_read(int64_t addr, size_t width) {",
             "    if (addr == 0) return 0ULL;",
             "    const uint8_t* p = (const uint8_t*)(uintptr_t)addr;",
             "    if (width == 1) return *(const uint8_t*)p;",
@@ -3717,7 +3863,7 @@ def reconstruct_project(
             "    if (width == 4) return *(const uint32_t*)p;",
             "    return *(const uint64_t*)p;",
             "}",
-            "static inline void aether_mem_write(int64_t addr, size_t width, uint64_t val) {",
+            "AETHER_RT void aether_mem_write(int64_t addr, size_t width, uint64_t val) {",
             "    if (addr == 0) return;",
             "    uint8_t* p = (uint8_t*)(uintptr_t)addr;",
             "    if (width == 1) *(uint8_t*)p = (uint8_t)val;",
@@ -3787,6 +3933,11 @@ def reconstruct_project(
             if sec.Characteristics & 0x20000000  # IMAGE_SCN_MEM_EXECUTE
         ]
         crt_alloc_map = _discover_crt_allocator_map(pe, data, exec_ranges)
+        flirt_res = discover_crt_via_cfg_flirt(pe, data)
+        report.flirt_cfg_matches = len(flirt_res.get("matches", []))
+        report.flirt_cfg_signatures = flirt_res.get("matches", [])
+        for _fl_rva, _fl_crt in flirt_res.get("crt_map", {}).items():
+            crt_alloc_map.setdefault(_fl_rva, _fl_crt)
         ro_ranges = [
             (
                 sec.VirtualAddress,
@@ -4428,7 +4579,7 @@ def reconstruct_project(
         header_lines.extend([
             "",
             "typedef int64_t (*aether_vfn_t)(int64_t, int64_t, int64_t, int64_t);",
-            "static inline int64_t aether_vcall(int64_t fn_ptr, int64_t a0, int64_t a1, int64_t a2, int64_t a3) {",
+            "AETHER_RT int64_t aether_vcall(int64_t fn_ptr, int64_t a0, int64_t a1, int64_t a2, int64_t a3) {",
             "    return fn_ptr ? ((aether_vfn_t)(uintptr_t)fn_ptr)(a0, a1, a2, a3) : 0;",
             "}",
         ])
@@ -4439,7 +4590,7 @@ def reconstruct_project(
             )
             n_slots = max(1, len(slots))
             header_lines.append(f"static const int64_t aether_vt_{vt_rva:x}[{n_slots}] = {{ {slot_syms} }};")
-        header_lines.append("static inline int64_t aether_vtable_ptr(int64_t vt_rva) {")
+        header_lines.append("AETHER_RT int64_t aether_vtable_ptr(int64_t vt_rva) {")
         for vt_rva in sorted(vtable_slot_map.keys()):
             header_lines.append(f"    if (vt_rva == 0x{vt_rva:x}) return (int64_t)(uintptr_t)aether_vt_{vt_rva:x};")
         header_lines.extend([
@@ -4447,8 +4598,8 @@ def reconstruct_project(
             "    return 0;",
             "}",
             f"static uint8_t aether_rw_data[{rw_data_span}] = {{ 0 }};",
-            "static inline int64_t aether_crt_fn_ptr(int64_t kid);",
-            "static inline int64_t aether_data_ptr(int64_t rva) {",
+            "AETHER_RT int64_t aether_crt_fn_ptr(int64_t kid);",
+            "AETHER_RT int64_t aether_data_ptr(int64_t rva) {",
             "    static int rw_inited = 0;",
             "    if (!rw_inited) {",
             "        rw_inited = 1;",
@@ -4461,7 +4612,7 @@ def reconstruct_project(
             "    (void)rva;",
             "    return 0;",
             "}",
-            "static inline int64_t aether_crt_fn_ptr(int64_t kid) {",
+            "AETHER_RT int64_t aether_crt_fn_ptr(int64_t kid) {",
             "    if (kid == 1) return (int64_t)(uintptr_t)&malloc;",
             "    if (kid == 2) return (int64_t)(uintptr_t)&free;",
             "    if (kid == 3) return (int64_t)(uintptr_t)&realloc;",
@@ -4469,7 +4620,7 @@ def reconstruct_project(
             "    if (kid == 5) return (int64_t)(uintptr_t)&aether_fmod;",
             "    return 0;",
             "}",
-            "static inline int64_t aether_icall(int64_t fn_ptr, int64_t a0, int64_t a1, int64_t a2, int64_t a3) {",
+            "AETHER_RT int64_t aether_icall(int64_t fn_ptr, int64_t a0, int64_t a1, int64_t a2, int64_t a3) {",
             "    if (!fn_ptr) return 0;",
             "    if (fn_ptr == (int64_t)(uintptr_t)&malloc) return (int64_t)(uintptr_t)malloc((size_t)(a0 > 0 ? a0 : 1));",
             "    if (fn_ptr == (int64_t)(uintptr_t)&free) { free((void*)(uintptr_t)a0); return 0; }",
@@ -4482,11 +4633,11 @@ def reconstruct_project(
             "floor", "log", "log10", "sin", "sinh", "sqrt", "tan", "tanh",
         )
         for _mn in _math_unary_emit:
-            header_lines.append(f"static inline double aether_{_mn}(double x) {{ return {_mn}(x); }}")
-        header_lines.append("static inline double aether_atan2(double y, double x) { return atan2(y, x); }")
-        header_lines.append("static inline double aether_pow(double a, double b);")
-        header_lines.append("static inline double aether_fmod(double a, double b);")
-        header_lines.append("static inline int64_t aether_abort(void) { return 0; }")
+            header_lines.append(f"AETHER_RT double aether_{_mn}(double x) {{ return {_mn}(x); }}")
+        header_lines.append("AETHER_RT double aether_atan2(double y, double x) { return atan2(y, x); }")
+        header_lines.append("AETHER_RT double aether_pow(double a, double b);")
+        header_lines.append("AETHER_RT double aether_fmod(double a, double b);")
+        header_lines.append("AETHER_RT int64_t aether_abort(void) { return 0; }")
 
         use_ro_sec = bool(
             ro_relocs
@@ -4528,7 +4679,7 @@ def reconstruct_project(
                 if not (ro_sec_base <= r_rva < ro_sec_end):
                     b_arr = ", ".join(f"0x{b:02x}" for b in r_bytes) if r_bytes else "0x00"
                     header_lines.append(f"static const uint8_t aether_ro_{r_rva:x}[{max(1, len(r_bytes))}] = {{ {b_arr} }};")
-            header_lines.append("static inline int64_t aether_ro_ptr(int64_t rva) {")
+            header_lines.append("AETHER_RT int64_t aether_ro_ptr(int64_t rva) {")
             header_lines.append("    aether_ro_init();")
             header_lines.append(
                 f"    if (rva >= 0x{ro_sec_base:x} && rva < 0x{ro_sec_end:x}) return (int64_t)(uintptr_t)(aether_ro_sec + (rva - 0x{ro_sec_base:x}));"
@@ -4545,7 +4696,7 @@ def reconstruct_project(
             for r_rva, r_bytes in sorted(ro_bytes_map.items()):
                 b_arr = ", ".join(f"0x{b:02x}" for b in r_bytes) if r_bytes else "0x00"
                 header_lines.append(f"static const uint8_t aether_ro_{r_rva:x}[{max(1, len(r_bytes))}] = {{ {b_arr} }};")
-            header_lines.append("static inline int64_t aether_ro_ptr(int64_t rva) {")
+            header_lines.append("AETHER_RT int64_t aether_ro_ptr(int64_t rva) {")
             for r_rva in sorted(ro_bytes_map.keys()):
                 header_lines.append(f"    if (rva == 0x{r_rva:x}) return (int64_t)(uintptr_t)aether_ro_{r_rva:x};")
             header_lines.extend([
@@ -4554,7 +4705,7 @@ def reconstruct_project(
                 "}",
             ])
         all_fn_leas = sorted({r for rec in records_list for r in rec.get("fn_lea_rvas", {}).values()})
-        header_lines.append("static inline int64_t aether_fn_ptr(int64_t rva) {")
+        header_lines.append("AETHER_RT int64_t aether_fn_ptr(int64_t rva) {")
         for f_rva in all_fn_leas:
             f_sym = rva_to_symbol.get(f_rva, f"sub_{f_rva:x}")
             header_lines.append(f"    if (rva == 0x{f_rva:x}) return (int64_t)(uintptr_t)&{f_sym};")
@@ -4566,10 +4717,10 @@ def reconstruct_project(
         header_lines.extend([
             "typedef double (*aether_fcall8_t)(double, double, double, double, double, double, double, double);",
             "typedef double (*aether_cfcall8_t)(int64_t, double, double, double, double, double, double, double);",
-            "static inline double aether_fcall_f64(int64_t fn_ptr, int64_t x0, int64_t x1, int64_t x2, int64_t x3, int64_t x4, int64_t x5, int64_t x6, int64_t x7) {",
+            "AETHER_RT double aether_fcall_f64(int64_t fn_ptr, int64_t x0, int64_t x1, int64_t x2, int64_t x3, int64_t x4, int64_t x5, int64_t x6, int64_t x7) {",
             "    return fn_ptr ? ((aether_fcall8_t)(uintptr_t)fn_ptr)(aether_bits_to_f64(x0), aether_bits_to_f64(x1), aether_bits_to_f64(x2), aether_bits_to_f64(x3), aether_bits_to_f64(x4), aether_bits_to_f64(x5), aether_bits_to_f64(x6), aether_bits_to_f64(x7)) : 0.0;",
             "}",
-            "static inline double aether_cfcall_f64(int64_t fn_ptr, int64_t ctx, int64_t x1, int64_t x2, int64_t x3, int64_t x4, int64_t x5, int64_t x6, int64_t x7) {",
+            "AETHER_RT double aether_cfcall_f64(int64_t fn_ptr, int64_t ctx, int64_t x1, int64_t x2, int64_t x3, int64_t x4, int64_t x5, int64_t x6, int64_t x7) {",
             "    return fn_ptr ? ((aether_cfcall8_t)(uintptr_t)fn_ptr)(ctx, aether_bits_to_f64(x1), aether_bits_to_f64(x2), aether_bits_to_f64(x3), aether_bits_to_f64(x4), aether_bits_to_f64(x5), aether_bits_to_f64(x6), aether_bits_to_f64(x7)) : 0.0;",
             "}",
             "",
@@ -4592,9 +4743,20 @@ def reconstruct_project(
             "\n".join(structured_source_lines),
             struct_res.get("structs", []),
         )
+        typed_decompiled = emit_typed_c_from_structured(
+            structured_annotated,
+            struct_res.get("structs", []),
+        )
         (inc_dir / "reconstructed_api.h").write_text("\n".join(header_lines), encoding="utf-8")
         (src_dir / "reconstructed_project.c").write_text("\n".join(c_source_lines), encoding="utf-8")
         (src_dir / "reconstructed_structured.c").write_text(structured_annotated, encoding="utf-8")
+        (src_dir / "reconstructed_typed.c").write_text(typed_decompiled, encoding="utf-8")
+        (src_dir / "llvm_runtime_shim.c").write_text(
+            "/* Auto-Generated Runtime Shim for Standalone LLVM O3 COFF Linkage */\n"
+            "#define AETHER_RT_LINK\n"
+            '#include "../include/reconstructed_api.h"\n',
+            encoding="utf-8",
+        )
         (src_dir / "exports.def").write_text("\n".join(def_lines) + "\n", encoding="utf-8")
         (out_root / "CMakeLists.txt").write_text(cmake_content, encoding="utf-8")
 
@@ -4613,6 +4775,8 @@ def reconstruct_project(
             "include/reconstructed_api.h",
             "src/reconstructed_project.c",
             "src/reconstructed_structured.c",
+            "src/reconstructed_typed.c",
+            "src/llvm_runtime_shim.c",
             "src/exports.def",
             "CMakeLists.txt",
             "twin_congruence_report.json",

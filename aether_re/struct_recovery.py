@@ -170,11 +170,10 @@ _STRUCT_MEM_ACCESS_RE = re.compile(
 )
 
 
-def annotate_c_with_struct_fields(c_code: str, structs: Sequence[dict[str, Any]]) -> str:
-    """Annotates C lines accessing recovered struct offsets with semantic field comments."""
-    if not c_code or not structs:
-        return c_code
-    lookup: dict[tuple[str, int], tuple[str, str, str]] = {}
+def _build_struct_field_lookup(
+    structs: Sequence[dict[str, Any]],
+) -> dict[tuple[str, int], tuple[str, str, str, int]]:
+    lookup: dict[tuple[str, int], tuple[str, str, str, int]] = {}
     for st in structs:
         reg = str(st.get("base_register", "")).lower()
         st_name = str(st.get("name", ""))
@@ -182,7 +181,20 @@ def annotate_c_with_struct_fields(c_code: str, structs: Sequence[dict[str, Any]]
             continue
         for fld in st.get("fields", []):
             off = int(fld.get("offset", 0))
-            lookup[(reg, off)] = (st_name, str(fld.get("name", f"field_0x{off:02x}")), str(fld.get("type", "uint64_t")))
+            lookup[(reg, off)] = (
+                st_name,
+                str(fld.get("name", f"field_0x{off:02x}")),
+                str(fld.get("type", "uint64_t")),
+                int(fld.get("size", 8)),
+            )
+    return lookup
+
+
+def annotate_c_with_struct_fields(c_code: str, structs: Sequence[dict[str, Any]]) -> str:
+    """Annotates C lines accessing recovered struct offsets with semantic field comments."""
+    if not c_code or not structs:
+        return c_code
+    lookup = _build_struct_field_lookup(structs)
     if not lookup:
         return c_code
 
@@ -201,4 +213,101 @@ def annotate_c_with_struct_fields(c_code: str, structs: Sequence[dict[str, Any]]
             out_lines.append(f"{ln} /* {'; '.join(tags)} */")
         else:
             out_lines.append(ln)
+    return "\n".join(out_lines)
+
+
+def _split_top_level_args(arg_str: str) -> list[str]:
+    """Splits a comma-separated C argument list honoring nested parentheses."""
+    args: list[str] = []
+    depth = 0
+    start = 0
+    for idx, ch in enumerate(arg_str):
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth = max(0, depth - 1)
+        elif ch == "," and depth == 0:
+            args.append(arg_str[start:idx].strip())
+            start = idx + 1
+    tail = arg_str[start:].strip()
+    if tail:
+        args.append(tail)
+    return args
+
+
+_REG_OFF_EXPR_RE = re.compile(
+    r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*(?:\+\s*(0x[0-9a-fA-F]+|\d+))?\s*$"
+)
+_SIMPLE_MEM_READ_RE = re.compile(
+    r"aether_mem_read\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*(?:\+\s*(0x[0-9a-fA-F]+|\d+))?\s*,\s*(\d+)\s*\)"
+)
+
+
+def emit_typed_c_from_structured(
+    structured_c: str,
+    structs: Sequence[dict[str, Any]],
+) -> str:
+    """Rewrites raw aether_mem_read/write into typed struct pointer dereferences in decompiled C."""
+    if not structured_c or not structs:
+        return structured_c
+    lookup = _build_struct_field_lookup(structs)
+    if not lookup:
+        return structured_c
+
+    def _repl_read(match: re.Match[str]) -> str:
+        raw_reg = match.group(1)
+        off = int(match.group(2), 0) if match.group(2) else 0
+        width = int(match.group(3))
+        hit = lookup.get((raw_reg.lower(), off))
+        if not hit or hit[3] != width:
+            return match.group(0)
+        st_name, f_name, f_type, _ = hit
+        deref = f"(({st_name}_t*)(uintptr_t)({raw_reg}))->{f_name}"
+        if f_type == "double":
+            return f"aether_f64_to_bits({deref})"
+        if f_type == "float":
+            return match.group(0)
+        return f"(int64_t)({deref})"
+
+    out_lines: list[str] = []
+    for ln in structured_c.splitlines():
+        new_ln = _SIMPLE_MEM_READ_RE.sub(_repl_read, ln)
+
+        # Check standalone statement aether_mem_write(addr, width, val);
+        stripped = new_ln.strip()
+        indent = new_ln[: len(new_ln) - len(new_ln.lstrip())]
+        if stripped.startswith("aether_mem_write("):
+            # Extract balanced call ending before ");" (ignore trailing inline comment)
+            open_idx = stripped.find("(")
+            depth = 0
+            close_idx = -1
+            for ci in range(open_idx, len(stripped)):
+                if stripped[ci] == "(":
+                    depth += 1
+                elif stripped[ci] == ")":
+                    depth -= 1
+                    if depth == 0:
+                        close_idx = ci
+                        break
+            if close_idx > open_idx and stripped[close_idx + 1 :].lstrip().startswith(";"):
+                call_args = _split_top_level_args(stripped[open_idx + 1 : close_idx])
+                if len(call_args) == 3:
+                    m_addr = _REG_OFF_EXPR_RE.match(call_args[0])
+                    if m_addr and call_args[1].isdigit():
+                        raw_reg = m_addr.group(1)
+                        off = int(m_addr.group(2), 0) if m_addr.group(2) else 0
+                        width = int(call_args[1])
+                        val_expr = call_args[2]
+                        hit = lookup.get((raw_reg.lower(), off))
+                        if hit and hit[3] == width:
+                            st_name, f_name, f_type, _ = hit
+                            lhs = f"(({st_name}_t*)(uintptr_t)({raw_reg}))->{f_name}"
+                            if f_type == "double":
+                                new_ln = f"{indent}{lhs} = aether_bits_to_f64({val_expr});"
+                            elif f_type == "float":
+                                new_ln = f"{indent}{{ uint32_t _fv = (uint32_t)({val_expr}); memcpy(&{lhs}, &_fv, 4); }}"
+                            else:
+                                new_ln = f"{indent}{lhs} = ({f_type})({val_expr});"
+
+        out_lines.append(new_ln)
     return "\n".join(out_lines)
