@@ -10,7 +10,7 @@
       "total_targets_analyzed": 78,
       "fully_lifted_congruent_functions": 78,
       "ctree_structured_functions": 78,
-      "avg_goto_elimination_pct": 50.0,
+      "avg_goto_elimination_pct": 89.74,
       "ghidra_enriched_functions": 78,
       "lifted_function_names": [
         "cJSON_AddArrayToObject",
@@ -99,13 +99,13 @@
       "imported_dlls": [
         "KERNEL32.dll"
       ],
-      "reconstruct_ms": 19673.96,
+      "reconstruct_ms": 9722.93,
       "msvc_compiled": true,
       "compiler": "msvc_cl_x64",
-      "compiled_twin_dll_bytes": 276480,
-      "compiled_twin_dll_sha256": "9297ca6a9bd3994440353a974fb5d0285313e822b686de3e63351c6b7d1ed6e1",
-      "omni_elapsed_ms": 198.415,
-      "omni_throughput_mb_s": 0.879,
+      "compiled_twin_dll_bytes": 427008,
+      "compiled_twin_dll_sha256": "6d1c20620952f0135a22e2d5e270e0241794c336dc9609330bfbc1b29e2a7de0",
+      "omni_elapsed_ms": 195.395,
+      "omni_throughput_mb_s": 0.892,
       "omni_gears_executed": 12,
       "missing_or_empty_files": []
     },
@@ -117,7 +117,7 @@
       "total_targets_analyzed": 92,
       "fully_lifted_congruent_functions": 92,
       "ctree_structured_functions": 92,
-      "avg_goto_elimination_pct": 50.0,
+      "avg_goto_elimination_pct": 91.3,
       "ghidra_enriched_functions": 0,
       "lifted_function_names": [
         "cJSONUtils_AddPatchToArray",
@@ -220,13 +220,13 @@
       "imported_dlls": [
         "KERNEL32.dll"
       ],
-      "reconstruct_ms": 60547.13,
+      "reconstruct_ms": 23622.83,
       "msvc_compiled": true,
       "compiler": "msvc_cl_x64",
-      "compiled_twin_dll_bytes": 291840,
-      "compiled_twin_dll_sha256": "a61f31c66561750587469762f16a138bf42603870fce70aeeb502b5ab5d8ea42",
-      "omni_elapsed_ms": 205.817,
-      "omni_throughput_mb_s": 0.894,
+      "compiled_twin_dll_bytes": 448000,
+      "compiled_twin_dll_sha256": "85a9ba99609c1e82f71a5340016369586ca8e9c57e31582b91dcff6042b6aa04",
+      "omni_elapsed_ms": 202.754,
+      "omni_throughput_mb_s": 0.908,
       "omni_gears_executed": 12,
       "missing_or_empty_files": []
     },
@@ -238,7 +238,7 @@
       "total_targets_analyzed": 5,
       "fully_lifted_congruent_functions": 5,
       "ctree_structured_functions": 5,
-      "avg_goto_elimination_pct": 40.0,
+      "avg_goto_elimination_pct": 80.0,
       "ghidra_enriched_functions": 0,
       "lifted_function_names": [
         "te_compile",
@@ -254,13 +254,13 @@
       "imported_dlls": [
         "KERNEL32.dll"
       ],
-      "reconstruct_ms": 2513.5,
+      "reconstruct_ms": 2332.11,
       "msvc_compiled": true,
       "compiler": "msvc_cl_x64",
-      "compiled_twin_dll_bytes": 318464,
-      "compiled_twin_dll_sha256": "07326b6f9f540b5a216df6b1e63fa142825655241a431f73c7d155cf1e4b6561",
-      "omni_elapsed_ms": 219.011,
-      "omni_throughput_mb_s": 0.921,
+      "compiled_twin_dll_bytes": 464896,
+      "compiled_twin_dll_sha256": "2043499460950eb3b92238d0e009ec63fceae99c222ee268a12b18b599b7df6c",
+      "omni_elapsed_ms": 211.732,
+      "omni_throughput_mb_s": 0.952,
       "omni_gears_executed": 12,
       "missing_or_empty_files": []
     },
@@ -272,7 +272,7 @@
       "total_targets_analyzed": 10,
       "fully_lifted_congruent_functions": 10,
       "ctree_structured_functions": 10,
-      "avg_goto_elimination_pct": 90.0,
+      "avg_goto_elimination_pct": 100.0,
       "ghidra_enriched_functions": 0,
       "lifted_function_names": [
         "create_processor",
@@ -297,13 +297,13 @@
       "imported_dlls": [
         "KERNEL32.dll"
       ],
-      "reconstruct_ms": 400.24,
+      "reconstruct_ms": 486.33,
       "msvc_compiled": true,
       "compiler": "msvc_cl_x64",
-      "compiled_twin_dll_bytes": 103936,
-      "compiled_twin_dll_sha256": "7826486baa5cb1bbabe6331681d87202b062ac8bd6eb23f64b5aa71eb89a94b2",
-      "omni_elapsed_ms": 147.98,
-      "omni_throughput_mb_s": 0.676,
+      "compiled_twin_dll_bytes": 235520,
+      "compiled_twin_dll_sha256": "b193e2029a0511e1d8259a287e6d99449407bee0c5017f07a1943bd666185a81",
+      "omni_elapsed_ms": 162.092,
+      "omni_throughput_mb_s": 0.618,
       "omni_gears_executed": 12,
       "missing_or_empty_files": []
     },
@@ -341,13 +341,86 @@
       "imported_dlls": [
         "KERNEL32.dll"
       ],
-      "reconstruct_ms": 436.67,
+      "reconstruct_ms": 492.16,
       "msvc_compiled": true,
       "compiler": "msvc_cl_x64",
-      "compiled_twin_dll_bytes": 103936,
-      "compiled_twin_dll_sha256": "3b419abf23acdc01740e0f8e2f1ca6e2962601452bc73ee84a89af278dc0c340",
-      "omni_elapsed_ms": 154.608,
-      "omni_throughput_mb_s": 0.647,
+      "compiled_twin_dll_bytes": 236032,
+      "compiled_twin_dll_sha256": "7ef18170ede70c6750bdca5c79184eba1e727881efe283114d2419e46723fff1",
+      "omni_elapsed_ms": 153.822,
+      "omni_throughput_mb_s": 0.651,
+      "omni_gears_executed": 12,
+      "missing_or_empty_files": []
+    },
+    {
+      "binary": "lz4.dll",
+      "size_bytes": 154624,
+      "ground_truth": "lz4.c (44 exports)",
+      "status": "complete",
+      "total_targets_analyzed": 44,
+      "fully_lifted_congruent_functions": 44,
+      "ctree_structured_functions": 44,
+      "avg_goto_elimination_pct": 95.45,
+      "ghidra_enriched_functions": 0,
+      "lifted_function_names": [
+        "LZ4_attach_dictionary",
+        "LZ4_compress",
+        "LZ4_compressBound",
+        "LZ4_compress_continue",
+        "LZ4_compress_default",
+        "LZ4_compress_destSize",
+        "LZ4_compress_fast",
+        "LZ4_compress_fast_continue",
+        "LZ4_compress_fast_extState",
+        "LZ4_compress_limitedOutput",
+        "LZ4_compress_limitedOutput_continue",
+        "LZ4_compress_limitedOutput_withState",
+        "LZ4_compress_withState",
+        "LZ4_create",
+        "LZ4_createStream",
+        "LZ4_createStreamDecode",
+        "LZ4_decoderRingBufferSize",
+        "LZ4_decompress_fast",
+        "LZ4_decompress_fast_continue",
+        "LZ4_decompress_fast_usingDict",
+        "LZ4_decompress_fast_withPrefix64k",
+        "LZ4_decompress_safe",
+        "LZ4_decompress_safe_continue",
+        "LZ4_decompress_safe_partial",
+        "LZ4_decompress_safe_partial_usingDict",
+        "LZ4_decompress_safe_usingDict",
+        "LZ4_decompress_safe_withPrefix64k",
+        "LZ4_freeStream",
+        "LZ4_freeStreamDecode",
+        "LZ4_initStream",
+        "LZ4_loadDict",
+        "LZ4_loadDictSlow",
+        "LZ4_resetStream",
+        "LZ4_resetStreamState",
+        "LZ4_resetStream_fast",
+        "LZ4_saveDict",
+        "LZ4_setStreamDecode",
+        "LZ4_sizeofState",
+        "LZ4_sizeofStreamState",
+        "LZ4_slideInputBuffer",
+        "LZ4_uncompress",
+        "LZ4_uncompress_unknownOutputSize",
+        "LZ4_versionNumber",
+        "LZ4_versionString"
+      ],
+      "differential_congruence_pct_on_lifted": 100.0,
+      "rtti_total_classes": 3,
+      "rtti_user_classes": [],
+      "struct_layouts_recovered": 7,
+      "imported_dlls": [
+        "KERNEL32.dll"
+      ],
+      "reconstruct_ms": 7607.18,
+      "msvc_compiled": true,
+      "compiler": "msvc_cl_x64",
+      "compiled_twin_dll_bytes": 423936,
+      "compiled_twin_dll_sha256": "f0e9314d43c017c79a3d3e0a1c1f87b74fa0f90367ec1a8141252fefb4cb789c",
+      "omni_elapsed_ms": 418.651,
+      "omni_throughput_mb_s": 0.352,
       "omni_gears_executed": 12,
       "missing_or_empty_files": []
     }
@@ -430,7 +503,7 @@
         1,
         1,
         1,
-        2347817582992,
+        2341550074992,
         0
       ],
       "compiled_twin_outputs": [
@@ -438,7 +511,7 @@
         1,
         1,
         1,
-        2347817582992,
+        2341550074992,
         0
       ],
       "match": true
@@ -630,6 +703,22 @@
         0,
         1,
         "{\"a\":1,\"c\":42}"
+      ],
+      "match": true
+    },
+    {
+      "target": "compiled twin lz4 :: LZ4_compressBound + compress_default + compress_fast + cross decompress_safe (44/44)",
+      "original_dll_outputs": [
+        483,
+        101,
+        101,
+        466
+      ],
+      "compiled_twin_outputs": [
+        483,
+        101,
+        101,
+        466
       ],
       "match": true
     }

@@ -289,3 +289,14 @@ def test_real_cpp_rtti_and_cjson_memory_twin_reconstruction(tmp_path: Path):
         assert cu_rep.overall_congruence_pct == 100.0
         build_cu = compile_reconstructed_project(tmp_path / "cjson_utils_twin")
         assert build_cu["compiled"] is True
+
+    lz_dll = repo_root / "external_test_repos" / "lz4" / "lz4.dll"
+    if lz_dll.is_file():
+        lz_rep = reconstruct_project(lz_dll, tmp_path / "lz4_twin")
+        assert lz_rep.status == "complete"
+        assert lz_rep.total_exports_reconstructed == 44
+        assert lz_rep.fully_lifted_functions == 44
+        assert lz_rep.ctree_structured_functions == 44
+        assert lz_rep.overall_congruence_pct == 100.0
+        build_lz = compile_reconstructed_project(tmp_path / "lz4_twin")
+        assert build_lz["compiled"] is True

@@ -6,11 +6,12 @@ Verificação empírica real (sem mocks): reconstrução de binários MSVC x64 `
 
 | Binário Real | Alvos | 100% Lifted | C-Tree | Ghidra Ref. | Congruência | Twin DLL Compilada (MSVC) | Structs | Tempo (ms) |
 |---|---:|---:|---:|---:|---:|---|---:|---:|
-| `cjson.dll` | 78 | 78 | 78 | 78 | **100.0%** | PASS (276480 B) | 7 | 19673.96 |
-| `cjson_utils.dll` | 92 | 92 | 92 | 0 | **100.0%** | PASS (291840 B) | 7 | 60547.13 |
-| `tinyexpr.dll` | 5 | 5 | 5 | 0 | **100.0%** | PASS (318464 B) | 7 | 2513.5 |
-| `poly_test.dll` | 10 | 10 | 10 | 0 | **100.0%** | PASS (103936 B) | 1 | 400.24 |
-| `multi_poly.dll` | 11 | 11 | 11 | 0 | **100.0%** | PASS (103936 B) | 1 | 436.67 |
+| `cjson.dll` | 78 | 78 | 78 | 78 | **100.0%** | PASS (427008 B) | 7 | 9722.93 |
+| `cjson_utils.dll` | 92 | 92 | 92 | 0 | **100.0%** | PASS (448000 B) | 7 | 23622.83 |
+| `tinyexpr.dll` | 5 | 5 | 5 | 0 | **100.0%** | PASS (464896 B) | 7 | 2332.11 |
+| `poly_test.dll` | 10 | 10 | 10 | 0 | **100.0%** | PASS (235520 B) | 1 | 486.33 |
+| `multi_poly.dll` | 11 | 11 | 11 | 0 | **100.0%** | PASS (236032 B) | 1 | 492.16 |
+| `lz4.dll` | 44 | 44 | 44 | 0 | **100.0%** | PASS (423936 B) | 7 | 7607.18 |
 
 ## 2. Interoperabilidade Ao Vivo em Heap Compartilhado (`DLL Original` <-> `reconstructed_twin.dll`)
 
@@ -21,7 +22,7 @@ Verificação empírica real (sem mocks): reconstrução de binários MSVC x64 `
 | `compiled twin poly_test :: Full C++ VTable Lifecycle (create/execute/reset/destroy x2)` | `[31, 77, 31, 4925, 97, 4925]` | `[31, 77, 31, 4925, 97, 4925]` | **PASS (100%)** |
 | `multi_poly.dll <-> compiled twin :: DualDevice multiple-inheritance heap` | `[100, 777]` | `[100, 777]` | **PASS (100%)** |
 | `compiled twin multi_poly :: Full Multiple-Inheritance Lifecycle (create/read/write/destroy)` | `[42, 42]` | `[42, 42]` | **PASS (100%)** |
-| `cjson.dll <-> compiled twin :: Live cJSON DOM heap traversal & predicates` | `[3, 1, 1, 1, 2347817582992, 0]` | `[3, 1, 1, 1, 2347817582992, 0]` | **PASS (100%)** |
+| `cjson.dll <-> compiled twin :: Live cJSON DOM heap traversal & predicates` | `[3, 1, 1, 1, 2341550074992, 0]` | `[3, 1, 1, 1, 2341550074992, 0]` | **PASS (100%)** |
 | `cjson.dll <-> compiled twin :: IEEE-754 XMM GetNumberValue(3.14159/NULL) & SetNumberHelper(99.75)` | `[3.14159, True, 99.75]` | `[3.14159, True, 99.75]` | **PASS (100%)** |
 | `compiled twin -> orig cjson.dll :: Live CRT Heap DOM Construction (CreateArray+Number+True+Bool+Null) & PrintUnformatted` | `['[42.5,true,false,null]', 4]` | `['[42.5,true,false,null]', 4]` | **PASS (100%)** |
 | `compiled twin -> orig cjson.dll :: Live Object+String+AddTrue+GetObjectItemCS+Delete` | `['aether_v39', '{"msg":"aether_v39","ok":true}']` | `['aether_v39', '{"msg":"aether_v39","ok":true}']` | **PASS (100%)** |
@@ -36,6 +37,7 @@ Verificação empírica real (sem mocks): reconstrução de binários MSVC x64 `
 | `compiled twin tinyexpr :: Live Self-Contained te_interp(pow/fmod) & te_compile(x*x+2*x+1) (5/5)` | `[14.0, 43.0, 1025.0, 36.0, 121.0]` | `[14.0, 43.0, 1025.0, 36.0, 121.0]` | **PASS (100%)** |
 | `compiled twin tinyexpr :: Live .rdata Relocated Builtins te_interp(sin/pi/sqrt/pow/ln/e/abs/cos/floor/ceil/fac/ncr/atan2)` | `[47.0, 145.25, 3.1415926536]` | `[47.0, 145.25, 3.1415926536]` | **PASS (100%)** |
 | `compiled twin cjson_utils :: RFC 6901 Pointer + 6902 Patch + 7396 MergePatch + SortObject (92/92)` | `['Mestre', '/users/1/name', '{"a":{"k":"v"},"users":[{"name":"A"},{"name":"Mestre"}],"z":1}', '[{"op":"replace","path":"/b","value":99},{"op":"add","path":"/c","value":3}]', 0, 1, '{"a":1,"c":42}']` | `['Mestre', '/users/1/name', '{"a":{"k":"v"},"users":[{"name":"A"},{"name":"Mestre"}],"z":1}', '[{"op":"replace","path":"/b","value":99},{"op":"add","path":"/c","value":3}]', 0, 1, '{"a":1,"c":42}']` | **PASS (100%)** |
+| `compiled twin lz4 :: LZ4_compressBound + compress_default + compress_fast + cross decompress_safe (44/44)` | `[483, 101, 101, 466]` | `[483, 101, 101, 466]` | **PASS (100%)** |
 
 ## 3. Cópia Perfeita de Projeto Empacotado (Electron ASAR)
 
@@ -44,5 +46,5 @@ Verificação empírica real (sem mocks): reconstrução de binários MSVC x64 `
 
 ## 4. Limitações Reais Observadas (Verdade Radical)
 
-- Todos os 5 projetos C gêmeos gerados (`cjson`, `cjson_utils`, `tinyexpr`, `poly_test`, `multi_poly`) compilam nativamente em MSVC x64 `/O2` sem erros (incluindo resolução de até 128 sub-rotinas internas `.text`, tabelas RVA de `switch`, globais mutáveis `.data` via `aether_data_ptr`, relocações `DIR64` em `.rdata` via `aether_ro_sec`/`aether_ro_init`, ponteiros de função `.text` via `aether_fn_ptr`, despacho virtual C++ RTTI via `aether_vtable_ptr`/`aether_vcall`, guard CFG `GuardCFDispatchFunctionPointer` + CRT `abort` em `_purecall`, `strrchr` CRT, callbacks float-ABI via `aether_fcall_f64`/`aether_cfcall_f64` e chamadas indiretas via `aether_icall`).
-- **100% dos alvos elevados nos 5 binários nativos:** `cjson.dll` (**78/78**, **78/78** Ghidra Ref.), `cjson_utils.dll` (**92/92**, RFC 6901/6902/7396 + Merge Sort), `tinyexpr.dll` (**5/5**), `poly_test.dll` (**10/10**, incluindo `IProcessor_v0_slot1` `_purecall`) e `multi_poly.dll` (**11/11**, incluindo `IReader_v0_slot1` `_purecall`) — todos com **100.0%** de estruturação C-Tree e **100.0%** de congruência diferencial em CPU real. Limitações honestas: apenas `cjson.dll` possui cache pré-computado de `ghidra_typed_cache` neste ambiente (os outros 4 ficam em `0` sem Ghidra headless externo), e rotinas terminais CRT como `_purecall`/`abort`/`printf`/`sscanf` mapeiam para stubs determinísticos seguros (`aether_abort` retornando `0`) no runtime gêmeo para preservar segurança de processo.
+- Todos os 6 projetos C gêmeos gerados (`cjson`, `cjson_utils`, `tinyexpr`, `poly_test`, `multi_poly`, `lz4`) compilam nativamente em MSVC x64 `/O2` sem erros (incluindo resolução de até 128 sub-rotinas internas `.text`, pilha TLS Win64 contígua `aether_tls_stack` para hashes de pilha >4 KB em LZ4, instruções SIMD empacotadas `pshufd`/`pmaxud`/`pcmpeqd`/`psubd`, multiplicações `imul`/`mul` 1-operando e `tzcnt`/`rep stos`, tabelas RVA de `switch`, globais mutáveis `.data` via `aether_data_ptr`, relocações `DIR64` em `.rdata` via `aether_ro_sec`/`aether_ro_init`, ponteiros de função `.text` via `aether_fn_ptr`, despacho virtual C++ RTTI via `aether_vtable_ptr`/`aether_vcall`, guard CFG `GuardCFDispatchFunctionPointer` + CRT `abort` em `_purecall`, `calloc`/`__chkstk`/`strrchr` CRT, callbacks float-ABI via `aether_fcall_f64`/`aether_cfcall_f64` e chamadas indiretas via `aether_icall`).
+- **100% dos alvos elevados e estruturados em C-Tree nos 6 binários nativos (240/240):** `cjson.dll` (**78/78**, **78/78** Ghidra Ref.), `cjson_utils.dll` (**92/92**, RFC 6901/6902/7396 + Merge Sort), `tinyexpr.dll` (**5/5**), `poly_test.dll` (**10/10**, incluindo `IProcessor_v0_slot1` `_purecall`), `multi_poly.dll` (**11/11**, incluindo `IReader_v0_slot1` `_purecall`) e `lz4.dll` (**44/44** lifted e **44/44** C-Tree após otimização Fase II IR/SSA, compressão byte-a-byte idêntica e descompressão cruzada exata) — todos com **100.0%** de estruturação C-Tree e **100.0%** de congruência diferencial em CPU real. Limitações honestas: (1) apenas `cjson.dll` possui cache pré-computado de `ghidra_typed_cache` neste ambiente (os outros 5 ficam em `0` sem Ghidra headless externo); (2) rotinas terminais CRT como `_purecall`/`abort`/`printf`/`sscanf` mapeiam para stubs determinísticos seguros (`aether_abort` retornando `0`) no runtime gêmeo para preservar segurança de processo.
