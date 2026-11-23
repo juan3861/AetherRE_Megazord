@@ -5149,8 +5149,12 @@ def reconstruct_project(
             overall_congruence_pct=100.0 if w_res.get("status") == "complete" else 0.0,
         )
 
-    # Case 7: Android DEX / APK -> Java / Gradle Project
-    if data.startswith(b"dex\n") or (data.startswith(b"PK\x03\x04") and (b"classes.dex" in data or b"AndroidManifest.xml" in data)):
+    # Case 7: Android DEX / APK / JVM JAR / .class -> Java / Gradle Project
+    if (
+        data.startswith(b"dex\n")
+        or data.startswith(b"\xca\xfe\xba\xbe")
+        or (data.startswith(b"PK\x03\x04") and (b"classes.dex" in data or b"AndroidManifest.xml" in data or b".class" in data or t_path.suffix.lower() == ".jar"))
+    ):
         from aether_re.managed_reconstructors import reconstruct_dex_apk_project
         dx_res = reconstruct_dex_apk_project(t_path, out_root)
         return ProjectReconstructionReport(

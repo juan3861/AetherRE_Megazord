@@ -32,7 +32,7 @@ SCHEMA = "re-megazord-omniclone.v1"
 
 _RECONSTRUCTIBLE_EXTS = {
     ".exe", ".dll", ".sys", ".so", ".dylib", ".node",
-    ".asar", ".wasm", ".pyc", ".apk", ".dex", ".js", ".mjs",
+    ".asar", ".wasm", ".pyc", ".apk", ".dex", ".jar", ".class", ".js", ".mjs",
 }
 
 

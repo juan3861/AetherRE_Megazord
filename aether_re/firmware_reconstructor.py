@@ -5,7 +5,9 @@ from __future__ import annotations
 import gzip
 import io
 import json
+import lzma
 import struct
+import zlib
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
@@ -54,6 +56,71 @@ def _extract_cpio_newc(blob: bytes, out_dir: Path) -> List[str]:
     return extracted
 
 
+def _parse_squashfs_v4(blob: bytes, out_dir: Path) -> Dict[str, Any]:
+    """Pure-Python SquashFS v4 (`hsqs`) superblock parser & compressed metadata block extractor."""
+    sq_off = blob.find(b"hsqs")
+    if sq_off == -1 or sq_off + 96 > len(blob):
+        return {"found": False}
+    (
+        magic, inodes, mkfs_time, block_size, frag_cnt, comp_id,
+        block_log, flags, no_ids, s_major, s_minor, root_inode_ref,
+        bytes_used, id_tbl, xattr_tbl, inode_tbl, dir_tbl, frag_tbl, export_tbl,
+    ) = struct.unpack_from("<IIIIIHHHHHHQQQQQQQQ", blob, sq_off)
+    if magic != 0x73717368 or s_major != 4:
+        return {"found": False}
+
+    comp_names = {1: "gzip/zlib", 2: "lzma", 3: "lzo", 4: "xz", 5: "lz4", 6: "zstd"}
+
+    def _read_meta_block(rel_off: int) -> bytes:
+        abs_p = sq_off + rel_off
+        if abs_p + 2 > len(blob):
+            return b""
+        hdr_u16 = struct.unpack_from("<H", blob, abs_p)[0]
+        uncompressed = bool(hdr_u16 & 0x8000)
+        sz = hdr_u16 & 0x7FFF
+        if abs_p + 2 + sz > len(blob):
+            return b""
+        chunk = blob[abs_p + 2 : abs_p + 2 + sz]
+        if uncompressed:
+            return chunk
+        try:
+            if comp_id == 1:
+                return zlib.decompress(chunk)
+            if comp_id in (2, 4):
+                return lzma.decompress(chunk)
+        except Exception:
+            return b""
+        return chunk
+
+    meta_strings: List[str] = []
+    dir_meta = _read_meta_block(dir_tbl)
+    if dir_meta:
+        (out_dir / "squashfs_dir_meta.bin").write_bytes(dir_meta)
+        # Extract printable entry names from directory table
+        pos_d = 0
+        while pos_d + 8 <= len(dir_meta):
+            b_ch = dir_meta[pos_d:]
+            m_end = 0
+            if 32 <= dir_meta[pos_d] < 127:
+                while pos_d + m_end < len(dir_meta) and 32 <= dir_meta[pos_d + m_end] < 127:
+                    m_end += 1
+                if m_end >= 3:
+                    meta_strings.append(dir_meta[pos_d : pos_d + m_end].decode("ascii", errors="replace"))
+                    pos_d += m_end
+                    continue
+            pos_d += 1
+
+    return {
+        "found": True,
+        "offset_hex": hex(sq_off),
+        "inodes": int(inodes),
+        "block_size": int(block_size),
+        "compression": comp_names.get(comp_id, f"unknown_{comp_id}"),
+        "bytes_used": int(bytes_used),
+        "dir_entries_hints": meta_strings[:64],
+    }
+
+
 def reconstruct_firmware_project(
     target_path: str | Path,
     output_dir: str | Path,
@@ -72,6 +139,10 @@ def reconstruct_firmware_project(
     cpio_files = _extract_cpio_newc(raw, rootfs_dir)
     for cf in cpio_files:
         generated.append(f"rootfs/{cf}")
+
+    sq_info = _parse_squashfs_v4(raw, out_root)
+    if (out_root / "squashfs_dir_meta.bin").is_file():
+        generated.append("squashfs_dir_meta.bin")
 
     # Decompress embedded gzip streams if any contain ELF/CPIO
     gz_pos = raw.find(b"\x1f\x8b\x08")
@@ -99,6 +170,7 @@ def reconstruct_firmware_project(
     mmio_map = {
         "schema": SCHEMA,
         "firmware_findings": fw_report,
+        "squashfs_v4": sq_info,
         "mmio_peripheral_pages": [hex(a) for a in sorted(mmio_addrs)],
         "rootfs_files_extracted": len(cpio_files),
     }

@@ -170,6 +170,61 @@ def compile_reconstructed_project(
     return {"compiled": False, "status": "no_compiler_found", "error": "Neither MSVC cl.exe nor clang/gcc found"}
 
 
+def compile_reconstructed_executable(
+    project_dir: str | Path,
+    output_exe_name: str = "reconstructed_twin.exe",
+    source_rel: str = "src/reconstructed_project.c",
+) -> Dict[str, Any]:
+    """Compiles a reconstructed C executable project (.exe) via MSVC cl.exe or clang/gcc."""
+    proj = Path(project_dir).resolve()
+    c_src = proj / source_rel
+    out_exe = proj / output_exe_name
+    if not c_src.is_file():
+        return {"compiled": False, "status": "missing_source", "error": f"Not found: {c_src}"}
+
+    vc_info = _find_msvc_x64_toolchain()
+    if vc_info is not None:
+        vc, cached_env, cl_in_env, _ = vc_info
+        if cached_env and cl_in_env:
+            proc = subprocess.run(
+                [cl_in_env, "/nologo", "/O2", str(c_src), f"/Fe:{out_exe}"],
+                cwd=str(proj),
+                env=cached_env,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=120,
+            )
+            ok = proc.returncode == 0 and out_exe.is_file() and out_exe.stat().st_size > 0
+            return {
+                "compiled": ok,
+                "status": "compiled" if ok else "compile_failed",
+                "compiler": "msvc_cl_x64",
+                "exe_path": str(out_exe) if ok else None,
+                "exe_size_bytes": out_exe.stat().st_size if ok else 0,
+                "exe_sha256": hashlib.sha256(out_exe.read_bytes()).hexdigest() if ok else None,
+                "returncode": proc.returncode,
+                "build_output": (proc.stdout + "\n" + proc.stderr).strip()[:1000],
+            }
+
+    cc = shutil.which("clang") or shutil.which("gcc")
+    if cc:
+        proc = subprocess.run([cc, "-O2", str(c_src), "-o", str(out_exe)], cwd=str(proj), capture_output=True, text=True, timeout=60)
+        ok = proc.returncode == 0 and out_exe.is_file() and out_exe.stat().st_size > 0
+        return {
+            "compiled": ok,
+            "status": "compiled" if ok else "compile_failed",
+            "compiler": Path(cc).name,
+            "exe_path": str(out_exe) if ok else None,
+            "exe_size_bytes": out_exe.stat().st_size if ok else 0,
+            "exe_sha256": hashlib.sha256(out_exe.read_bytes()).hexdigest() if ok else None,
+            "returncode": proc.returncode,
+            "build_output": (proc.stdout + "\n" + proc.stderr).strip()[:1000],
+        }
+    return {"compiled": False, "status": "no_compiler_found"}
+
+
 def compile_llvm_twin_project(
     project_dir: str | Path,
     output_dll_name: str = "reconstructed_twin_llvm.dll",

@@ -202,6 +202,11 @@ def _disasm_dalvik_code_item(dex: bytes, code_off: int, strings: List[str], meth
     u16 = [struct.unpack_from("<H", dex, insns_base + i * 2)[0] for i in range(insns_size)]
     decls = ", ".join(f"v{i} = 0" for i in range(max(1, min(regs_sz, 16))))
     jlines: List[str] = [f"        int {decls};"]
+    param_base = max(0, regs_sz - ins_sz)
+    for pi in range(min(ins_sz, 2)):
+        pname = "a" if pi == 0 else "b"
+        if param_base + pi < 16:
+            jlines.append(f"        v{param_base + pi} = {pname};")
     ip = 0
     while ip < len(u16):
         w0 = u16[ip]
@@ -226,6 +231,13 @@ def _disasm_dalvik_code_item(dex: bytes, code_off: int, strings: List[str], meth
             vA = (w0 >> 8) & 0xFF
             imm = struct.unpack("<h", struct.pack("<H", u16[ip + 1]))[0]
             jlines.append(f"        v{vA} = {imm};")
+            ip += 2
+        elif op in (0xD8, 0xD9, 0xDA, 0xDD, 0xDE, 0xDF) and ip + 1 < len(u16):  # /lit8
+            vA = (w0 >> 8) & 0xFF
+            vB = u16[ip + 1] & 0xFF
+            imm = struct.unpack("<b", bytes([(u16[ip + 1] >> 8) & 0xFF]))[0]
+            cop = {0xD8: "+", 0xD9: "-", 0xDA: "*", 0xDD: "&", 0xDE: "|", 0xDF: "^"}[op]
+            jlines.append(f"        v{vA} = v{vB} {cop} ({imm});")
             ip += 2
         elif op in (0x90, 0x91, 0x92, 0x95, 0x96, 0x97) and ip + 1 < len(u16):
             # 23x: op vAA, vBB, vCC
@@ -325,11 +337,162 @@ def _decode_dex_classes_to_java(dex: bytes) -> Dict[str, str]:
     return java_files
 
 
+def _decode_jvm_class_to_java(cls: bytes) -> Optional[Tuple[str, str]]:
+    """Minimal pure-Python JVM .class (0xCAFEBABE) constant-pool & Code bytecode lifter -> .java."""
+    if len(cls) < 16 or not cls.startswith(b"\xca\xfe\xba\xbe"):
+        return None
+    cp_count = struct.unpack_from(">H", cls, 8)[0]
+    pos = 10
+    cp: Dict[int, Any] = {}
+    i = 1
+    while i < cp_count and pos < len(cls):
+        tag = cls[pos]
+        pos += 1
+        if tag == 1:  # Utf8
+            ln = struct.unpack_from(">H", cls, pos)[0]
+            pos += 2
+            cp[i] = ("utf8", cls[pos : pos + ln].decode("utf-8", errors="replace"))
+            pos += ln
+        elif tag in (3, 4):
+            cp[i] = ("num", struct.unpack_from(">i" if tag == 3 else ">f", cls, pos)[0])
+            pos += 4
+        elif tag in (5, 6):
+            cp[i] = ("num64", struct.unpack_from(">q" if tag == 5 else ">d", cls, pos)[0])
+            pos += 8
+            i += 1
+        elif tag in (7, 8, 16, 19, 20):
+            cp[i] = ("ref", tag, struct.unpack_from(">H", cls, pos)[0])
+            pos += 2
+        elif tag in (9, 10, 11, 12, 17, 18):
+            cp[i] = ("pair", tag, struct.unpack_from(">HH", cls, pos))
+            pos += 4
+        elif tag == 15:
+            pos += 3
+        else:
+            return None
+        i += 1
+
+    def _utf8(idx: int) -> str:
+        item = cp.get(idx)
+        return item[1] if item and item[0] == "utf8" else ""
+
+    def _cls_name(idx: int) -> str:
+        item = cp.get(idx)
+        if item and item[0] == "ref":
+            return _utf8(item[2])
+        return "RecoveredClass"
+
+    if pos + 6 > len(cls):
+        return None
+    _acc, this_cls_idx, _super_idx = struct.unpack_from(">HHH", cls, pos)
+    pos += 6
+    if_cnt = struct.unpack_from(">H", cls, pos)[0]
+    pos += 2 + if_cnt * 2
+    fld_cnt = struct.unpack_from(">H", cls, pos)[0]
+    pos += 2
+    for _ in range(fld_cnt):
+        if pos + 8 > len(cls):
+            break
+        ac_cnt = struct.unpack_from(">H", cls, pos + 6)[0]
+        pos += 8
+        for _ in range(ac_cnt):
+            alen = struct.unpack_from(">I", cls, pos + 2)[0]
+            pos += 6 + alen
+
+    if pos + 2 > len(cls):
+        return None
+    mth_cnt = struct.unpack_from(">H", cls, pos)[0]
+    pos += 2
+
+    fqcn_raw = _cls_name(this_cls_idx).replace("/", ".")
+    pkg, _, cls_simple = fqcn_raw.rpartition(".")
+    cls_simple = re.sub(r"[^A-Za-z0-9_]", "_", cls_simple) or "RecoveredClass"
+    rel_java = (pkg.replace(".", "/") + "/" if pkg else "") + f"{cls_simple}.java"
+
+    lines: List[str] = []
+    if pkg:
+        lines.extend([f"package {pkg};", ""])
+    lines.append(f"public class {cls_simple} {{")
+
+    def _lift_jvm_code(bc: bytes, n_params: int) -> List[str]:
+        st: List[str] = []
+        out_j: List[str] = []
+        p = 0
+        while p < len(bc):
+            op = bc[p]
+            p += 1
+            if op == 0x1A:
+                st.append("p0")
+            elif op == 0x1B:
+                st.append("p1")
+            elif op == 0x1C:
+                st.append("p2")
+            elif op == 0x1D:
+                st.append("p3")
+            elif op == 0x15 and p < len(bc):  # iload idx
+                st.append(f"p{bc[p]}")
+                p += 1
+            elif 0x02 <= op <= 0x08:  # iconst_m1 .. iconst_5
+                st.append(str(op - 3))
+            elif op == 0x10 and p < len(bc):  # bipush
+                st.append(str(struct.unpack("<b", bytes([bc[p]]))[0]))
+                p += 1
+            elif op == 0x11 and p + 1 < len(bc):  # sipush
+                st.append(str(struct.unpack_from(">h", bc, p)[0]))
+                p += 2
+            elif op in (0x60, 0x64, 0x68, 0x6C, 0x70, 0x7E, 0x80, 0x82) and len(st) >= 2:
+                b_e, a_e = st.pop(), st.pop()
+                mop = {0x60: "+", 0x64: "-", 0x68: "*", 0x6C: "/", 0x70: "%", 0x7E: "&", 0x80: "|", 0x82: "^"}[op]
+                st.append(f"({a_e} {mop} {b_e})")
+            elif op == 0xAC:  # ireturn
+                rv = st.pop() if st else "0"
+                out_j.append(f"        return {rv};")
+            elif op == 0xB1:  # return (void)
+                out_j.append("        return;")
+        return out_j or ["        return 0;"]
+
+    for _ in range(mth_cnt):
+        if pos + 8 > len(cls):
+            break
+        m_acc, m_name_idx, m_desc_idx, m_attr_cnt = struct.unpack_from(">HHHH", cls, pos)
+        pos += 8
+        m_name = _utf8(m_name_idx)
+        m_desc = _utf8(m_desc_idx)
+        code_bc = b""
+        for _ in range(m_attr_cnt):
+            aname_idx, alen = struct.unpack_from(">HI", cls, pos)
+            pos += 6
+            if _utf8(aname_idx) == "Code" and alen >= 8:
+                code_len = struct.unpack_from(">I", cls, pos + 4)[0]
+                code_bc = cls[pos + 8 : pos + 8 + code_len]
+            pos += alen
+
+        if m_name in ("<init>", "<clinit>"):
+            continue
+        is_static = bool(m_acc & 0x0008)
+        arg_part = m_desc[m_desc.find("(") + 1 : m_desc.find(")")] if "(" in m_desc and ")" in m_desc else ""
+        n_int_args = arg_part.count("I")
+        ret_void = m_desc.endswith(")V")
+        if not is_static:
+            continue
+        params_sig = ", ".join(f"int p{idx}" for idx in range(n_int_args))
+        ret_t = "void" if ret_void else "int"
+        if m_name == "main" and "[Ljava/lang/String;" in m_desc:
+            lines.extend(["    public static void main(String[] args) {", "    }", ""])
+            continue
+        lines.append(f"    public static {ret_t} {re.sub(r'[^A-Za-z0-9_]', '_', m_name)}({params_sig}) {{")
+        lines.extend(_lift_jvm_code(code_bc, n_int_args))
+        lines.extend(["    }", ""])
+
+    lines.append("}")
+    return rel_java, "\n".join(lines) + "\n"
+
+
 def reconstruct_dex_apk_project(
     target_path: str | Path,
     output_dir: str | Path,
 ) -> Dict[str, Any]:
-    """Reconstructs a Gradle/Java Android project from an APK or DEX binary."""
+    """Reconstructs a Gradle/Java Android or JVM project from an APK, DEX, JAR, or .class binary."""
     t_path = Path(target_path).resolve()
     out_root = Path(output_dir).resolve()
     out_root.mkdir(parents=True, exist_ok=True)
@@ -337,14 +500,19 @@ def reconstruct_dex_apk_project(
 
     generated: List[str] = []
     dex_blobs: List[bytes] = []
+    class_blobs: List[bytes] = []
 
     if raw.startswith(b"dex\n"):
         dex_blobs.append(raw)
+    elif raw.startswith(b"\xca\xfe\xba\xbe"):
+        class_blobs.append(raw)
     elif raw.startswith(b"PK\x03\x04"):
         with zipfile.ZipFile(io.BytesIO(raw), "r") as zf:
             for name in zf.namelist():
                 if name.endswith(".dex") and "/" not in name:
                     dex_blobs.append(zf.read(name))
+                elif name.endswith(".class"):
+                    class_blobs.append(zf.read(name))
                 elif name == "AndroidManifest.xml":
                     manifest_xml = decode_axml_binary(zf.read(name))
                     m_dest = out_root / "app" / "src" / "main" / "AndroidManifest.xml"
@@ -352,13 +520,22 @@ def reconstruct_dex_apk_project(
                     m_dest.write_text(manifest_xml, encoding="utf-8")
                     generated.append("app/src/main/AndroidManifest.xml")
 
-    if not dex_blobs:
+    if not dex_blobs and not class_blobs:
         return {"schema": SCHEMA, "status": "not_dex_or_apk", "generated_files": generated}
 
     java_out = out_root / "app" / "src" / "main" / "java"
     java_paths: List[Path] = []
     for db in dex_blobs:
         for rel_j, src_j in _decode_dex_classes_to_java(db).items():
+            dest_j = java_out / rel_j
+            dest_j.parent.mkdir(parents=True, exist_ok=True)
+            dest_j.write_text(src_j, encoding="utf-8")
+            generated.append(f"app/src/main/java/{rel_j}")
+            java_paths.append(dest_j)
+    for cb in class_blobs:
+        dec_cls = _decode_jvm_class_to_java(cb)
+        if dec_cls:
+            rel_j, src_j = dec_cls
             dest_j = java_out / rel_j
             dest_j.parent.mkdir(parents=True, exist_ok=True)
             dest_j.write_text(src_j, encoding="utf-8")
@@ -421,6 +598,8 @@ def decompile_code_object_to_py(code_obj: Any, *, indent: int = 0) -> Tuple[str,
         branch_targets: Dict[int, str] = {}
 
         for ins in insns:
+            if ins.offset in branch_targets:
+                fpad = branch_targets.pop(ins.offset)
             op = ins.opname
             if op in ("RESUME", "NOP", "PUSH_NULL", "PRECALL", "KW_NAMES", "CACHE"):
                 continue
@@ -462,8 +641,24 @@ def decompile_code_object_to_py(code_obj: Any, *, indent: int = 0) -> Tuple[str,
                 stack.append(f"({a} {mp.get(op, '+')} {b})")
             elif op == "COMPARE_OP" and len(stack) >= 2:
                 b, a = stack.pop(), stack.pop()
-                cmp_s = str(ins.argrepr or "==")
+                cmp_s = str(ins.argrepr or "==").strip()
+                if cmp_s.startswith("bool(") and cmp_s.endswith(")"):
+                    cmp_s = cmp_s[5:-1].strip()
                 stack.append(f"({a} {cmp_s} {b})")
+            elif op in ("POP_JUMP_IF_FALSE", "POP_JUMP_IF_TRUE", "POP_JUMP_FORWARD_IF_FALSE", "POP_JUMP_FORWARD_IF_TRUE") and stack:
+                cond_e = stack.pop()
+                tgt_off = int(ins.argval or 0)
+                neg = "IF_TRUE" in op
+                out.append(f"{fpad}if {'not ' if neg else ''}{cond_e}:")
+                branch_targets[tgt_off] = fpad
+                fpad = fpad + "    "
+            elif op in ("JUMP_FORWARD", "JUMP_ABSOLUTE") and isinstance(ins.argval, int):
+                tgt_off = int(ins.argval)
+                if fpad != "    " * fn_indent:
+                    fpad = "    " * fn_indent
+                    out.append(f"{fpad}else:")
+                    branch_targets[tgt_off] = fpad
+                    fpad = fpad + "    "
             elif op == "UNARY_NEGATIVE" and stack:
                 stack.append(f"(-{stack.pop()})")
             elif op in ("CALL", "CALL_FUNCTION", "CALL_METHOD"):
@@ -719,7 +914,7 @@ def reconstruct_wasm_project(
     inc_dir.mkdir(parents=True, exist_ok=True)
 
     c_lines = [
-        "/* Auto-Lifted WebAssembly -> C99 Project by AetherRE Megazord v8.0 */",
+        "/* Auto-Lifted WebAssembly -> C99 Project by AetherRE Megazord v8.1 */",
         "#include <stdint.h>",
         "#include <stddef.h>",
         "#ifdef _WIN32",
@@ -727,9 +922,21 @@ def reconstruct_wasm_project(
         "#else",
         "#define W2C_EXP",
         "#endif",
+        "static uint8_t wasm_mem[65536];",
         "",
     ]
     def_lines = ["LIBRARY wasm_reconstructed", "EXPORTS"]
+
+    # Emit forward declarations so intra-module WASM `call` works seamlessly
+    for local_idx in range(len(code_bodies)):
+        g_idx = imported_funcs + local_idx
+        t_idx = func_type_indices[local_idx] if local_idx < len(func_type_indices) else 0
+        ptypes, _rtypes = types_sig[t_idx] if t_idx < len(types_sig) else ([], [])
+        raw_nm = exports_map.get(g_idx, f"wasm_func_{g_idx}")
+        c_nm = re.sub(r"[^A-Za-z0-9_]", "_", raw_nm)
+        params = ", ".join(f"int64_t l{i}" for i in range(len(ptypes))) or "void"
+        c_lines.append(f"W2C_EXP int64_t {c_nm}({params});")
+    c_lines.append("")
 
     lifted_fns = 0
     for local_idx, body in enumerate(code_bodies):
@@ -752,11 +959,54 @@ def reconstruct_wasm_project(
             c_lines.append(f"    int64_t l{li} = 0;")
 
         stack: List[str] = []
+        ctrl_stack: List[str] = []
         while bp < len(body):
             op = body[bp]
             bp += 1
             if op == 0x0B:  # end
-                break
+                if not ctrl_stack:
+                    break
+                kind = ctrl_stack.pop()
+                if kind in ("if", "else"):
+                    c_lines.append("    }")
+                elif kind == "loop":
+                    c_lines.append("    }")
+            elif op == 0x02:  # block
+                _bt, bp = _read_sleb128(body, bp)
+                ctrl_stack.append("block")
+            elif op == 0x03:  # loop
+                _bt, bp = _read_sleb128(body, bp)
+                ctrl_stack.append("loop")
+                c_lines.append("    while (1) {")
+            elif op == 0x04:  # if
+                _bt, bp = _read_sleb128(body, bp)
+                cond = stack.pop() if stack else "0"
+                ctrl_stack.append("if")
+                c_lines.append(f"    if ({cond}) {{")
+            elif op == 0x05:  # else
+                if ctrl_stack and ctrl_stack[-1] == "if":
+                    ctrl_stack[-1] = "else"
+                    c_lines.append("    } else {")
+            elif op == 0x0C:  # br
+                depth, bp = _read_uleb128(body, bp)
+                _ = depth
+                c_lines.append("    break;")
+            elif op == 0x0D:  # br_if
+                depth, bp = _read_uleb128(body, bp)
+                _ = depth
+                cond = stack.pop() if stack else "0"
+                c_lines.append(f"    if ({cond}) break;")
+            elif op == 0x10:  # call
+                f_idx, bp = _read_uleb128(body, bp)
+                loc_f = f_idx - imported_funcs
+                ft_idx = func_type_indices[loc_f] if 0 <= loc_f < len(func_type_indices) else 0
+                f_ptypes, _f_rtypes = types_sig[ft_idx] if ft_idx < len(types_sig) else ([], [])
+                call_args = [stack.pop() for _ in range(min(len(f_ptypes), len(stack)))][::-1]
+                tgt_nm = re.sub(r"[^A-Za-z0-9_]", "_", exports_map.get(f_idx, f"wasm_func_{f_idx}"))
+                stack.append(f"{tgt_nm}({', '.join(call_args)})")
+            elif op == 0x1A:  # drop
+                if stack:
+                    stack.pop()
             elif op == 0x20:  # local.get
                 li, bp = _read_uleb128(body, bp)
                 stack.append(f"l{li}")
@@ -764,19 +1014,37 @@ def reconstruct_wasm_project(
                 li, bp = _read_uleb128(body, bp)
                 val = stack.pop() if stack else "0"
                 c_lines.append(f"    l{li} = {val};")
+            elif op == 0x28:  # i32.load
+                _fl, bp = _read_uleb128(body, bp)
+                off_m, bp = _read_uleb128(body, bp)
+                base_a = stack.pop() if stack else "0"
+                stack.append(f"((int64_t)(*(const int32_t*)(wasm_mem + (((uint32_t)({base_a}) + {off_m}U) & 0xFFFCU))))")
+            elif op == 0x36:  # i32.store
+                _fl, bp = _read_uleb128(body, bp)
+                off_m, bp = _read_uleb128(body, bp)
+                val_s = stack.pop() if stack else "0"
+                base_a = stack.pop() if stack else "0"
+                c_lines.append(f"    *(int32_t*)(wasm_mem + (((uint32_t)({base_a}) + {off_m}U) & 0xFFFCU)) = (int32_t)({val_s});")
             elif op == 0x41:  # i32.const
                 iv, bp = _read_sleb128(body, bp)
                 stack.append(f"((int64_t)(int32_t)({iv}))")
             elif op == 0x42:  # i64.const
                 iv, bp = _read_sleb128(body, bp)
                 stack.append(f"((int64_t)({iv}LL))")
-            elif op in (0x6A, 0x6B, 0x6C, 0x71, 0x72, 0x73, 0x7C, 0x7D, 0x7E, 0x83, 0x84, 0x85) and len(stack) >= 2:
+            elif op == 0x45 and stack:  # i32.eqz
+                a_e = stack.pop()
+                stack.append(f"((int64_t)((int32_t)({a_e}) == 0 ? 1 : 0))")
+            elif op in (0x46, 0x47, 0x48, 0x4A, 0x4C, 0x4E) and len(stack) >= 2:
+                b_e, a_e = stack.pop(), stack.pop()
+                cmp_op = {0x46: "==", 0x47: "!=", 0x48: "<", 0x4A: ">", 0x4C: "<=", 0x4E: ">="}[op]
+                stack.append(f"((int64_t)((int32_t)({a_e}) {cmp_op} (int32_t)({b_e}) ? 1 : 0))")
+            elif op in (0x6A, 0x6B, 0x6C, 0x6D, 0x6F, 0x71, 0x72, 0x73, 0x74, 0x75, 0x7C, 0x7D, 0x7E, 0x83, 0x84, 0x85) and len(stack) >= 2:
                 b_e, a_e = stack.pop(), stack.pop()
                 op_c = {
-                    0x6A: "+", 0x6B: "-", 0x6C: "*", 0x71: "&", 0x72: "|", 0x73: "^",
+                    0x6A: "+", 0x6B: "-", 0x6C: "*", 0x6D: "/", 0x6F: "%", 0x71: "&", 0x72: "|", 0x73: "^", 0x74: "<<", 0x75: ">>",
                     0x7C: "+", 0x7D: "-", 0x7E: "*", 0x83: "&", 0x84: "|", 0x85: "^",
                 }[op]
-                if op <= 0x73:
+                if op <= 0x75:
                     stack.append(f"((int64_t)(int32_t)((int32_t)({a_e}) {op_c} (int32_t)({b_e})))")
                 else:
                     stack.append(f"((int64_t)(({a_e}) {op_c} ({b_e})))")

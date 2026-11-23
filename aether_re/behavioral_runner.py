@@ -410,3 +410,33 @@ def compare_signed_behavioral_run(document: Any, trust_map: Any) -> dict[str, An
         return {"schema": "behavioral-comparison.v1", "status": "invalid", "summary": {"cases": len(cases), "verified": len(original_rows)}, "mismatches": [], "errors": errors or [_error("guest_observation_missing")], "limitations": ["nenhum subconjunto parcial é apresentado como comparação válida"]}
     comparison = compare_observations(original_rows, candidate_rows)
     return {"schema": "behavioral-comparison.v1", "status": comparison["status"], "summary": comparison["summary"], "matched": comparison["matched"], "mismatches": comparison["mismatches"], "confidence_kind": "empirical_observation", "verification": {"handoff_signature": "verified", "guest_result_signatures": len(envelopes), "trust_map_schema": "aetherre-trust-map.v1"}, "errors": [], "limitations": comparison["limitations"]}
+
+
+def generate_differential_cases_from_symbolic(
+    code_bytes: bytes,
+    *,
+    base_addr: int = 0x400000,
+    arch: str = "amd64",
+    max_cases: int = 32,
+) -> dict[str, Any]:
+    """Synthesizes a `behavioral-cases.v1` manifest automatically from angr symbolic path exploration."""
+    from aether_re.symbolic_equivalence import synthesize_branch_inputs_angr
+
+    sym = synthesize_branch_inputs_angr(
+        code_bytes,
+        base_addr=base_addr,
+        arch=arch,
+        max_states=max_cases,
+    )
+    cases: list[dict[str, Any]] = []
+    for idx, tup in enumerate(sym.get("inputs", [])[:max_cases]):
+        cases.append({
+            "case_id": f"sym_case_{idx:03d}",
+            "input": {"args": [int(x) for x in tup]},
+        })
+    return {
+        "schema": _CASE_SCHEMA,
+        "cases": cases,
+        "symbolic_states_explored": int(sym.get("states_explored", 0)),
+        "symbolic_contract": sym.get("symbolic_contract"),
+    }
