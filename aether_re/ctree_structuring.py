@@ -8,9 +8,22 @@ from __future__ import annotations
 
 from collections import deque
 import re
+import threading
 from typing import Any, Sequence
 
 from aether_re.cfg_dominance import compute_immediate_dominators_pure, find_natural_loops
+
+_C_PARSER_TLS = threading.local()
+
+
+def _get_shared_c_parser():
+    from pycparser import c_parser
+
+    parser = getattr(_C_PARSER_TLS, "parser", None)
+    if parser is None:
+        parser = c_parser.CParser()
+        _C_PARSER_TLS.parser = parser
+    return parser
 
 SCHEMA = "ctree-structuring-report.v2"
 _EXIT = object()
@@ -331,8 +344,8 @@ def structure_control_flow(nodes: Sequence[str], edges: Sequence[tuple[str, str]
             raise _Incomplete("reachable_block_semantics_missing")
         if set(block_semantics)-node_set:
             raise ValueError("semantics_for_undeclared_block")
-        from pycparser import c_ast, c_generator, c_parser
-        parser = c_parser.CParser()
+        from pycparser import c_ast, c_generator
+        parser = _get_shared_c_parser()
         literal_tokens = {}
 
         class LiteralPreservingGenerator(c_generator.CGenerator):
@@ -384,6 +397,18 @@ def structure_control_flow(nodes: Sequence[str], edges: Sequence[tuple[str, str]
 
             return _C_TOKENS.sub(preserve_literal, cleaned)
 
+        def _count_ast_items(items: Sequence[Any]) -> None:
+            nonlocal ast_count, scope_sensitive
+            pending_ast = list(items)
+            while pending_ast:
+                current = pending_ast.pop()
+                ast_count += 1
+                if ast_count > 100000:
+                    raise ValueError("c_ast_budget_exceeded")
+                if isinstance(current, c_ast.CompoundLiteral):
+                    scope_sensitive = True
+                pending_ast.extend(child for _, child in current.children())
+
         def one_body(fragment, *, prepared=False):
             nonlocal ast_count, scope_sensitive
             tree = parser.parse("void __aether_probe(void){" + (fragment if prepared else text(fragment)) + "}")
@@ -400,8 +425,9 @@ def structure_control_flow(nodes: Sequence[str], edges: Sequence[tuple[str, str]
                 pending.extend(child for _, child in current.children())
             return tree.ext[0].body.block_items or []
 
-        def expression(value):
-            items = one_body("__aether_expr = (" + text(value) + ");", prepared=True)
+        def expression(value, *, prepared=False):
+            raw_expr = value if prepared else text(value)
+            items = one_body("__aether_expr = (" + raw_expr + ");", prepared=True)
             if len(items) != 1 or not isinstance(items[0], c_ast.Assignment) or not isinstance(items[0].lvalue, c_ast.ID) or items[0].lvalue.name != "__aether_expr":
                 raise ValueError("expression_contains_statements")
             return generator.visit(items[0].rvalue)
@@ -417,16 +443,13 @@ def structure_control_flow(nodes: Sequence[str], edges: Sequence[tuple[str, str]
         returns_void = isinstance(return_type, c_ast.TypeDecl) and isinstance(return_type.type, c_ast.IdentifierType) and return_type.type.names == ["void"]
         if not isinstance(declarations, (list, tuple)) or len(declarations) > 1024:
             raise ValueError("invalid_declarations")
-        local_declarations = []
-        for declaration in declarations:
-            items = one_body(declaration)
-            if len(items) != 1 or not isinstance(items[0], c_ast.Decl):
-                raise ValueError("function_scope_declaration_required")
-            local_declarations.append(generator.visit(items[0]) + ";")
-        semantics = {}
+
+        # Validate structure and prepare fragments up front so valid CFGs can parse in a single TU batch.
+        prep_decls = [text(d) for d in declarations]
+        prep_blocks: list[tuple[str, list[str], dict[str, Any], set[str], str | None]] = []
         for node in ordered:
             raw = block_semantics[node]
-            if not isinstance(raw, dict) or set(raw)-{"statements", "terminator"}:
+            if not isinstance(raw, dict) or set(raw) - {"statements", "terminator"}:
                 raise ValueError("invalid_block_semantics_fields")
             statements = raw.get("statements", [])
             term = raw.get("terminator")
@@ -434,53 +457,162 @@ def structure_control_flow(nodes: Sequence[str], edges: Sequence[tuple[str, str]
                 raise _Incomplete("block_terminator_missing")
             if not isinstance(statements, (list, tuple)) or not isinstance(term, dict):
                 raise ValueError("invalid_statements_or_terminator")
-            canonical = []
+            prep_stmts = []
             for statement in statements:
                 statement_count += 1
                 if statement_count > 4096:
                     raise ValueError("statement_budget_exceeded")
-                items = one_body(statement)
+                prep_stmts.append(text(statement))
+            kind = term.get("kind")
+            prep_term_expr: str | None = None
+            if kind == "return":
+                if set(term) - {"kind", "value"}:
+                    raise ValueError("unknown_return_fields")
+                value = term.get("value")
+                if returns_void != (value is None):
+                    raise ValueError("return_value_signature_mismatch")
+                if value is not None:
+                    prep_term_expr = text(value)
+                targets = set()
+            elif kind == "jump":
+                if set(term) != {"kind", "target"}:
+                    raise ValueError("invalid_jump_fields")
+                targets = {term["target"]}
+            elif kind == "branch":
+                if set(term) != {"kind", "condition", "true", "false"}:
+                    raise ValueError("branch_predicate_and_polarity_required")
+                prep_term_expr = text(term["condition"])
+                targets = {term["true"], term["false"]}
+            elif kind == "switch":
+                if set(term) != {"kind", "expression", "cases", "default"} or not isinstance(term["cases"], (list, tuple)) or len(term["cases"]) > 1024:
+                    raise ValueError("invalid_switch_fields")
+                values = set()
+                for case in term["cases"]:
+                    if not isinstance(case, dict) or set(case) != {"value", "target"} or type(case["value"]) is not int or not -(2**31) <= case["value"] < 2**31 or case["value"] in values:
+                        raise ValueError("invalid_or_duplicate_switch_case")
+                    values.add(case["value"])
+                prep_term_expr = text(term["expression"])
+                targets = {term["default"], *(case["target"] for case in term["cases"])}
+            else:
+                raise ValueError("unsupported_terminator")
+            if any(not isinstance(target, str) for target in targets) or targets != successors[node]:
+                raise ValueError("terminator_cfg_disagreement")
+            prep_blocks.append((node, prep_stmts, term, targets, prep_term_expr))
+
+        # Single-TU batch parse with sentinel markers; falls back seamlessly on any anomaly.
+        batch_slices: dict[int, list[Any]] | None = None
+        batch_fragments: list[str] = list(prep_decls)
+        stmt_slot_map: dict[tuple[int, int], int] = {}
+        term_slot_map: dict[int, int] = {}
+        for b_idx, (_, p_stmts, _term, _tgts, p_term_expr) in enumerate(prep_blocks):
+            for s_idx, p_st in enumerate(p_stmts):
+                stmt_slot_map[(b_idx, s_idx)] = len(batch_fragments)
+                batch_fragments.append(p_st)
+            if p_term_expr is not None:
+                term_slot_map[b_idx] = len(batch_fragments)
+                batch_fragments.append("__aether_expr = (" + p_term_expr + ");")
+
+        if batch_fragments:
+            try:
+                chunks = ["void __aether_batch(void){"]
+                for idx_f, frag in enumerate(batch_fragments):
+                    chunks.append(f"__aether_bmark({idx_f});")
+                    chunks.append(frag)
+                chunks.append(f"__aether_bmark({len(batch_fragments)});")
+                chunks.append("}")
+                batch_tree = parser.parse("\n".join(chunks))
+                if (
+                    len(batch_tree.ext) == 1
+                    and isinstance(batch_tree.ext[0], c_ast.FuncDef)
+                    and batch_tree.ext[0].decl.name == "__aether_batch"
+                ):
+                    body_items = batch_tree.ext[0].body.block_items or []
+                    parsed_map: dict[int, list[Any]] = {}
+                    cur_idx: int | None = None
+                    cur_bucket: list[Any] = []
+                    expected_idx = 0
+                    sentinel_ok = True
+                    for item in body_items:
+                        if (
+                            isinstance(item, c_ast.FuncCall)
+                            and isinstance(item.name, c_ast.ID)
+                            and item.name.name == "__aether_bmark"
+                            and item.args
+                            and len(item.args.exprs) == 1
+                            and isinstance(item.args.exprs[0], c_ast.Constant)
+                            and item.args.exprs[0].type == "int"
+                        ):
+                            mark_id = int(item.args.exprs[0].value, 0)
+                            if mark_id != expected_idx:
+                                sentinel_ok = False
+                                break
+                            if cur_idx is not None:
+                                parsed_map[cur_idx] = cur_bucket
+                            cur_idx = mark_id
+                            cur_bucket = []
+                            expected_idx += 1
+                        else:
+                            if cur_idx is None:
+                                sentinel_ok = False
+                                break
+                            cur_bucket.append(item)
+                    if sentinel_ok and expected_idx == len(batch_fragments) + 1 and len(parsed_map) == len(batch_fragments):
+                        batch_slices = parsed_map
+            except Exception:
+                batch_slices = None
+
+        def _get_parsed(slot_idx: int, raw_frag: str, *, is_expr: bool = False) -> list[Any]:
+            if batch_slices is not None and slot_idx in batch_slices:
+                items = batch_slices[slot_idx]
+                ast_count_overhead = 4  # matches FuncDef + Compound + ParamList baseline in one_body
+                nonlocal ast_count
+                ast_count += ast_count_overhead
+                if ast_count > 100000:
+                    raise ValueError("c_ast_budget_exceeded")
+                _count_ast_items(items)
+                return items
+            return one_body(("__aether_expr = (" + raw_frag + ");") if is_expr else raw_frag, prepared=True)
+
+        local_declarations = []
+        for d_idx, prep_decl in enumerate(prep_decls):
+            items = _get_parsed(d_idx, prep_decl)
+            if len(items) != 1 or not isinstance(items[0], c_ast.Decl):
+                raise ValueError("function_scope_declaration_required")
+            local_declarations.append(generator.visit(items[0]) + ";")
+
+        semantics = {}
+        for b_idx, (node, prep_stmts, term, _targets, prep_term_expr) in enumerate(prep_blocks):
+            canonical = []
+            for s_idx, prep_stmt in enumerate(prep_stmts):
+                items = _get_parsed(stmt_slot_map[(b_idx, s_idx)], prep_stmt)
                 if not items:
                     continue  # A comment-only fragment has no C effect.
                 if len(items) != 1 or not isinstance(items[0], (c_ast.Assignment, c_ast.FuncCall, c_ast.UnaryOp, c_ast.ExprList, c_ast.EmptyStatement)):
                     raise ValueError("only_expression_statements_allowed_in_block")
                 code = generator.visit(items[0]).rstrip()
                 canonical.append(code if code.endswith(";") else code + ";")
-            kind = term.get("kind")
+            kind = term["kind"]
             normalized = {"kind": kind}
             if kind == "return":
-                if set(term)-{"kind", "value"}:
-                    raise ValueError("unknown_return_fields")
-                value = term.get("value")
-                if returns_void != (value is None):
-                    raise ValueError("return_value_signature_mismatch")
-                normalized["value"] = expression(value) if value is not None else None
-                targets = set()
+                if prep_term_expr is not None:
+                    e_items = _get_parsed(term_slot_map[b_idx], prep_term_expr, is_expr=True)
+                    if len(e_items) != 1 or not isinstance(e_items[0], c_ast.Assignment) or not isinstance(e_items[0].lvalue, c_ast.ID) or e_items[0].lvalue.name != "__aether_expr":
+                        raise ValueError("expression_contains_statements")
+                    normalized["value"] = generator.visit(e_items[0].rvalue)
+                else:
+                    normalized["value"] = None
             elif kind == "jump":
-                if set(term) != {"kind", "target"}:
-                    raise ValueError("invalid_jump_fields")
                 normalized["target"] = term["target"]
-                targets = {term["target"]}
             elif kind == "branch":
-                if set(term) != {"kind", "condition", "true", "false"}:
-                    raise ValueError("branch_predicate_and_polarity_required")
-                normalized.update(condition=expression(term["condition"]), **{"true": term["true"], "false": term["false"]})
-                targets = {term["true"], term["false"]}
+                e_items = _get_parsed(term_slot_map[b_idx], prep_term_expr or "", is_expr=True)
+                if len(e_items) != 1 or not isinstance(e_items[0], c_ast.Assignment) or not isinstance(e_items[0].lvalue, c_ast.ID) or e_items[0].lvalue.name != "__aether_expr":
+                    raise ValueError("expression_contains_statements")
+                normalized.update(condition=generator.visit(e_items[0].rvalue), **{"true": term["true"], "false": term["false"]})
             elif kind == "switch":
-                if set(term) != {"kind", "expression", "cases", "default"} or not isinstance(term["cases"], (list, tuple)) or len(term["cases"]) > 1024:
-                    raise ValueError("invalid_switch_fields")
-                cases, values = [], set()
-                for case in term["cases"]:
-                    if not isinstance(case, dict) or set(case) != {"value", "target"} or type(case["value"]) is not int or not -(2**31) <= case["value"] < 2**31 or case["value"] in values:
-                        raise ValueError("invalid_or_duplicate_switch_case")
-                    values.add(case["value"])
-                    cases.append(dict(case))
-                normalized.update(expression=expression(term["expression"]), cases=cases, default=term["default"])
-                targets = {term["default"], *(case["target"] for case in cases)}
-            else:
-                raise ValueError("unsupported_terminator")
-            if any(not isinstance(target, str) for target in targets) or targets != successors[node]:
-                raise ValueError("terminator_cfg_disagreement")
+                e_items = _get_parsed(term_slot_map[b_idx], prep_term_expr or "", is_expr=True)
+                if len(e_items) != 1 or not isinstance(e_items[0], c_ast.Assignment) or not isinstance(e_items[0].lvalue, c_ast.ID) or e_items[0].lvalue.name != "__aether_expr":
+                    raise ValueError("expression_contains_statements")
+                normalized.update(expression=generator.visit(e_items[0].rvalue), cases=[dict(c) for c in term["cases"]], default=term["default"])
             semantics[node] = {"statements": canonical, "terminator": normalized}
 
         labels = {node: f"aether_bb_{index}" for index, node in enumerate(ordered)}

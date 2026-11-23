@@ -1,0 +1,62 @@
+{
+  "schema": "aetherre-flirt-cfg-db.v2",
+  "architectures": ["x86_64", "aarch64"],
+  "signatures": [
+    {
+      "skeleton_sha256": "3cce1ff86dd779ef",
+      "crt_name": "noop",
+      "strategy": "cfg_flirt_security_check_cookie",
+      "arch": "x86_64",
+      "toolchain": "msvc"
+    },
+    {
+      "skeleton_sha256": "cd55e5a856e97649",
+      "crt_name": "noop",
+      "strategy": "cfg_flirt_chkstk",
+      "arch": "x86_64",
+      "toolchain": "msvc"
+    },
+    {
+      "skeleton_sha256": "3efcb6aab69562aa",
+      "crt_name": "abort",
+      "strategy": "cfg_flirt_fastfail_abort",
+      "arch": "x86_64",
+      "toolchain": "msvc"
+    },
+    {
+      "skeleton_sha256": "137e7739dd078339",
+      "crt_name": "abort",
+      "strategy": "cfg_fastfail_abort",
+      "arch": "x86_64",
+      "toolchain": "msvc"
+    },
+    {
+      "skeleton_sha256": "3fe2673f00791dda",
+      "crt_name": "memcpy",
+      "strategy": "cfg_flirt_memcpy_graph",
+      "arch": "x86_64",
+      "toolchain": "msvc"
+    },
+    {
+      "skeleton_sha256": "2c901fac507c8f19",
+      "crt_name": "memset",
+      "strategy": "cfg_flirt_memset_graph",
+      "arch": "x86_64",
+      "toolchain": "msvc"
+    },
+    {
+      "skeleton_sha256": "d2b84e52f5616233",
+      "crt_name": "strlen",
+      "strategy": "cfg_flirt_strlen_graph",
+      "arch": "x86_64",
+      "toolchain": "msvc"
+    },
+    {
+      "skeleton_sha256": "3299d81536e6635b",
+      "crt_name": "strlen",
+      "strategy": "cfg_swar_strlen",
+      "arch": "x86_64",
+      "toolchain": "msvc"
+    }
+  ]
+}

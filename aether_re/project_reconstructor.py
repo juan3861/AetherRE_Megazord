@@ -41,8 +41,10 @@ from typing import Any, Dict, List, Optional, Tuple
 import capstone
 import pefile
 
+from aether_re.calling_convention import infer_function_prototype, refine_prototypes_interprocedural
 from aether_re.cpp_rtti import recover_cpp_rtti
 from aether_re.ctree_structuring import structure_control_flow
+from aether_re.dwarf_types import analyze_elf_and_dwarf
 from aether_re.electron_asar_forensics import analyze_asar_bytes
 from aether_re.flirt_cfg import discover_crt_via_cfg_flirt
 from aether_re.ir_optimizer import optimize_lifted_c
@@ -50,14 +52,59 @@ from aether_re.llvm_backend import compile_project_to_llvm_ir
 from aether_re.multiarch_lifter import (
     eval_arm64_insns,
     extract_elf64_metadata,
+    extract_macho64_metadata,
     lift_arm64_function_to_c,
 )
 from aether_re.struct_recovery import (
     annotate_c_with_struct_fields,
     emit_typed_c_from_structured,
+    propagate_interprocedural_structs,
     recover_struct_layouts,
 )
+from aether_re.til_engine import lookup_til_api
 from aether_re.win64_unwind import parse_win64_unwind_table
+from aether_re.runtime_emitter import (
+    _base_runtime_header_lines,
+    _find_msvc_x64_toolchain,
+    _get_msvc_x64_env,
+    compile_llvm_twin_project,
+    compile_reconstructed_project,
+)
+from aether_re.lifted_c_vm import (
+    _AST_LHS_ASSIGN_RE,
+    _AST_NORM_REGS,
+    _bits_to_f64,
+    _bt_cf,
+    _bit_mask,
+    _compile_eval_cached,
+    _compile_exec_cached,
+    _f32_to_f64,
+    _f64_add,
+    _f64_comisd,
+    _f64_div,
+    _f64_max,
+    _f64_min,
+    _f64_mul,
+    _f64_sub,
+    _f64_to_bits,
+    _f64_to_i32,
+    _fast_i64,
+    _i16,
+    _i32,
+    _i32_to_f64,
+    _i8,
+    _pcmpeqb64,
+    _pcmpeqd64,
+    _pmaxud64,
+    _pshufd128,
+    _psubd64,
+    _safe_f64_pow,
+    _to_int64,
+    _tolower_ascii,
+    _u32,
+    _u8,
+    execute_lifted_c_ast as _vm_execute_lifted_c_ast,
+)
 
 
 @dataclass
@@ -84,6 +131,8 @@ class ReconstructedFunction:
     returns_double: bool = False
     takes_double_arg0: bool = False
     ghidra_reference_c: Optional[str] = None
+    recovered_prototype: Optional[str] = None
+    estimated_param_count: int = 0
 
 
 @dataclass
@@ -116,6 +165,8 @@ class ProjectReconstructionReport:
     win64_unwind_functions: int = 0
     win64_ehandlers_count: int = 0
     eh_frame_bytes: int = 0
+    dwarf_types_count: int = 0
+    recovered_prototypes: Dict[str, Any] = field(default_factory=dict)
     error: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
@@ -396,105 +447,6 @@ class _MemoryArena:
         lo_end = max(0, min(self.size, 0x1E800 - self.base))
         hi_start = max(lo_end, min(self.size, stack_base - self.base))
         return hashlib.sha256(self.buf[:lo_end] + self.buf[hi_start:]).hexdigest()
-
-
-def _to_int64(val: int) -> int:
-    return ctypes.c_int64(val).value
-
-
-def _i32(val: int) -> int:
-    return ctypes.c_int32(int(val)).value
-
-
-def _u32(val: int) -> int:
-    return val & 0xFFFFFFFF
-
-
-def _u8(val: int) -> int:
-    return val & 0xFF
-
-
-def _i8(val: int) -> int:
-    return ctypes.c_int8(int(val) & 0xFF).value
-
-
-def _i16(val: int) -> int:
-    return ctypes.c_int16(int(val) & 0xFFFF).value
-
-
-def _bt_cf(val: int, bit: int, mask: int) -> int:
-    return 0 if ((int(val) >> (int(bit) & int(mask))) & 1) else 1
-
-
-def _bit_mask(bit: int, mask: int) -> int:
-    return 1 << (int(bit) & int(mask))
-
-
-def _tolower_ascii(c: int) -> int:
-    b = int(c) & 0xFF
-    return b + 32 if 65 <= b <= 90 else b
-
-
-def _f64_to_bits(val: float) -> int:
-    return struct.unpack("<q", struct.pack("<d", float(val)))[0]
-
-
-def _bits_to_f64(bits: int) -> float:
-    return struct.unpack("<d", struct.pack("<q", _to_int64(int(bits))))[0]
-
-
-def _f64_comisd(a_bits: int, b_bits: int) -> int:
-    a = _bits_to_f64(a_bits)
-    b = _bits_to_f64(b_bits)
-    if math.isnan(a) or math.isnan(b):
-        return -1
-    if a == b:
-        return 1
-    if a > b:
-        return 2
-    return 0
-
-
-def _pcmpeqb64(a: int, b: int) -> int:
-    out = 0
-    for i in range(8):
-        if ((a >> (i * 8)) & 0xFF) == ((b >> (i * 8)) & 0xFF):
-            out |= 0xFF << (i * 8)
-    return _to_int64(out)
-
-
-def _pmaxud64(a: int, b: int) -> int:
-    lo = max(a & 0xFFFFFFFF, b & 0xFFFFFFFF)
-    hi = max((a >> 32) & 0xFFFFFFFF, (b >> 32) & 0xFFFFFFFF)
-    return _to_int64(lo | (hi << 32))
-
-
-def _pcmpeqd64(a: int, b: int) -> int:
-    lo = 0xFFFFFFFF if (a & 0xFFFFFFFF) == (b & 0xFFFFFFFF) else 0
-    hi = 0xFFFFFFFF if ((a >> 32) & 0xFFFFFFFF) == ((b >> 32) & 0xFFFFFFFF) else 0
-    return _to_int64(lo | (hi << 32))
-
-
-def _psubd64(a: int, b: int) -> int:
-    lo = ((a & 0xFFFFFFFF) - (b & 0xFFFFFFFF)) & 0xFFFFFFFF
-    hi = (((a >> 32) & 0xFFFFFFFF) - ((b >> 32) & 0xFFFFFFFF)) & 0xFFFFFFFF
-    return _to_int64(lo | (hi << 32))
-
-
-def _pshufd128(lo: int, hi: int, imm8: int) -> Tuple[int, int]:
-    lanes = [lo & 0xFFFFFFFF, (lo >> 32) & 0xFFFFFFFF, hi & 0xFFFFFFFF, (hi >> 32) & 0xFFFFFFFF]
-    n0 = lanes[imm8 & 3]
-    n1 = lanes[(imm8 >> 2) & 3]
-    n2 = lanes[(imm8 >> 4) & 3]
-    n3 = lanes[(imm8 >> 6) & 3]
-    return _to_int64(n0 | (n1 << 32)), _to_int64(n2 | (n3 << 32))
-
-
-def _f64_to_i32(bits: int) -> int:
-    d = _bits_to_f64(bits)
-    if not math.isfinite(d) or d >= 2147483648.0 or d < -2147483648.0:
-        return 0x80000000
-    return _u32(int(d))
 
 
 def _uses_xmm_before_write(insns: List[Tuple[int, str, str]], target_xmm: str) -> bool:
@@ -865,15 +817,6 @@ def _discover_crt_allocator_map(
     return alloc_map
 
 
-def _i32_to_f64(i_val: int) -> int:
-    return _f64_to_bits(float(_i32(i_val)))
-
-
-def _f32_to_f64(u32_bits: int) -> int:
-    f_val = struct.unpack("<f", struct.pack("<I", int(u32_bits) & 0xFFFFFFFF))[0]
-    return _f64_to_bits(float(f_val))
-
-
 def _parse_pe_rva_table_ref(
     op_str: str,
     rva_anchor_regs: set[str],
@@ -942,42 +885,6 @@ def _parse_pe_rva_table_ref(
     if not vals:
         return None
     return "u32", disp_val, idx_expr, vals
-
-
-def _f64_max(a: int, b: int) -> int:
-    return a if _bits_to_f64(a) > _bits_to_f64(b) else b
-
-
-def _f64_min(a: int, b: int) -> int:
-    return a if _bits_to_f64(a) < _bits_to_f64(b) else b
-
-
-def _f64_add(a: int, b: int) -> int:
-    return _f64_to_bits(_bits_to_f64(a) + _bits_to_f64(b))
-
-
-def _f64_sub(a: int, b: int) -> int:
-    return _f64_to_bits(_bits_to_f64(a) - _bits_to_f64(b))
-
-
-def _f64_mul(a: int, b: int) -> int:
-    return _f64_to_bits(_bits_to_f64(a) * _bits_to_f64(b))
-
-
-def _f64_div(a: int, b: int) -> int:
-    fb = _bits_to_f64(b)
-    if fb == 0.0:
-        return _f64_to_bits(float("nan"))
-    return _f64_to_bits(_bits_to_f64(a) / fb)
-
-
-def _safe_f64_pow(a: float, b: float) -> float:
-    try:
-        return float(math.pow(a, b))
-    except OverflowError:
-        return float("inf")
-    except ValueError:
-        return float("nan")
 
 
 def _resolve_rip_rel_const(
@@ -2822,44 +2729,6 @@ def _simulate_x64_insns(
     return _to_int64(xmms["xmm0"] if returns_double else regs["rax"])
 
 
-_PY_EXEC_CACHE: Dict[str, Any] = {}
-_PY_EVAL_CACHE: Dict[str, Any] = {}
-_AST_LHS_ASSIGN_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\s*(?:\+|-)?=")
-_AST_NORM_REGS: set[str] = {
-    "rax", "rbx", "rcx", "rdx", "rsi", "rdi", "rbp", "rsp",
-    "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15",
-    "xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "xmm6", "xmm7",
-    "xmm0_hi", "xmm1_hi", "xmm2_hi", "xmm3_hi", "xmm4_hi", "xmm5_hi", "xmm6_hi", "xmm7_hi",
-    "cmp_lhs", "cmp_rhs",
-    *(f"x{i}" for i in range(31)),
-}
-
-
-def _fast_i64(val: int) -> int:
-    v = int(val) & 0xFFFFFFFFFFFFFFFF
-    return v - 0x10000000000000000 if (v & 0x8000000000000000) else v
-
-
-def _compile_exec_cached(src: str) -> Any:
-    code = _PY_EXEC_CACHE.get(src)
-    if code is None:
-        if len(_PY_EXEC_CACHE) > 20000:
-            _PY_EXEC_CACHE.clear()
-        code = compile(src, "<aether_c_stmt>", "exec")
-        _PY_EXEC_CACHE[src] = code
-    return code
-
-
-def _compile_eval_cached(src: str) -> Any:
-    code = _PY_EVAL_CACHE.get(src)
-    if code is None:
-        if len(_PY_EVAL_CACHE) > 20000:
-            _PY_EVAL_CACHE.clear()
-        code = compile(src, "<aether_c_cond>", "eval")
-        _PY_EVAL_CACHE[src] = code
-    return code
-
-
 def _execute_lifted_c_ast(
     c_code: str,
     rcx: int,
@@ -2880,235 +2749,27 @@ def _execute_lifted_c_ast(
     _stack_base: int = 0x4E000,
     _depth: int = 0,
 ) -> int:
-    """Executes generated C statements directly in a deterministic state machine (with recursive inter-proc calls)."""
-    if _depth >= 24:
-        return 0
-    arena = mem_arena if mem_arena is not None else _MemoryArena()
-    lines = [ln.strip() for ln in c_code.splitlines()]
-    label_to_idx: Dict[str, int] = {}
-    for idx, ln in enumerate(lines):
-        if ln.startswith("L_") and ":" in ln:
-            lbl = ln.split(":", 1)[0].strip()
-            label_to_idx[lbl] = idx
-
-    returns_double = any(ln.startswith("double ") for ln in lines[:4])
-    sig_line = lines[0] if lines else ""
-    takes_double_arg0 = "double xmm0_arg" in sig_line
-    env: Dict[str, Any] = {r: 0 for r in _ALL_CANON_REGS}
-    for xr in _XMM_REGS:
-        env[xr] = 0
-    for xh in _XMM_HI_REGS:
-        env[xh] = 0
-    for sv in re.findall(r"\baether_slot_[A-Za-z0-9_]+\b", "\n".join(lines[:16])):
-        env[sv] = 0
-    env.update({
-        "rcx": 0 if takes_double_arg0 else _to_int64(rcx),
-        "rdx": _to_int64(rdx), "r8": _to_int64(r8), "r9": _to_int64(r9),
-        "xmm0_arg": _bits_to_f64(xmm0_bits),
-        "xmm0": _to_int64(xmm0_bits),
-        "xmm1_arg": _bits_to_f64(xmm1_bits),
-        "xmm1": _to_int64(xmm1_bits),
-        "rsp": _stack_base,
-        "cmp_lhs": 0, "cmp_rhs": 0,
-        "aether_u32": _u32,
-        "aether_i32": _i32,
-        "aether_i16": _i16,
-        "aether_i8": _i8,
-        "aether_bt_cf": _bt_cf,
-        "aether_bit_mask": _bit_mask,
-        "aether_stack_base": lambda: _stack_base,
-        "aether_set_byte": lambda reg, cond: _to_int64((int(reg) & ~0xFF) | (1 if cond else 0)),
-        "aether_mem_read": lambda addr, width: arena.read(int(addr), int(width)),
-        "aether_mem_write": lambda addr, width, val: arena.write(int(addr), int(width), int(val)),
-        "aether_malloc": lambda sz: _to_int64(arena.alloc(int(sz))),
-        "aether_free": lambda ptr: _to_int64(arena.free(int(ptr))),
-        "aether_realloc": lambda ptr, sz: _to_int64(arena.realloc(int(ptr), int(sz))),
-        "aether_calloc": lambda n, sz: _to_int64(arena.alloc(max(1, (int(n) & 0xFFFFFFFF) * (int(sz) & 0xFFFFFFFF)))),
-        "aether_rep_stos": lambda d, v, c, w: _to_int64(arena.c_rep_stos(int(d), int(v), int(c), int(w))),
-        "aether_strlen": lambda ptr: _to_int64(arena.c_strlen(int(ptr))),
-        "aether_strcmp": lambda p1, p2: _to_int64(arena.c_strcmp(int(p1), int(p2))),
-        "aether_strncmp": lambda p1, p2, n: _to_int64(arena.c_strncmp(int(p1), int(p2), int(n))),
-        "aether_strcpy": lambda dst, src: _to_int64(arena.c_strcpy(int(dst), int(src))),
-        "aether_strrchr": lambda s, ch: _to_int64(arena.c_strrchr(int(s), int(ch))),
-        "aether_sprintf": lambda buf, fmt, a1, a2, a3: _to_int64(arena.c_sprintf(int(buf), int(fmt), int(a1), int(a2), int(a3))),
-        "aether_sscanf": lambda *args: 0,
-        "aether_abort": lambda *args: 0,
-        "aether_strtod": lambda s_ptr, end_ptr: _bits_to_f64(arena.c_strtod(int(s_ptr), int(end_ptr))),
-        "aether_printf": lambda *args: 0,
-        "aether_isalpha": lambda c: 1 if (0 <= (int(c) & 0xFF) < 128 and chr(int(c) & 0xFF).isalpha()) else 0,
-        "aether_isdigit": lambda c: 1 if (0 <= (int(c) & 0xFF) < 128 and chr(int(c) & 0xFF).isdigit()) else 0,
-        "aether_isspace": lambda c: 1 if (0 <= (int(c) & 0xFF) < 128 and chr(int(c) & 0xFF).isspace()) else 0,
-        "aether_isxdigit": lambda c: 1 if ((int(c) & 0xFF) in b"0123456789abcdefABCDEF") else 0,
-        "aether_fn_ptr": lambda r_rva: _to_int64(int(r_rva)),
-        "aether_pcmpeqb64": _pcmpeqb64,
-        "aether_tolower": lambda c: _to_int64(_tolower_ascii(int(c))),
-        "aether_memcpy": lambda dst, src, sz: _to_int64(arena.c_memcpy(int(dst), int(src), int(sz))),
-        "aether_memset": lambda dst, val, sz: _to_int64(arena.c_memset(int(dst), int(val), int(sz))),
-        "aether_pow": lambda a, b: _safe_f64_pow(float(a), float(b)),
-        "aether_fmod": lambda a, b: math.fmod(float(a), float(b)) if float(b) != 0.0 else float("nan"),
-        "_aether_div_rem": 0,
-        "_aether_imul_hi": 0,
-        "_aether_xmm_hi": 0,
-        "_aether_sp": 0,
-        "_aether_saved_sp": 0,
-        "aether_pmaxud64": _pmaxud64,
-        "aether_pcmpeqd64": _pcmpeqd64,
-        "aether_psubd64": _psubd64,
-        "aether_f64_to_bits": _f64_to_bits,
-        "aether_bits_to_f64": _bits_to_f64,
-        "aether_f64_comisd": _f64_comisd,
-        "aether_f64_to_i32": _f64_to_i32,
-        "aether_i32_to_f64": _i32_to_f64,
-        "aether_f32_to_f64": _f32_to_f64,
-        "aether_f64_max": _f64_max,
-        "aether_f64_min": _f64_min,
-        "aether_f64_add": _f64_add,
-        "aether_f64_sub": _f64_sub,
-        "aether_f64_mul": _f64_mul,
-        "aether_f64_div": _f64_div,
-        "aether_vtable_ptr": lambda vt_rva: _to_int64((vtable_arena_addrs or {}).get(int(vt_rva), 0)),
-        "aether_data_ptr": lambda d_rva: _to_int64(0x1B000 + (int(d_rva) - rw_data_base)) if rw_data_base > 0 else 0,
-        "aether_ro_ptr": lambda r_rva: _to_int64((ro_arena_addrs or {}).get(int(r_rva), 0)),
-        "aether_crt_fn_ptr": lambda kid: _to_int64(0x1A000 + int(kid)),
-        "aether_icall": lambda fp, a0, a1, a2, a3: (
-            _to_int64(arena.alloc(int(a0))) if int(fp) == 0x1A001 else
-            (_to_int64(arena.free(int(a0))) if int(fp) == 0x1A002 else
-            (_to_int64(arena.realloc(int(a0), int(a1))) if int(fp) == 0x1A003 else 0))
-        ),
-        "aether_fcall_f64": lambda *args: 0.0,
-        "aether_cfcall_f64": lambda *args: 0.0,
-    })
-    if ro_table_fns:
-        for t_fn_name, t_vals in ro_table_fns.items():
-            env[t_fn_name] = (lambda vals: lambda idx: vals[int(idx)] if 0 <= int(idx) < len(vals) else 0)(t_vals)
-    def _exec_udiv64(hi: Any, lo: Any, d: Any) -> int:
-        ud = int(d) & 0xFFFFFFFFFFFFFFFF
-        if ud == 0:
-            env["_aether_div_rem"] = 0
-            return 0
-        un = ((int(hi) & 0xFFFFFFFFFFFFFFFF) << 64) | (int(lo) & 0xFFFFFFFFFFFFFFFF)
-        env["_aether_div_rem"] = _to_int64(un % ud)
-        return _to_int64(un // ud)
-    def _exec_udiv32(hi: Any, lo: Any, d: Any) -> int:
-        ud = int(d) & 0xFFFFFFFF
-        if ud == 0:
-            env["_aether_div_rem"] = 0
-            return 0
-        un = ((int(hi) & 0xFFFFFFFF) << 32) | (int(lo) & 0xFFFFFFFF)
-        env["_aether_div_rem"] = _u32(un % ud)
-        return _u32(un // ud)
-    env["aether_udiv64"] = _exec_udiv64
-    env["aether_udiv32"] = _exec_udiv32
-    def _exec_imul32(a: Any, b: Any) -> int:
-        p = _i32(int(a)) * _i32(int(b))
-        env["_aether_imul_hi"] = _u32(p >> 32)
-        return _u32(p)
-    def _exec_imul64(a: Any, b: Any) -> int:
-        p = int(a) * int(b)
-        env["_aether_imul_hi"] = _to_int64((p >> 64) & 0xFFFFFFFFFFFFFFFF)
-        return _to_int64(p & 0xFFFFFFFFFFFFFFFF)
-    env["aether_imul32"] = _exec_imul32
-    env["aether_imul64"] = _exec_imul64
-    def _exec_umul32(a: Any, b: Any) -> int:
-        p = (int(a) & 0xFFFFFFFF) * (int(b) & 0xFFFFFFFF)
-        env["_aether_imul_hi"] = _u32(p >> 32)
-        return _u32(p)
-    def _exec_umul64(a: Any, b: Any) -> int:
-        p = (int(a) & 0xFFFFFFFFFFFFFFFF) * (int(b) & 0xFFFFFFFFFFFFFFFF)
-        env["_aether_imul_hi"] = _to_int64((p >> 64) & 0xFFFFFFFFFFFFFFFF)
-        return _to_int64(p & 0xFFFFFFFFFFFFFFFF)
-    env["aether_umul32"] = _exec_umul32
-    env["aether_umul64"] = _exec_umul64
-    env["aether_tzcnt32"] = lambda v: 32 if (int(v) & 0xFFFFFFFF) == 0 else (((int(v) & 0xFFFFFFFF) & -(int(v) & 0xFFFFFFFF)).bit_length() - 1)
-    env["aether_tzcnt64"] = lambda v: 64 if (int(v) & 0xFFFFFFFFFFFFFFFF) == 0 else (((int(v) & 0xFFFFFFFFFFFFFFFF) & -(int(v) & 0xFFFFFFFFFFFFFFFF)).bit_length() - 1)
-    def _exec_pshufd(lo: Any, hi: Any, imm8: Any) -> int:
-        n_lo, n_hi = _pshufd128(int(lo), int(hi), int(imm8))
-        env["_aether_xmm_hi"] = n_hi
-        return n_lo
-    env["aether_pshufd"] = _exec_pshufd
-    if c_fn_table:
-        for c_sym, meta in c_fn_table.items():
-            def _make_callee(m: Dict[str, Any]):
-                def _call_fn(a0: Any, a1: Any, a2: Any, a3: Any) -> Any:
-                    c_p0 = _f64_to_bits(float(a0)) if m.get("takes_double_arg0") else int(env["xmm0"])
-                    c_p1 = _f64_to_bits(float(a1)) if m.get("takes_double_arg1") else int(env["xmm1"])
-                    c_rcx = 0 if m.get("takes_double_arg0") else int(a0)
-                    c_rdx = 0 if m.get("takes_double_arg1") else int(a1)
-                    out_bits = _execute_lifted_c_ast(
-                        m["c_code"],
-                        c_rcx,
-                        c_rdx,
-                        int(a2),
-                        int(a3),
-                        mem_arena=arena,
-                        xmm0_bits=c_p0,
-                        xmm1_bits=c_p1,
-                        c_fn_table=c_fn_table,
-                        ro_table_fns=ro_table_fns,
-                        vtable_arena_addrs=vtable_arena_addrs,
-                        rva_to_c_sym=rva_to_c_sym,
-                        rw_data_base=rw_data_base,
-                        ro_arena_addrs=ro_arena_addrs,
-                        halt_info=halt_info,
-                        _stack_base=max(0x1E800, int(env["rsp"]) - 8),
-                        _depth=_depth + 1,
-                    )
-                    return _bits_to_f64(out_bits) if m.get("returns_double") else _to_int64(out_bits)
-                return _call_fn
-            env[c_sym] = _make_callee(meta)
-
-    def _vcall_helper(fn_ptr: Any, a0: Any, a1: Any, a2: Any, a3: Any) -> int:
-        sym = (rva_to_c_sym or {}).get(int(fn_ptr))
-        if sym and sym in env:
-            return _to_int64(int(env[sym](a0, a1, a2, a3)))
-        return 0
-
-    env["aether_vcall"] = _vcall_helper
-
-    def _clean_c_stmt(s: str) -> str:
-        s = s.replace("(int64_t)", "").replace("(uint64_t)", "").replace("0xffLL", "0xff").replace("0xffffLL", "0xffff")
-        return re.sub(r"\b(0x[0-9a-fA-F]+|\d+)U?LL\b", r"\1", s)
-
-    pc = 0
-    steps = 0
-    while pc < len(lines) and steps < 4000:
-        ln = lines[pc]
-        if not ln or ln.startswith("int64_t ") or ln.startswith("double ") or ln.startswith("uint8_t ") or ln.startswith("L_") or ln.startswith("/*") or ln == "}":
-            pc += 1
-            continue
-        steps += 1
-        if ln == "return rax;":
-            return _fast_i64(int(env["rax"]))
-        if ln == "return aether_bits_to_f64(xmm0);":
-            return _fast_i64(int(env["xmm0"]))
-        if ln.startswith("if (") and ("goto " in ln or ") {" in ln):
-            if ") goto " in ln:
-                cond_str = ln[4 : ln.index(") goto")].strip()
-                target_lbl = ln[ln.index("goto ") + 5 : ln.rindex(";")].strip()
-                if eval(_compile_eval_cached(_clean_c_stmt(cond_str)), {"__builtins__": {}}, env):
-                    pc = label_to_idx[target_lbl]
-                    continue
-            elif ") {" in ln and ln.endswith("}"):
-                cond_str = ln[4 : ln.index(") {")].strip()
-                body_str = ln[ln.index(") {") + 3 : -1].strip()
-                if eval(_compile_eval_cached(_clean_c_stmt(cond_str)), {"__builtins__": {}}, env):
-                    for st in [s.strip() for s in body_str.split(";") if s.strip()]:
-                        exec(_compile_exec_cached(_clean_c_stmt(st)), {"__builtins__": {}}, env)
-                        m_lhs = _AST_LHS_ASSIGN_RE.match(st)
-                        if m_lhs and (m_lhs.group(1) in _AST_NORM_REGS or m_lhs.group(1).startswith("aether_slot_")):
-                            env[m_lhs.group(1)] = _fast_i64(env[m_lhs.group(1)])
-            pc += 1
-            continue
-        stmts = [s.strip() for s in ln.split(";") if s.strip()]
-        for st in stmts:
-            exec(_compile_exec_cached(_clean_c_stmt(st)), {"__builtins__": {}}, env)
-            m_lhs = _AST_LHS_ASSIGN_RE.match(st)
-            if m_lhs and (m_lhs.group(1) in _AST_NORM_REGS or m_lhs.group(1).startswith("aether_slot_")):
-                env[m_lhs.group(1)] = _fast_i64(env[m_lhs.group(1)])
-        pc += 1
-    if halt_info is not None and steps >= 4000 and pc < len(lines):
-        halt_info["fuel_exhausted"] = True
-    return _fast_i64(int(env["xmm0"] if returns_double else env["rax"]))
+    """Executes pre-compiled lifted C statements directly via `aether_re.lifted_c_vm`."""
+    return _vm_execute_lifted_c_ast(
+        c_code,
+        rcx,
+        rdx,
+        r8,
+        r9,
+        mem_arena=mem_arena,
+        xmm0_bits=xmm0_bits,
+        xmm1_bits=xmm1_bits,
+        c_fn_table=c_fn_table,
+        ro_table_fns=ro_table_fns,
+        vtable_arena_addrs=vtable_arena_addrs,
+        rva_to_c_sym=rva_to_c_sym,
+        rw_data_base=rw_data_base,
+        ro_arena_addrs=ro_arena_addrs,
+        halt_info=halt_info,
+        _stack_base=_stack_base,
+        _depth=_depth,
+        arena_factory=_MemoryArena,
+    )
 
 
 def _structure_lifted_c_to_ctree(c_ident: str, c_code: str) -> Dict[str, Any]:
@@ -3118,7 +2779,7 @@ def _structure_lifted_c_to_ctree(c_ident: str, c_code: str) -> Dict[str, Any]:
     returns_double = any(ln.startswith("double ") for ln in raw_lines[:4])
     takes_double_arg0 = "double xmm0_arg" in sig_line
     takes_double_arg1 = "double xmm1_arg" in sig_line
-    uses_xmm = any("xmm0" in ln for ln in raw_lines[:10]) or takes_double_arg0 or takes_double_arg1
+    uses_xmm = any("xmm" in ln for ln in raw_lines[:16]) or takes_double_arg0 or takes_double_arg1
     # Collect branch targets so we split basic blocks at jump destinations
     branch_targets: set[str] = set()
     for ln in raw_lines:
@@ -3146,7 +2807,13 @@ def _structure_lifted_c_to_ctree(c_ident: str, c_code: str) -> Dict[str, Any]:
         elif ln == "return aether_bits_to_f64(xmm0);":
             steps[-1] = (lbl_s, stmts_s, ("return", "aether_bits_to_f64(xmm0)"))
         elif ln.startswith("if (") and ") goto " in ln:
-            cond_str = ln[4 : ln.index(") goto")].strip()
+            cond_str = (
+                ln[4 : ln.index(") goto")].strip()
+                .replace("(int64_t)", "(long long)")
+                .replace("(uint64_t)", "(unsigned long long)")
+                .replace("0xffLL", "0xff")
+                .replace("0xffffLL", "0xffff")
+            )
             tgt = ln[ln.index("goto ") + 5 : ln.rindex(";")].strip()
             steps[-1] = (lbl_s, stmts_s, ("goto", f"{cond_str}::{tgt}"))
         elif ln.startswith("if (") and ") {" in ln and ln.endswith("}"):
@@ -3168,6 +2835,7 @@ def _structure_lifted_c_to_ctree(c_ident: str, c_code: str) -> Dict[str, Any]:
             for st in [s.strip() for s in ln.split(";") if s.strip()]:
                 c_stmt = (
                     st.replace("(int64_t)", "(long long)")
+                    .replace("(uint64_t)", "(unsigned long long)")
                     .replace("0xffLL", "0xff")
                     .replace("0xffffLL", "0xffff")
                     + ";"
@@ -3362,32 +3030,49 @@ def _structure_lifted_c_to_ctree(c_ident: str, c_code: str) -> Dict[str, Any]:
         block_semantics = {n: block_semantics[n] for n in nodes}
         edges = [(u_e, v_e) for u_e, v_e in edges if u_e in seen_reach and v_e in seen_reach]
 
-    declarations = [
-        "long long rax = 0;", "long long rbx = 0;", "long long rbp = 0;",
-        "long long rsi = 0;", "long long rdi = 0;", "long long r10 = 0;",
-        "long long r11 = 0;", "long long r12 = 0;", "long long r13 = 0;",
-        "long long r14 = 0;", "long long r15 = 0;",
-        "long long rsp = aether_stack_base();",
-        "long long _aether_saved_sp = _aether_sp;",
-        "long long cmp_lhs = 0;", "long long cmp_rhs = 0;",
-    ]
+    # Collect identifiers actually used across the compacted C-Tree CFG so dead declarations are omitted
+    used_idents: set[str] = set()
+    for blk_s in block_semantics.values():
+        for st_s in blk_s["statements"]:
+            used_idents.update(re.findall(r"\b[A-Za-z_][A-Za-z0-9_]*\b", st_s))
+        tm_s = blk_s["terminator"]
+        if tm_s.get("condition"):
+            used_idents.update(re.findall(r"\b[A-Za-z_][A-Za-z0-9_]*\b", tm_s["condition"]))
+        if tm_s.get("value"):
+            used_idents.update(re.findall(r"\b[A-Za-z_][A-Za-z0-9_]*\b", tm_s["value"]))
+
+    declarations = []
+    for reg_decl in ("rax", "rbx", "rbp", "rsi", "rdi", "r10", "r11", "r12", "r13", "r14", "r15"):
+        if reg_decl == "rax" or reg_decl in used_idents:
+            declarations.append(f"long long {reg_decl} = 0;")
+    if "rsp" in used_idents or "_aether_saved_sp" in used_idents:
+        declarations.append("long long rsp = aether_stack_base();")
+    if "_aether_saved_sp" in used_idents:
+        declarations.append("long long _aether_saved_sp = _aether_sp;")
+    if "cmp_lhs" in used_idents:
+        declarations.append("long long cmp_lhs = 0;")
+    if "cmp_rhs" in used_idents:
+        declarations.append("long long cmp_rhs = 0;")
     if takes_double_arg0:
         declarations.append("long long rcx = 0;")
     if takes_double_arg1:
         declarations.append("long long rdx = 0;")
     for sv in sorted(set(re.findall(r"\baether_slot_[A-Za-z0-9_]+\b", c_code))):
-        declarations.append(f"long long {sv} = 0;")
+        if sv in used_idents:
+            declarations.append(f"long long {sv} = 0;")
     for xr_a in sorted(set(re.findall(r"\bx(?:[0-2]?\d|30)\b", c_code))):
-        declarations.append(f"long long {xr_a} = 0;")
+        if xr_a in used_idents:
+            declarations.append(f"long long {xr_a} = 0;")
     if uses_xmm or returns_double:
         for xr in _XMM_REGS:
             if xr == "xmm0" and takes_double_arg0:
                 declarations.append("long long xmm0 = aether_f64_to_bits(xmm0_arg);")
             elif xr == "xmm1" and takes_double_arg1:
                 declarations.append("long long xmm1 = aether_f64_to_bits(xmm1_arg);")
-            else:
+            elif (xr == "xmm0" and returns_double) or xr in used_idents:
                 declarations.append(f"long long {xr} = 0;")
-            declarations.append(f"long long {xr}_hi = 0;")
+            if f"{xr}_hi" in used_idents:
+                declarations.append(f"long long {xr}_hi = 0;")
 
     ret_t_s = "double" if returns_double else "long long"
     p0_s = "double xmm0_arg" if takes_double_arg0 else "long long rcx"
@@ -3406,577 +3091,6 @@ def _structure_lifted_c_to_ctree(c_ident: str, c_code: str) -> Dict[str, Any]:
     )
 
 
-_MSVC_X64_ENV_CACHE: Dict[str, Dict[str, str]] = {}
-
-
-def _get_msvc_x64_env(vcvars_path: Path) -> Optional[Dict[str, str]]:
-    key = str(vcvars_path)
-    if key in _MSVC_X64_ENV_CACHE:
-        return _MSVC_X64_ENV_CACHE[key]
-    bat_path: Optional[Path] = None
-    try:
-        with tempfile.NamedTemporaryFile("w", suffix=".bat", delete=False, encoding="utf-8") as tf:
-            tf.write(f'@echo off\r\ncall "{vcvars_path}" >nul\r\nset\r\n')
-            bat_path = Path(tf.name)
-        out = subprocess.check_output(
-            ["cmd", "/c", str(bat_path)],
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=30,
-        )
-        env_map: Dict[str, str] = {}
-        for ln in out.splitlines():
-            if "=" in ln:
-                k, v = ln.split("=", 1)
-                if k:
-                    env_map[k] = v
-        if "PATH" in env_map or "Path" in env_map:
-            _MSVC_X64_ENV_CACHE[key] = env_map
-            return env_map
-    except Exception:
-        pass
-    finally:
-        if bat_path is not None:
-            bat_path.unlink(missing_ok=True)
-    return None
-
-
-def _find_msvc_x64_toolchain() -> Optional[Tuple[Path, Dict[str, str], str, Optional[str]]]:
-    """Locates MSVC vcvars64, cached x64 environment, cl.exe, and link.exe."""
-    vswhere = Path(r"C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe")
-    vcvars_candidates: List[Path] = []
-    if vswhere.is_file():
-        try:
-            vs_paths = subprocess.check_output(
-                [str(vswhere), "-all", "-products", "*", "-property", "installationPath"],
-                text=True,
-                timeout=10,
-            ).splitlines()
-            for vp in vs_paths:
-                cand = Path(vp.strip()) / "VC" / "Auxiliary" / "Build" / "vcvars64.bat"
-                if cand.is_file():
-                    vcvars_candidates.append(cand)
-        except Exception:
-            pass
-    default_vc = Path(r"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat")
-    if default_vc.is_file() and default_vc not in vcvars_candidates:
-        vcvars_candidates.append(default_vc)
-    if not vcvars_candidates:
-        return None
-    vc = vcvars_candidates[0]
-    cached_env = _get_msvc_x64_env(vc)
-    if not cached_env:
-        return vc, {}, "", None
-    path_str = cached_env.get("Path") or cached_env.get("PATH") or ""
-    cl_in_env = shutil.which("cl", path=path_str) or ""
-    link_in_env = shutil.which("link", path=path_str)
-    if cl_in_env and not link_in_env:
-        cand_link = Path(cl_in_env).with_name("link.exe")
-        if cand_link.is_file():
-            link_in_env = str(cand_link)
-    return vc, cached_env, cl_in_env, link_in_env
-
-
-def compile_reconstructed_project(
-    project_dir: str | Path,
-    output_dll_name: str = "reconstructed_twin.dll",
-    source_rel: str = "src/reconstructed_project.c",
-) -> Dict[str, Any]:
-    """Compiles a reconstructed twin C project into a native shared library (.dll/.so) when a compiler is available."""
-    proj = Path(project_dir).resolve()
-    c_src = proj / source_rel
-    def_file = proj / "src" / "exports.def"
-    out_dll = proj / output_dll_name
-    if not c_src.is_file():
-        return {"compiled": False, "status": "missing_source", "error": f"Not found: {c_src}"}
-
-    # 1. Windows MSVC via vswhere.exe + vcvars64.bat + cl.exe
-    vc_info = _find_msvc_x64_toolchain()
-    if vc_info is not None:
-        vc, cached_env, cl_in_env, _ = vc_info
-        if cached_env and cl_in_env:
-            cmd_args = [cl_in_env, "/nologo", "/LD", "/O2", str(c_src), f"/Fe:{out_dll}"]
-            if def_file.is_file():
-                cmd_args.extend(["/link", f"/DEF:{def_file}"])
-            proc = subprocess.run(
-                cmd_args,
-                cwd=str(proj),
-                env=cached_env,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=120,
-            )
-        else:
-            def_arg = f'/link /DEF:"{def_file}"' if def_file.is_file() else ""
-            bat_body = (
-                "@echo off\n"
-                f'call "{vc}" >nul\n'
-                f'cd /d "{proj}"\n'
-                f'cl /nologo /LD /O2 "{c_src}" /Fe:"{out_dll}" {def_arg}\n'
-            )
-            with tempfile.NamedTemporaryFile("w", suffix=".bat", delete=False, encoding="utf-8") as tf:
-                tf.write(bat_body)
-                bat_path = Path(tf.name)
-            try:
-                proc = subprocess.run(
-                    ["cmd", "/c", str(bat_path)],
-                    capture_output=True,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    timeout=120,
-                )
-            finally:
-                bat_path.unlink(missing_ok=True)
-        ok = proc.returncode == 0 and out_dll.is_file() and out_dll.stat().st_size > 0
-        return {
-            "compiled": ok,
-            "status": "compiled" if ok else "compile_failed",
-            "compiler": "msvc_cl_x64",
-            "dll_path": str(out_dll) if ok else None,
-            "dll_size_bytes": out_dll.stat().st_size if ok else 0,
-            "dll_sha256": hashlib.sha256(out_dll.read_bytes()).hexdigest() if ok else None,
-            "returncode": proc.returncode,
-            "build_output": (proc.stdout + "\n" + proc.stderr).strip()[:1000],
-        }
-
-    # 2. Fallback: clang or gcc in PATH
-    cc = shutil.which("clang") or shutil.which("gcc")
-    if cc:
-        cmd = [cc, "-shared", "-O2", str(c_src), "-o", str(out_dll)]
-        if def_file.is_file():
-            cmd.append(str(def_file))
-        proc = subprocess.run(cmd, cwd=str(proj), capture_output=True, text=True, timeout=60)
-        ok = proc.returncode == 0 and out_dll.is_file() and out_dll.stat().st_size > 0
-        return {
-            "compiled": ok,
-            "status": "compiled" if ok else "compile_failed",
-            "compiler": Path(cc).name,
-            "dll_path": str(out_dll) if ok else None,
-            "dll_size_bytes": out_dll.stat().st_size if ok else 0,
-            "dll_sha256": hashlib.sha256(out_dll.read_bytes()).hexdigest() if ok else None,
-            "returncode": proc.returncode,
-            "build_output": (proc.stdout + "\n" + proc.stderr).strip()[:1000],
-        }
-
-    return {"compiled": False, "status": "no_compiler_found", "error": "Neither MSVC cl.exe nor clang/gcc found"}
-
-
-def compile_llvm_twin_project(
-    project_dir: str | Path,
-    output_dll_name: str = "reconstructed_twin_llvm.dll",
-) -> Dict[str, Any]:
-    """Links LLVM O3 COFF object (ir/reconstructed_project.obj) with MSVC runtime shim into a standalone native DLL."""
-    proj = Path(project_dir).resolve()
-    ir_obj = proj / "ir" / "reconstructed_project.obj"
-    shim_c = proj / "src" / "llvm_runtime_shim.c"
-    shim_obj = proj / "ir" / "llvm_runtime_shim.obj"
-    def_file = proj / "src" / "exports.def"
-    out_dll = proj / output_dll_name
-
-    if not ir_obj.is_file():
-        return {"compiled": False, "status": "missing_llvm_obj", "error": f"Not found: {ir_obj}"}
-    if not shim_c.is_file():
-        return {"compiled": False, "status": "missing_shim_source", "error": f"Not found: {shim_c}"}
-
-    vc_info = _find_msvc_x64_toolchain()
-    if vc_info is not None:
-        vc, cached_env, cl_in_env, link_in_env = vc_info
-        if cached_env and cl_in_env and link_in_env:
-            cl_cmd = [cl_in_env, "/nologo", "/c", "/O2", f"/Fo:{shim_obj}", str(shim_c)]
-            cl_proc = subprocess.run(
-                cl_cmd,
-                cwd=str(proj),
-                env=cached_env,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=120,
-            )
-            if cl_proc.returncode != 0 or not shim_obj.is_file():
-                return {
-                    "compiled": False,
-                    "status": "shim_compile_failed",
-                    "compiler": "llvm_o3_msvc_link",
-                    "returncode": cl_proc.returncode,
-                    "build_output": (cl_proc.stdout + "\n" + cl_proc.stderr).strip()[:1000],
-                }
-            link_cmd = [link_in_env, "/nologo", "/DLL", f"/OUT:{out_dll}"]
-            if def_file.is_file():
-                link_cmd.append(f"/DEF:{def_file}")
-            link_cmd.extend([str(ir_obj), str(shim_obj)])
-            proc = subprocess.run(
-                link_cmd,
-                cwd=str(proj),
-                env=cached_env,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=120,
-            )
-        else:
-            def_arg = f'/DEF:"{def_file}"' if def_file.is_file() else ""
-            bat_body = (
-                "@echo off\n"
-                f'call "{vc}" >nul\n'
-                f'cd /d "{proj}"\n'
-                f'cl /nologo /c /O2 /Fo:"{shim_obj}" "{shim_c}"\n'
-                f'if errorlevel 1 exit /b %errorlevel%\n'
-                f'link /nologo /DLL /OUT:"{out_dll}" {def_arg} "{ir_obj}" "{shim_obj}"\n'
-            )
-            with tempfile.NamedTemporaryFile("w", suffix=".bat", delete=False, encoding="utf-8") as tf:
-                tf.write(bat_body)
-                bat_path = Path(tf.name)
-            try:
-                proc = subprocess.run(
-                    ["cmd", "/c", str(bat_path)],
-                    capture_output=True,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    timeout=120,
-                )
-            finally:
-                bat_path.unlink(missing_ok=True)
-        ok = proc.returncode == 0 and out_dll.is_file() and out_dll.stat().st_size > 0
-        return {
-            "compiled": ok,
-            "status": "compiled" if ok else "link_failed",
-            "compiler": "llvm_o3_msvc_link",
-            "dll_path": str(out_dll) if ok else None,
-            "dll_size_bytes": out_dll.stat().st_size if ok else 0,
-            "dll_sha256": hashlib.sha256(out_dll.read_bytes()).hexdigest() if ok else None,
-            "returncode": proc.returncode,
-            "build_output": (proc.stdout + "\n" + proc.stderr).strip()[:1000],
-        }
-
-    cc = shutil.which("clang")
-    if cc:
-        cmd = [cc, "-shared", "-O2", str(ir_obj), str(shim_c), "-o", str(out_dll)]
-        if def_file.is_file():
-            cmd.append(str(def_file))
-        proc = subprocess.run(cmd, cwd=str(proj), capture_output=True, text=True, timeout=60)
-        ok = proc.returncode == 0 and out_dll.is_file() and out_dll.stat().st_size > 0
-        return {
-            "compiled": ok,
-            "status": "compiled" if ok else "link_failed",
-            "compiler": "llvm_o3_clang_link",
-            "dll_path": str(out_dll) if ok else None,
-            "dll_size_bytes": out_dll.stat().st_size if ok else 0,
-            "dll_sha256": hashlib.sha256(out_dll.read_bytes()).hexdigest() if ok else None,
-            "returncode": proc.returncode,
-            "build_output": (proc.stdout + "\n" + proc.stderr).strip()[:1000],
-        }
-
-    return {"compiled": False, "status": "no_linker_found", "error": "Neither MSVC link.exe nor clang found"}
-
-
-def _base_runtime_header_lines() -> List[str]:
-    """Shared AETHER_RT runtime header preamble reused by PE x86-64, PE ARM64, and ELF64 targets."""
-    return [
-        "/* Auto-Reconstructed Public Header by AetherRE Megazord (GEAR-23) */",
-        "#pragma once",
-        "#ifndef _CRT_SECURE_NO_WARNINGS",
-        "#define _CRT_SECURE_NO_WARNINGS",
-        "#endif",
-        "#include <ctype.h>",
-        "#include <math.h>",
-        "#include <stdint.h>",
-        "#include <stddef.h>",
-        "#include <stdio.h>",
-        "#include <stdlib.h>",
-        "#include <string.h>",
-        "",
-        "#ifdef __cplusplus",
-        'extern "C" {',
-        "#endif",
-        "#ifdef AETHER_RT_LINK",
-        "#define AETHER_RT",
-        "#else",
-        "#define AETHER_RT static inline",
-        "#endif",
-        "",
-        "AETHER_RT int64_t aether_malloc(int64_t size) {",
-        "    return (int64_t)(uintptr_t)malloc((size_t)(size > 0 ? size : 1));",
-        "}",
-        "AETHER_RT int64_t aether_free(int64_t ptr) {",
-        "    free((void*)(uintptr_t)ptr);",
-        "    return 0LL;",
-        "}",
-        "AETHER_RT int64_t aether_realloc(int64_t ptr, int64_t size) {",
-        "    return (int64_t)(uintptr_t)realloc((void*)(uintptr_t)ptr, (size_t)(size > 0 ? size : 1));",
-        "}",
-        "AETHER_RT int64_t aether_strlen(int64_t s) {",
-        "    if (!s) return 0LL;",
-        "    return (int64_t)strlen((const char*)(uintptr_t)s);",
-        "}",
-        "AETHER_RT int64_t aether_strcmp(int64_t a, int64_t b) {",
-        "    const char* sa = a ? (const char*)(uintptr_t)a : \"\";",
-        "    const char* sb = b ? (const char*)(uintptr_t)b : \"\";",
-        "    return (int64_t)strcmp(sa, sb);",
-        "}",
-        "AETHER_RT int64_t aether_strncmp(int64_t a, int64_t b, int64_t n) {",
-        "    if (!a || !b || n <= 0) return 0LL;",
-        "    return (int64_t)strncmp((const char*)(uintptr_t)a, (const char*)(uintptr_t)b, (size_t)n);",
-        "}",
-        "AETHER_RT int64_t aether_sprintf(int64_t buf, int64_t fmt, int64_t a1, int64_t a2, int64_t a3) {",
-        "    if (!buf || !fmt) return -1LL;",
-        "    const char* fs = (const char*)(uintptr_t)fmt;",
-        "    if (strchr(fs, 'g') || strchr(fs, 'f') || strchr(fs, 'e')) {",
-        "        double d_val = 0.0;",
-        "        memcpy(&d_val, &a1, 8);",
-        "        return (int64_t)sprintf((char*)(uintptr_t)buf, fs, d_val);",
-        "    }",
-        "    return (int64_t)sprintf((char*)(uintptr_t)buf, fs, a1, a2, a3);",
-        "}",
-        "AETHER_RT int64_t aether_sscanf(int64_t buf, int64_t fmt, int64_t a1, int64_t a2) {",
-        "    if (!buf || !fmt) return -1LL;",
-        "    (void)a2;",
-        "    return (int64_t)sscanf((const char*)(uintptr_t)buf, (const char*)(uintptr_t)fmt, (void*)(uintptr_t)a1);",
-        "}",
-        "AETHER_RT double aether_strtod(int64_t s, int64_t endptr) {",
-        "    if (!s) { if (endptr) *(char**)(uintptr_t)endptr = NULL; return 0.0; }",
-        "    return strtod((const char*)(uintptr_t)s, (char**)(uintptr_t)endptr);",
-        "}",
-        "AETHER_RT int64_t aether_printf(int64_t fmt, int64_t a1, int64_t a2, int64_t a3) {",
-        "    if (!fmt) return -1LL;",
-        "    const char* fs = (const char*)(uintptr_t)fmt;",
-        "    if (strchr(fs, 'g') || strchr(fs, 'f') || strchr(fs, 'e')) {",
-        "        double d_val = 0.0;",
-        "        memcpy(&d_val, &a1, 8);",
-        "        return (int64_t)printf(fs, d_val);",
-        "    }",
-        "    return (int64_t)printf(fs, a1, a2, a3);",
-        "}",
-        "AETHER_RT int64_t aether_pcmpeqb64(int64_t a, int64_t b) {",
-        "    uint64_t out = 0, ua = (uint64_t)a, ub = (uint64_t)b;",
-        "    for (int i = 0; i < 8; ++i) {",
-        "        if (((ua >> (i * 8)) & 0xffULL) == ((ub >> (i * 8)) & 0xffULL)) out |= (0xffULL << (i * 8));",
-        "    }",
-        "    return (int64_t)out;",
-        "}",
-        "AETHER_RT int64_t aether_pmaxud64(int64_t a, int64_t b) {",
-        "    uint32_t al = (uint32_t)a, bl = (uint32_t)b, ah = (uint32_t)((uint64_t)a >> 32), bh = (uint32_t)((uint64_t)b >> 32);",
-        "    return (int64_t)((uint64_t)(al > bl ? al : bl) | ((uint64_t)(ah > bh ? ah : bh) << 32));",
-        "}",
-        "AETHER_RT int64_t aether_pcmpeqd64(int64_t a, int64_t b) {",
-        "    uint32_t al = (uint32_t)a, bl = (uint32_t)b, ah = (uint32_t)((uint64_t)a >> 32), bh = (uint32_t)((uint64_t)b >> 32);",
-        "    return (int64_t)((al == bl ? 0xffffffffULL : 0ULL) | ((ah == bh ? 0xffffffffULL : 0ULL) << 32));",
-        "}",
-        "AETHER_RT int64_t aether_psubd64(int64_t a, int64_t b) {",
-        "    uint32_t al = (uint32_t)a - (uint32_t)b, ah = (uint32_t)((uint64_t)a >> 32) - (uint32_t)((uint64_t)b >> 32);",
-        "    return (int64_t)((uint64_t)al | ((uint64_t)ah << 32));",
-        "}",
-        "static int64_t _aether_xmm_hi = 0;",
-        "static inline int64_t aether_pshufd(int64_t lo, int64_t hi, int64_t imm8) {",
-        "    uint32_t L[4] = { (uint32_t)lo, (uint32_t)((uint64_t)lo >> 32), (uint32_t)hi, (uint32_t)((uint64_t)hi >> 32) };",
-        "    _aether_xmm_hi = (int64_t)((uint64_t)L[(imm8 >> 4) & 3] | ((uint64_t)L[(imm8 >> 6) & 3] << 32));",
-        "    return (int64_t)((uint64_t)L[imm8 & 3] | ((uint64_t)L[(imm8 >> 2) & 3] << 32));",
-        "}",
-        "AETHER_RT int64_t aether_tolower(int64_t c) {",
-        "    return (int64_t)tolower((int)(unsigned char)c);",
-        "}",
-        "AETHER_RT int64_t aether_isalpha(int64_t c) { return (int64_t)isalpha((int)(unsigned char)c); }",
-        "AETHER_RT int64_t aether_isdigit(int64_t c) { return (int64_t)isdigit((int)(unsigned char)c); }",
-        "AETHER_RT int64_t aether_isspace(int64_t c) { return (int64_t)isspace((int)(unsigned char)c); }",
-        "AETHER_RT int64_t aether_isxdigit(int64_t c) { return (int64_t)isxdigit((int)(unsigned char)c); }",
-        "AETHER_RT int64_t aether_memcpy(int64_t dst, int64_t src, int64_t size) {",
-        "    if (dst && src && size > 0) memcpy((void*)(uintptr_t)dst, (const void*)(uintptr_t)src, (size_t)size);",
-        "    return dst;",
-        "}",
-        "AETHER_RT int64_t aether_memset(int64_t dst, int64_t val, int64_t size) {",
-        "    if (dst && size > 0) memset((void*)(uintptr_t)dst, (int)(unsigned char)val, (size_t)size);",
-        "    return dst;",
-        "}",
-        "AETHER_RT double aether_pow(double a, double b) { return pow(a, b); }",
-        "AETHER_RT double aether_fmod(double a, double b) { return fmod(a, b); }",
-        "static int64_t _aether_div_rem = 0;",
-        "static inline int64_t aether_udiv64(int64_t hi, int64_t lo, int64_t d) {",
-        "    uint64_t ud = (uint64_t)d;",
-        "    if (!ud) { _aether_div_rem = 0; return 0; }",
-        "    if (hi == 0) { uint64_t ul = (uint64_t)lo; _aether_div_rem = (int64_t)(ul % ud); return (int64_t)(ul / ud); }",
-        "    uint64_t q = 0, r = (uint64_t)hi, u_lo = (uint64_t)lo;",
-        "    for (int i = 63; i >= 0; --i) {",
-        "        uint64_t c = r >> 63;",
-        "        r = (r << 1) | ((u_lo >> i) & 1ULL);",
-        "        if (c || r >= ud) { r -= ud; q |= (1ULL << i); }",
-        "    }",
-        "    _aether_div_rem = (int64_t)r;",
-        "    return (int64_t)q;",
-        "}",
-        "static inline int64_t aether_udiv32(int64_t hi, int64_t lo, int64_t d) {",
-        "    uint64_t ud = (uint64_t)(uint32_t)d;",
-        "    if (!ud) { _aether_div_rem = 0; return 0; }",
-        "    uint64_t un = ((uint64_t)(uint32_t)hi << 32) | (uint64_t)(uint32_t)lo;",
-        "    _aether_div_rem = (int64_t)(uint32_t)(un % ud);",
-        "    return (int64_t)(uint32_t)(un / ud);",
-        "}",
-        "static int64_t _aether_imul_hi = 0;",
-        "static inline int64_t aether_imul32(int64_t a, int64_t b) {",
-        "    int64_t prod = (int64_t)(int32_t)a * (int64_t)(int32_t)b;",
-        "    _aether_imul_hi = (int64_t)(uint32_t)((uint64_t)prod >> 32);",
-        "    return (int64_t)(uint32_t)prod;",
-        "}",
-        "static inline int64_t aether_imul64(int64_t a, int64_t b) {",
-        "    uint64_t ua = (uint64_t)(a < 0 ? -a : a), ub = (uint64_t)(b < 0 ? -b : b);",
-        "    uint64_t a_lo = ua & 0xffffffffULL, a_hi = ua >> 32;",
-        "    uint64_t b_lo = ub & 0xffffffffULL, b_hi = ub >> 32;",
-        "    uint64_t p0 = a_lo * b_lo, p1 = a_lo * b_hi, p2 = a_hi * b_lo, p3 = a_hi * b_hi;",
-        "    uint64_t mid = (p0 >> 32) + (p1 & 0xffffffffULL) + (p2 & 0xffffffffULL);",
-        "    uint64_t lo = (p0 & 0xffffffffULL) | (mid << 32);",
-        "    uint64_t hi = p3 + (p1 >> 32) + (p2 >> 32) + (mid >> 32);",
-        "    if ((a < 0) ^ (b < 0)) { lo = ~lo + 1ULL; hi = ~hi + (lo == 0 ? 1ULL : 0ULL); }",
-        "    _aether_imul_hi = (int64_t)hi;",
-        "    return (int64_t)lo;",
-        "}",
-        "static inline int64_t aether_umul32(int64_t a, int64_t b) {",
-        "    uint64_t prod = (uint64_t)(uint32_t)a * (uint64_t)(uint32_t)b;",
-        "    _aether_imul_hi = (int64_t)(uint32_t)(prod >> 32);",
-        "    return (int64_t)(uint32_t)prod;",
-        "}",
-        "static inline int64_t aether_umul64(int64_t a, int64_t b) {",
-        "    uint64_t ua = (uint64_t)a, ub = (uint64_t)b;",
-        "    uint64_t a_lo = ua & 0xffffffffULL, a_hi = ua >> 32;",
-        "    uint64_t b_lo = ub & 0xffffffffULL, b_hi = ub >> 32;",
-        "    uint64_t p0 = a_lo * b_lo, p1 = a_lo * b_hi, p2 = a_hi * b_lo, p3 = a_hi * b_hi;",
-        "    uint64_t mid = (p0 >> 32) + (p1 & 0xffffffffULL) + (p2 & 0xffffffffULL);",
-        "    uint64_t lo = (p0 & 0xffffffffULL) | (mid << 32);",
-        "    uint64_t hi = p3 + (p1 >> 32) + (p2 >> 32) + (mid >> 32);",
-        "    _aether_imul_hi = (int64_t)hi;",
-        "    return (int64_t)lo;",
-        "}",
-        "static inline int64_t aether_tzcnt32(int64_t v) {",
-        "    uint32_t uv = (uint32_t)v;",
-        "    if (!uv) return 32;",
-        "    int64_t c = 0; while ((uv & 1U) == 0) { uv >>= 1; ++c; }",
-        "    return c;",
-        "}",
-        "static inline int64_t aether_tzcnt64(int64_t v) {",
-        "    uint64_t uv = (uint64_t)v;",
-        "    if (!uv) return 64;",
-        "    int64_t c = 0; while ((uv & 1ULL) == 0) { uv >>= 1; ++c; }",
-        "    return c;",
-        "}",
-        "AETHER_RT int64_t aether_calloc(int64_t n, int64_t sz) {",
-        "    return (int64_t)(uintptr_t)calloc((size_t)(n > 0 ? n : 1), (size_t)(sz > 0 ? sz : 1));",
-        "}",
-        "AETHER_RT int64_t aether_rep_stos(int64_t dst, int64_t val, int64_t count, int64_t width) {",
-        "    if (!dst || count <= 0) return dst;",
-        "    uint64_t cnt = (uint64_t)count;",
-        "    if (width == 1) { memset((void*)(uintptr_t)dst, (int)(unsigned char)val, (size_t)cnt); return dst + (int64_t)cnt; }",
-        "    if (width == 2) { uint16_t *p = (uint16_t*)(uintptr_t)dst; for (uint64_t i = 0; i < cnt; ++i) p[i] = (uint16_t)val; return dst + (int64_t)(cnt * 2); }",
-        "    if (width == 4) { uint32_t *p = (uint32_t*)(uintptr_t)dst; for (uint64_t i = 0; i < cnt; ++i) p[i] = (uint32_t)val; return dst + (int64_t)(cnt * 4); }",
-        "    uint64_t *p = (uint64_t*)(uintptr_t)dst; for (uint64_t i = 0; i < cnt; ++i) p[i] = (uint64_t)val; return dst + (int64_t)(cnt * 8);",
-        "}",
-        "AETHER_RT int64_t aether_strcpy(int64_t dst, int64_t src) {",
-        "    if (dst && src) {",
-        "        size_t n = strlen((const char*)(uintptr_t)src) + 1;",
-        "        memcpy((void*)(uintptr_t)dst, (const void*)(uintptr_t)src, n);",
-        "    }",
-        "    return dst;",
-        "}",
-        "AETHER_RT int64_t aether_strrchr(int64_t s, int64_t ch) {",
-        "    return s ? (int64_t)(uintptr_t)strrchr((const char*)(uintptr_t)s, (int)(unsigned char)ch) : 0;",
-        "}",
-        "static inline int64_t aether_u32(uint64_t v) {",
-        "    return (int64_t)(uint32_t)v;",
-        "}",
-        "static inline int64_t aether_i32(int64_t v) {",
-        "    return (int64_t)(int32_t)v;",
-        "}",
-        "static inline int64_t aether_i16(int64_t v) {",
-        "    return (int64_t)(int16_t)(uint16_t)v;",
-        "}",
-        "static inline int64_t aether_i8(int64_t v) {",
-        "    return (int64_t)(int8_t)(uint8_t)v;",
-        "}",
-        "static inline int64_t aether_bt_cf(int64_t val, int64_t bit, int64_t mask) {",
-        "    return ((((uint64_t)val) >> ((uint64_t)bit & (uint64_t)mask)) & 1ULL) ? 0LL : 1LL;",
-        "}",
-        "static inline int64_t aether_bit_mask(int64_t bit, int64_t mask) {",
-        "    return (int64_t)(1ULL << ((uint64_t)bit & (uint64_t)mask));",
-        "}",
-        "#ifdef _MSC_VER",
-        "#define AETHER_TLS __declspec(thread)",
-        "#else",
-        "#define AETHER_TLS _Thread_local",
-        "#endif",
-        "static AETHER_TLS uint8_t aether_tls_stack[131072];",
-        "static AETHER_TLS int64_t _aether_sp = 0;",
-        "AETHER_RT int64_t aether_get_sp(void) {",
-        "    return _aether_sp;",
-        "}",
-        "AETHER_RT int64_t aether_set_sp(int64_t sp) {",
-        "    _aether_sp = sp;",
-        "    return sp;",
-        "}",
-        "AETHER_RT int64_t aether_stack_base(void) {",
-        "    return (_aether_sp ? _aether_sp : (int64_t)(uintptr_t)(aether_tls_stack + 114688)) - 8;",
-        "}",
-        "static inline int64_t aether_set_byte(int64_t reg, int cond) {",
-        "    return (reg & ~0xffLL) | (cond ? 1LL : 0LL);",
-        "}",
-        "AETHER_RT uint64_t aether_mem_read(int64_t addr, size_t width) {",
-        "    if (addr == 0) return 0ULL;",
-        "    const uint8_t* p = (const uint8_t*)(uintptr_t)addr;",
-        "    if (width == 1) return *(const uint8_t*)p;",
-        "    if (width == 2) return *(const uint16_t*)p;",
-        "    if (width == 4) return *(const uint32_t*)p;",
-        "    return *(const uint64_t*)p;",
-        "}",
-        "AETHER_RT void aether_mem_write(int64_t addr, size_t width, uint64_t val) {",
-        "    if (addr == 0) return;",
-        "    uint8_t* p = (uint8_t*)(uintptr_t)addr;",
-        "    if (width == 1) *(uint8_t*)p = (uint8_t)val;",
-        "    else if (width == 2) *(uint16_t*)p = (uint16_t)val;",
-        "    else if (width == 4) *(uint32_t*)p = (uint32_t)val;",
-        "    else *(uint64_t*)p = val;",
-        "}",
-        "static inline int64_t aether_f64_to_bits(double d) {",
-        "    int64_t b = 0;",
-        "    memcpy(&b, &d, 8);",
-        "    return b;",
-        "}",
-        "static inline double aether_bits_to_f64(int64_t b) {",
-        "    double d = 0.0;",
-        "    memcpy(&d, &b, 8);",
-        "    return d;",
-        "}",
-        "static inline int64_t aether_f64_comisd(int64_t a_bits, int64_t b_bits) {",
-        "    double a = aether_bits_to_f64(a_bits);",
-        "    double b = aether_bits_to_f64(b_bits);",
-        "    if (isnan(a) || isnan(b)) return -1LL;",
-        "    if (a == b) return 1LL;",
-        "    if (a > b) return 2LL;",
-        "    return 0LL;",
-        "}",
-        "static inline int64_t aether_f64_to_i32(int64_t b) {",
-        "    return (int64_t)(uint32_t)(int32_t)aether_bits_to_f64(b);",
-        "}",
-        "static inline int64_t aether_i32_to_f64(int64_t i) {",
-        "    return aether_f64_to_bits((double)(int32_t)i);",
-        "}",
-        "static inline int64_t aether_f32_to_f64(int64_t u32_bits) {",
-        "    float f = 0.0f;",
-        "    uint32_t u = (uint32_t)u32_bits;",
-        "    memcpy(&f, &u, 4);",
-        "    return aether_f64_to_bits((double)f);",
-        "}",
-        "static inline int64_t aether_f64_max(int64_t a, int64_t b) { return aether_bits_to_f64(a) > aether_bits_to_f64(b) ? a : b; }",
-        "static inline int64_t aether_f64_min(int64_t a, int64_t b) { return aether_bits_to_f64(a) < aether_bits_to_f64(b) ? a : b; }",
-        "static inline int64_t aether_f64_add(int64_t a, int64_t b) { return aether_f64_to_bits(aether_bits_to_f64(a) + aether_bits_to_f64(b)); }",
-        "static inline int64_t aether_f64_sub(int64_t a, int64_t b) { return aether_f64_to_bits(aether_bits_to_f64(a) - aether_bits_to_f64(b)); }",
-        "static inline int64_t aether_f64_mul(int64_t a, int64_t b) { return aether_f64_to_bits(aether_bits_to_f64(a) * aether_bits_to_f64(b)); }",
-        "static inline int64_t aether_f64_div(int64_t a, int64_t b) { return aether_f64_to_bits(aether_bits_to_f64(a) / aether_bits_to_f64(b)); }",
-        "",
-    ]
-
-
 def _reconstruct_multiarch_project(
     *,
     report: ProjectReconstructionReport,
@@ -3986,8 +3100,9 @@ def _reconstruct_multiarch_project(
     exec_ranges: List[Tuple[int, int]],
     ro_ranges: List[Tuple[int, int]],
     ro_reader: Any = None,
+    extra_rva_to_symbol: Optional[Dict[int, str]] = None,
 ) -> ProjectReconstructionReport:
-    """Shared ELF64 (x86_64 / AArch64) & PE64 ARM64 full-project reconstructor with C-Tree, Typed C & LLVM O3."""
+    """Shared ELF64 / Mach-O 64 (x86_64 / AArch64) & PE64 ARM64 full-project reconstructor with C-Tree, Typed C & LLVM O3."""
     inc_dir = out_root / "include"
     src_dir = out_root / "src"
     inc_dir.mkdir(parents=True, exist_ok=True)
@@ -4006,6 +3121,9 @@ def _reconstruct_multiarch_project(
     ]
     def_lines = ["LIBRARY reconstructed_twin", "EXPORTS"]
     rva_to_symbol: Dict[int, str] = {}
+    if extra_rva_to_symbol:
+        for e_va, e_nm in extra_rva_to_symbol.items():
+            rva_to_symbol[e_va] = _sanitize_c_ident(e_nm, f"sub_{e_va:x}")
     used_c_idents: Set[str] = set()
     clean_targets: List[Tuple[str, int, int, bytes, str]] = []
     for nm, ord_v, addr, raw_code in targets:
@@ -4125,11 +3243,21 @@ def _reconstruct_multiarch_project(
 
         records_list.append({
             "c_ident": c_ident,
+            "name": nm,
+            "rva": addr,
             "c_code": opt_c,
             "returns_double": False,
             "takes_double_arg0": False,
             "takes_double_arg1": False,
         })
+        fn_insn_dicts = [{"mnemonic": ln.split(":", 1)[1].strip().split()[0], "op_str": " ".join(ln.split(":", 1)[1].strip().split()[1:])} for ln in ins_preview if ":" in ln and len(ln.split(":", 1)[1].strip().split()) > 0]
+        proto_m = infer_function_prototype(
+            fn_insn_dicts,
+            function_name=c_ident,
+            arch=("aarch64" if arch == "aarch64" else "x86_64"),
+            file_format=("pe" if "pe_" in report.project_kind else "elf"),
+        )
+        report.recovered_prototypes[c_ident] = proto_m
         rec_fn = ReconstructedFunction(
             name=nm, ordinal=ord_v, rva=addr, size_bytes=sz_bytes,
             instruction_count=ins_count, lifted_c_code=opt_c,
@@ -4140,6 +3268,8 @@ def _reconstruct_multiarch_project(
             disasm_preview=ins_preview,
             structured_c_code=structured_src, ctree_strategy=ctree_strategy,
             goto_elimination_rate_pct=goto_elim_pct, natural_loops_structured=loops_structured,
+            recovered_prototype=proto_m.get("typed_c_signature"),
+            estimated_param_count=int(proto_m.get("estimated_param_count", 0)),
         )
         report.functions.append(asdict(rec_fn))
         if is_lifted:
@@ -4201,8 +3331,18 @@ def _reconstruct_multiarch_project(
         "",
     ])
 
+    interproc_structs = propagate_interprocedural_structs(
+        records_list,
+        struct_res.get("structs", []),
+        arch=arch,
+    )
     structured_annotated = annotate_c_with_struct_fields("\n".join(structured_source_lines), struct_res.get("structs", []))
-    typed_decompiled = emit_typed_c_from_structured(structured_annotated, struct_res.get("structs", []))
+    typed_decompiled = emit_typed_c_from_structured(
+        structured_annotated,
+        struct_res.get("structs", []),
+        function_param_structs=interproc_structs,
+        function_prototypes=report.recovered_prototypes,
+    )
     (inc_dir / "reconstructed_api.h").write_text("\n".join(header_lines), encoding="utf-8")
     (src_dir / "reconstructed_project.c").write_text("\n".join(c_source_lines), encoding="utf-8")
     (src_dir / "reconstructed_structured.c").write_text(structured_annotated, encoding="utf-8")
@@ -4395,6 +3535,7 @@ def reconstruct_project(
             )
 
         unwind_res = parse_win64_unwind_table(pe, data)
+        unwind_records = unwind_res.get("records_by_rva", {})
         report.win64_unwind_functions = int(unwind_res.get("total_functions", 0))
         report.win64_ehandlers_count = int(unwind_res.get("ehandlers_count", 0))
 
@@ -5325,6 +4466,17 @@ def reconstruct_project(
                     else ("structured_mem_or_call" if has_mem_or_calls else "partial")
                 )
             )
+            unwind_rec = unwind_records.get(rva)
+            frame_sz = int(getattr(unwind_rec, "stack_frame_bytes", 0)) if unwind_rec is not None else 0
+            fn_insn_dicts = [{"mnemonic": m, "op_str": o} for _, m, o in insns]
+            proto_info = infer_function_prototype(
+                fn_insn_dicts,
+                function_name=c_ident,
+                arch="x86_64",
+                file_format="pe",
+                stack_frame_bytes=frame_sz,
+            )
+            report.recovered_prototypes[c_ident] = proto_info
             rec_fn = ReconstructedFunction(
                 name=fn_name,
                 ordinal=ordinal,
@@ -5348,6 +4500,8 @@ def reconstruct_project(
                 returns_double=returns_double,
                 takes_double_arg0=takes_double_arg0,
                 ghidra_reference_c=ghidra_ref_c,
+                recovered_prototype=proto_info.get("typed_c_signature"),
+                estimated_param_count=int(proto_info.get("estimated_param_count", 0)),
             )
             report.functions.append(asdict(rec_fn))
             if is_lifted:
@@ -5535,6 +4689,11 @@ def reconstruct_project(
             ]
         )
 
+        interproc_structs = propagate_interprocedural_structs(
+            records_list,
+            struct_res.get("structs", []),
+            arch="x86_64",
+        )
         structured_annotated = annotate_c_with_struct_fields(
             "\n".join(structured_source_lines),
             struct_res.get("structs", []),
@@ -5542,6 +4701,8 @@ def reconstruct_project(
         typed_decompiled = emit_typed_c_from_structured(
             structured_annotated,
             struct_res.get("structs", []),
+            function_param_structs=interproc_structs,
+            function_prototypes=report.recovered_prototypes,
         )
         (inc_dir / "reconstructed_api.h").write_text("\n".join(header_lines), encoding="utf-8")
         (src_dir / "reconstructed_project.c").write_text("\n".join(c_source_lines), encoding="utf-8")
@@ -5608,6 +4769,8 @@ def reconstruct_project(
         elf_meta = extract_elf64_metadata(data)
         if elf_meta and elf_meta["arch"] in ("x86_64", "aarch64"):
             arch = elf_meta["arch"]
+            dwarf_info = analyze_elf_and_dwarf(data)
+            dwarf_types = len(dwarf_info.get("dwarf_types", []))
             report = ProjectReconstructionReport(
                 source_artifact=str(t_path),
                 source_sha256=sha256,
@@ -5616,6 +4779,7 @@ def reconstruct_project(
                 output_project_dir=str(out_root),
                 imported_dlls=list(elf_meta.get("imported_libs", [])),
                 eh_frame_bytes=int(elf_meta.get("eh_frame_bytes", 0)),
+                dwarf_types_count=dwarf_types,
             )
             targets_elf = [
                 (ex["name"], ex["ordinal"], ex["rva"], ex["code"])
@@ -5628,11 +4792,37 @@ def reconstruct_project(
                 targets=targets_elf,
                 exec_ranges=elf_meta.get("exec_ranges", []),
                 ro_ranges=elf_meta.get("ro_ranges", []),
+                extra_rva_to_symbol=elf_meta.get("plt_symbols"),
             )
+
+    # Case 4: Native Mach-O 64 (.dylib / Mach-O executable / Universal Fat: x86_64 & arm64)
+    macho_meta = extract_macho64_metadata(data)
+    if macho_meta and macho_meta["arch"] in ("x86_64", "aarch64"):
+        arch_m = macho_meta["arch"]
+        report = ProjectReconstructionReport(
+            source_artifact=str(t_path),
+            source_sha256=sha256,
+            project_kind=f"macho64_{arch_m}",
+            architecture=f"macho_{arch_m}",
+            output_project_dir=str(out_root),
+            imported_dlls=list(macho_meta.get("imported_libs", [])),
+        )
+        targets_macho = [
+            (ex["name"], ex["ordinal"], ex["rva"], ex["code"])
+            for ex in macho_meta.get("exports", [])
+        ]
+        return _reconstruct_multiarch_project(
+            report=report,
+            out_root=out_root,
+            arch=arch_m,
+            targets=targets_macho,
+            exec_ranges=macho_meta.get("exec_ranges", []),
+            ro_ranges=macho_meta.get("ro_ranges", []),
+        )
 
     return ProjectReconstructionReport(
         status="unsupported_format",
         source_artifact=str(t_path),
         source_sha256=sha256,
-        error="Artifact must be a PE (x86_64/ARM64), ELF64 (x86_64/AArch64), or Electron ASAR archive.",
+        error="Artifact must be a PE (x86_64/ARM64), ELF64 (x86_64/AArch64), Mach-O 64, or Electron ASAR archive.",
     )

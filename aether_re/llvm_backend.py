@@ -103,6 +103,8 @@ _EXT_HELPER_SIGS: Dict[str, Tuple[Tuple[ir.Type, ...], ir.Type]] = {
 
 _U64_MASK = 0xFFFFFFFFFFFFFFFF
 _LL_SUFFIX_RE = re.compile(r"\b(0x[0-9a-fA-F]+|\d+)U?LL\b")
+_IDENT_SCAN_RE = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)\b")
+_AST_EVAL_CACHE: Dict[str, ast.AST] = {}
 
 
 def _clean_expr_for_ast(expr: str) -> str:
@@ -113,6 +115,16 @@ def _clean_expr_for_ast(expr: str) -> str:
         .replace("0xffffLL", "0xffff")
     )
     return _LL_SUFFIX_RE.sub(r"\1", s).strip()
+
+
+def _parse_ast_eval_cached(cleaned_expr: str) -> ast.AST:
+    cached = _AST_EVAL_CACHE.get(cleaned_expr)
+    if cached is None:
+        if len(_AST_EVAL_CACHE) > 16384:
+            _AST_EVAL_CACHE.clear()
+        cached = ast.parse(cleaned_expr, mode="eval").body
+        _AST_EVAL_CACHE[cleaned_expr] = cached
+    return cached
 
 
 def _i64_const(val: int) -> ir.Constant:
@@ -145,6 +157,8 @@ class _FunctionLowerer:
         takes_double_arg0: bool,
         takes_double_arg1: bool,
         extra_slots: List[str],
+        *,
+        inline_direct_memory: bool = False,
     ) -> None:
         self.module = module
         self.fn = fn
@@ -155,6 +169,7 @@ class _FunctionLowerer:
         self.takes_double_arg0 = takes_double_arg0
         self.takes_double_arg1 = takes_double_arg1
         self.extra_slots = extra_slots
+        self.inline_direct_memory = inline_direct_memory
         self.allocas: Dict[str, ir.AllocaInstr] = {}
         self.builder: ir.IRBuilder
         self._block_counter = 0
@@ -471,6 +486,85 @@ class _FunctionLowerer:
             self.builder.store(new_hi, self.globals_map["_aether_xmm_hi"])
             return new_lo
 
+        # 3b. Native LLVM SIMD Vector IR for packed integer helpers (zero helper-call overhead)
+        if fname == "aether_pcmpeqb64" and len(arg_nodes) == 2:
+            a = self._ensure_i64(self._eval_ast(arg_nodes[0]))
+            b = self._ensure_i64(self._eval_ast(arg_nodes[1]))
+            va = self.builder.bitcast(a, ir.VectorType(_I8, 8))
+            vb = self.builder.bitcast(b, ir.VectorType(_I8, 8))
+            cmp_v = self.builder.icmp_unsigned("==", va, vb)
+            mask_v = self.builder.sext(cmp_v, ir.VectorType(_I8, 8))
+            return self.builder.bitcast(mask_v, _I64)
+        if fname == "aether_pcmpeqd64" and len(arg_nodes) == 2:
+            a = self._ensure_i64(self._eval_ast(arg_nodes[0]))
+            b = self._ensure_i64(self._eval_ast(arg_nodes[1]))
+            va = self.builder.bitcast(a, ir.VectorType(_I32, 2))
+            vb = self.builder.bitcast(b, ir.VectorType(_I32, 2))
+            cmp_v = self.builder.icmp_unsigned("==", va, vb)
+            mask_v = self.builder.sext(cmp_v, ir.VectorType(_I32, 2))
+            return self.builder.bitcast(mask_v, _I64)
+        if fname == "aether_pmaxud64" and len(arg_nodes) == 2:
+            a = self._ensure_i64(self._eval_ast(arg_nodes[0]))
+            b = self._ensure_i64(self._eval_ast(arg_nodes[1]))
+            va = self.builder.bitcast(a, ir.VectorType(_I32, 2))
+            vb = self.builder.bitcast(b, ir.VectorType(_I32, 2))
+            gt_v = self.builder.icmp_unsigned(">", va, vb)
+            max_v = self.builder.select(gt_v, va, vb)
+            return self.builder.bitcast(max_v, _I64)
+        if fname == "aether_psubd64" and len(arg_nodes) == 2:
+            a = self._ensure_i64(self._eval_ast(arg_nodes[0]))
+            b = self._ensure_i64(self._eval_ast(arg_nodes[1]))
+            va = self.builder.bitcast(a, ir.VectorType(_I32, 2))
+            vb = self.builder.bitcast(b, ir.VectorType(_I32, 2))
+            return self.builder.bitcast(self.builder.sub(va, vb), _I64)
+
+        # 3c. Optional null-guarded direct native pointer memory load/store (inline_direct_memory=True)
+        if self.inline_direct_memory and fname == "aether_mem_read" and len(arg_nodes) == 2:
+            addr = self._ensure_i64(self._eval_ast(arg_nodes[0]))
+            w_node = arg_nodes[1]
+            width = int(w_node.value) if isinstance(w_node, ast.Constant) and isinstance(w_node.value, int) else 8
+            if width in (1, 2, 4, 8):
+                self._block_counter += 1
+                mid = self._block_counter
+                ok_bb = self.fn.append_basic_block(f"mem_r_ok_{mid}")
+                null_bb = self.fn.append_basic_block(f"mem_r_null_{mid}")
+                done_bb = self.fn.append_basic_block(f"mem_r_done_{mid}")
+                is_nz = self.builder.icmp_signed("!=", addr, _i64_const(0))
+                self.builder.cbranch(is_nz, ok_bb, null_bb)
+                self.builder.position_at_end(ok_bb)
+                elem_ty = _I8 if width == 1 else (_I16 if width == 2 else (_I32 if width == 4 else _I64))
+                ptr_v = self.builder.inttoptr(addr, elem_ty.as_pointer())
+                raw_ld = self.builder.load(ptr_v)
+                val_ok = raw_ld if elem_ty == _I64 else self.builder.zext(raw_ld, _I64)
+                self.builder.branch(done_bb)
+                self.builder.position_at_end(null_bb)
+                self.builder.branch(done_bb)
+                self.builder.position_at_end(done_bb)
+                phi = self.builder.phi(_I64)
+                phi.add_incoming(val_ok, ok_bb)
+                phi.add_incoming(_i64_const(0), null_bb)
+                return phi
+        if self.inline_direct_memory and fname == "aether_mem_write" and len(arg_nodes) == 3:
+            addr = self._ensure_i64(self._eval_ast(arg_nodes[0]))
+            w_node = arg_nodes[1]
+            val = self._ensure_i64(self._eval_ast(arg_nodes[2]))
+            width = int(w_node.value) if isinstance(w_node, ast.Constant) and isinstance(w_node.value, int) else 8
+            if width in (1, 2, 4, 8):
+                self._block_counter += 1
+                mid = self._block_counter
+                ok_bb = self.fn.append_basic_block(f"mem_w_ok_{mid}")
+                done_bb = self.fn.append_basic_block(f"mem_w_done_{mid}")
+                is_nz = self.builder.icmp_signed("!=", addr, _i64_const(0))
+                self.builder.cbranch(is_nz, ok_bb, done_bb)
+                self.builder.position_at_end(ok_bb)
+                elem_ty = _I8 if width == 1 else (_I16 if width == 2 else (_I32 if width == 4 else _I64))
+                ptr_v = self.builder.inttoptr(addr, elem_ty.as_pointer())
+                val_st = val if elem_ty == _I64 else self.builder.trunc(val, elem_ty)
+                self.builder.store(val_st, ptr_v)
+                self.builder.branch(done_bb)
+                self.builder.position_at_end(done_bb)
+                return _i64_const(0)
+
         # 4. Internal/exported function call or switch table tbl_*
         if fname in self.fn_sigs:
             callee = self.module.globals.get(fname)
@@ -522,7 +616,7 @@ class _FunctionLowerer:
         if st.startswith("if (") and ") {" in st and st.endswith("}"):
             cond_s = _clean_expr_for_ast(st[4 : st.index(") {")].strip())
             body_s = st[st.index(") {") + 3 : -1].strip()
-            cond_val = self._ensure_i1(self._eval_ast(ast.parse(cond_s, mode="eval").body))
+            cond_val = self._ensure_i1(self._eval_ast(_parse_ast_eval_cached(cond_s)))
             self._block_counter += 1
             cid = self._block_counter
             then_bb = self.fn.append_basic_block(f"cmov_then_{cid}")
@@ -543,7 +637,7 @@ class _FunctionLowerer:
             ptr = self.allocas.get(lhs) or self.globals_map.get(lhs)
             if ptr is not None:
                 cur_v = self.builder.load(ptr)
-                rv = self._ensure_i64(self._eval_ast(ast.parse(rhs, mode="eval").body))
+                rv = self._ensure_i64(self._eval_ast(_parse_ast_eval_cached(rhs)))
                 nv = self.builder.add(cur_v, rv) if op == "+=" else self.builder.sub(cur_v, rv)
                 self.builder.store(nv, ptr)
             return
@@ -552,7 +646,7 @@ class _FunctionLowerer:
         m_as = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+)$", st)
         if m_as:
             lhs, rhs = m_as.group(1), _clean_expr_for_ast(m_as.group(2))
-            rv = self._ensure_i64(self._eval_ast(ast.parse(rhs, mode="eval").body))
+            rv = self._ensure_i64(self._eval_ast(_parse_ast_eval_cached(rhs)))
             if lhs == "_aether_sp":
                 self.builder.call(self._get_ext("aether_set_sp", (_I64,), _I64), [rv])
                 return
@@ -563,15 +657,27 @@ class _FunctionLowerer:
 
         # Bare expression statement (e.g. aether_mem_write(...))
         cleaned = _clean_expr_for_ast(st)
-        self._eval_ast(ast.parse(cleaned, mode="eval").body)
+        self._eval_ast(_parse_ast_eval_cached(cleaned))
 
     def lower(self, blocks: List[Any]) -> None:
         entry_bb = self.fn.append_basic_block("alloc_entry")
         self.builder = ir.IRBuilder(entry_bb)
 
-        # Allocate local slots matching reconstructed C declarations
+        # Prune allocas to only variables used in blocks plus ABI arg/return slots
+        used_vars: set[str] = {"rax", "rcx", "rdx", "r8", "r9"}
+        if self.returns_double or self.takes_double_arg0 or self.takes_double_arg1:
+            used_vars.add("xmm0")
+            used_vars.add("xmm1")
+        for b in blocks:
+            for st in b.stmts:
+                used_vars.update(_IDENT_SCAN_RE.findall(st))
+            if b.term_cond:
+                used_vars.update(_IDENT_SCAN_RE.findall(b.term_cond))
+            if b.term_ret:
+                used_vars.update(_IDENT_SCAN_RE.findall(b.term_ret))
         for vname in _TRACKED_LOCALS:
-            self.allocas[vname] = self.builder.alloca(_I64, name=vname)
+            if vname in used_vars:
+                self.allocas[vname] = self.builder.alloca(_I64, name=vname)
         for sv in self.extra_slots:
             self.allocas[sv] = self.builder.alloca(_I64, name=sv)
 
@@ -637,7 +743,7 @@ class _FunctionLowerer:
             elif b.term_kind == "cbranch":
                 tgt_bb = lbl_to_bb.get(b.term_target)
                 cond_s = _clean_expr_for_ast(b.term_cond)
-                cond_v = self._ensure_i1(self._eval_ast(ast.parse(cond_s, mode="eval").body))
+                cond_v = self._ensure_i1(self._eval_ast(_parse_ast_eval_cached(cond_s)))
                 if tgt_bb is not None and fall_bb is not None:
                     self.builder.cbranch(cond_v, tgt_bb, fall_bb)
                 elif tgt_bb is not None:
@@ -671,6 +777,7 @@ def build_llvm_module_from_records(
     unresolved_rvas: Optional[List[int]] = None,
     rva_to_symbol: Optional[Dict[int, str]] = None,
     module_name: str = "reconstructed_twin",
+    inline_direct_memory: bool = False,
 ) -> Tuple[ir.Module, Dict[str, Any]]:
     """Builds an LLVM IR module lowering all reconstructed functions and switch tables."""
     _ensure_llvm_init()
@@ -746,13 +853,18 @@ def build_llvm_module_from_records(
         c_ident = rec["c_ident"]
         c_code = rec["c_code"]
         ir_fn = mod.globals[c_ident]
-        parsed = _parse_c_function(c_code)
-        if parsed is None:
-            bb = ir_fn.append_basic_block("entry")
-            b = ir.IRBuilder(bb)
-            b.ret(ir.Constant(_F64, 0.0) if rec.get("returns_double") else _i64_const(0))
-            continue
-        header_lines, blocks, _ = parsed
+        ir_bundle = rec.get("ir_bundle")
+        if ir_bundle and ir_bundle.get("blocks"):
+            header_lines = ir_bundle["header_lines"]
+            blocks = ir_bundle["blocks"]
+        else:
+            parsed = _parse_c_function(c_code)
+            if parsed is None:
+                bb = ir_fn.append_basic_block("entry")
+                b = ir.IRBuilder(bb)
+                b.ret(ir.Constant(_F64, 0.0) if rec.get("returns_double") else _i64_const(0))
+                continue
+            header_lines, blocks, _ = parsed
         extra_slots = sorted(set(re.findall(r"\baether_slot_[A-Za-z0-9_]+\b", "\n".join(header_lines))))
         try:
             lowerer = _FunctionLowerer(
@@ -765,6 +877,7 @@ def build_llvm_module_from_records(
                 bool(rec.get("takes_double_arg0")),
                 bool(rec.get("takes_double_arg1")),
                 extra_slots,
+                inline_direct_memory=inline_direct_memory,
             )
             lowerer.lower(blocks)
             lowered_count += 1
@@ -790,6 +903,7 @@ def compile_project_to_llvm_ir(
     unresolved_rvas: Optional[List[int]] = None,
     rva_to_symbol: Optional[Dict[int, str]] = None,
     opt_level: int = 3,
+    inline_direct_memory: bool = False,
 ) -> Dict[str, Any]:
     """Emits LLVM IR (.ll), verifies it, runs LLVM O3 PassBuilder, and emits Win64 COFF (.obj)."""
     _ensure_llvm_init()
@@ -799,6 +913,7 @@ def compile_project_to_llvm_ir(
         ro_table_fns_map=ro_table_fns_map,
         unresolved_rvas=unresolved_rvas,
         rva_to_symbol=rva_to_symbol,
+        inline_direct_memory=inline_direct_memory,
     )
 
     raw_ll_path = out_ir_dir / "reconstructed_project.ll"

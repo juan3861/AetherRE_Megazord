@@ -8,6 +8,7 @@ Bitvector arithmetic and comparisons use Z3's signed word semantics.
 from __future__ import annotations
 
 import ast
+import re
 from typing import Any, Sequence
 
 SCHEMA = "smt-solver-report.v1"
@@ -168,3 +169,45 @@ def solve_constraints_smt(
             witness[name] = observed.as_long()
     report.update(status="SAT", is_satisfiable=True, model=witness)
     return report
+
+
+_SMT_ULL_RE = re.compile(r"\b(0x[0-9a-fA-F]+|\d+)U?LL\b")
+
+
+def _c_expr_to_smt_expr(expr: str) -> str:
+    s = expr.strip()
+    s = s.replace("(int64_t)", "").replace("(uint64_t)", "").replace("(long long)", "").replace("(unsigned long long)", "")
+    s = _SMT_ULL_RE.sub(r"\1", s)
+    s = s.replace("&&", " and ").replace("||", " or ")
+    s = re.sub(r"(?<![=!<>])!(?!=)", " not ", s)
+    return s
+
+
+def prove_opaque_predicate_bv64(condition_str: str, *, timeout_ms: int = 150) -> dict[str, Any]:
+    """Proves whether a C/Python boolean expression is a 64-bit bitvector tautology or contradiction via Z3."""
+    if not _HAS_Z3:
+        return {"proved": False, "truth_value": None, "status": "z3_unavailable"}
+    smt_cond = _c_expr_to_smt_expr(condition_str)
+    # 1. Check if `not cond` is UNSAT -> always True
+    res_true = solve_constraints_smt([f"not ({smt_cond})"], bitvector_width=64, timeout_ms=timeout_ms, resource_limit=200000)
+    if res_true.get("status") == "UNSAT":
+        return {"proved": True, "truth_value": True, "status": "TAUTOLOGY_UNSAT"}
+    # 2. Check if `cond` is UNSAT -> always False
+    res_false = solve_constraints_smt([smt_cond], bitvector_width=64, timeout_ms=timeout_ms, resource_limit=200000)
+    if res_false.get("status") == "UNSAT":
+        return {"proved": True, "truth_value": False, "status": "CONTRADICTION_UNSAT"}
+    return {"proved": False, "truth_value": None, "status": res_false.get("status", "UNKNOWN")}
+
+
+def prove_bv64_equivalence(expr_a: str, expr_b: str, *, timeout_ms: int = 250) -> dict[str, Any]:
+    """Proves two 64-bit integer expressions are semantically identical across all 2^64 inputs via Z3."""
+    if not _HAS_Z3:
+        return {"proved_equivalent": False, "status": "z3_unavailable"}
+    pa = _c_expr_to_smt_expr(expr_a)
+    pb = _c_expr_to_smt_expr(expr_b)
+    res = solve_constraints_smt([f"({pa}) != ({pb})"], bitvector_width=64, timeout_ms=timeout_ms, resource_limit=300000)
+    if res.get("status") == "UNSAT":
+        return {"proved_equivalent": True, "status": "PROVED_EQUIVALENT"}
+    if res.get("status") == "SAT":
+        return {"proved_equivalent": False, "status": "COUNTEREXAMPLE", "counterexample": res.get("model", {})}
+    return {"proved_equivalent": False, "status": res.get("status", "UNKNOWN")}

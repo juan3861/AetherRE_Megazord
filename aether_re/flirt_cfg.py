@@ -7,8 +7,10 @@ structural + canonical mnemonic-skeleton analysis over Win64 .pdata functions
 from __future__ import annotations
 
 import hashlib
+import json
 import struct
 from dataclasses import dataclass, asdict
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 import capstone
@@ -202,6 +204,8 @@ def extract_cfg_signature(
     )
 
 
+_DEFAULT_FLIRT_DB_PATH = Path(__file__).resolve().parent / "data" / "flirt_signatures.json"
+
 _CANONICAL_CFG_SKELETONS: Dict[str, Tuple[str, str]] = {
     "3cce1ff86dd779ef": ("noop", "cfg_flirt_security_check_cookie"),
     "cd55e5a856e97649": ("noop", "cfg_flirt_chkstk"),
@@ -210,6 +214,60 @@ _CANONICAL_CFG_SKELETONS: Dict[str, Tuple[str, str]] = {
     "2c901fac507c8f19": ("memset", "cfg_flirt_memset_graph"),
     "d2b84e52f5616233": ("strlen", "cfg_flirt_strlen_graph"),
 }
+
+
+def load_flirt_signature_bank(db_path: str | Path | None = None) -> Dict[str, Tuple[str, str]]:
+    """Loads persisted CFG-FLIRT signature bank and merges with built-in canonical CRT hashes."""
+    bank = dict(_CANONICAL_CFG_SKELETONS)
+    path = Path(db_path) if db_path else _DEFAULT_FLIRT_DB_PATH
+    if path.is_file():
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            for row in payload.get("signatures", []):
+                sk = str(row.get("skeleton_sha256", "")).strip()
+                cn = str(row.get("crt_name", "")).strip()
+                st = str(row.get("strategy", "cfg_flirt_db")).strip()
+                if sk and cn:
+                    bank[sk] = (cn, st)
+        except Exception:
+            pass
+    return bank
+
+
+def register_cfg_signature(
+    skeleton_sha256: str,
+    crt_name: str,
+    strategy: str = "cfg_flirt_custom",
+    *,
+    arch: str = "x86_64",
+    toolchain: str = "custom",
+    db_path: str | Path | None = None,
+) -> Dict[str, Any]:
+    """Registers a new CFG mnemonic-skeleton FLIRT signature into the live bank (and JSON DB if path given)."""
+    _CANONICAL_CFG_SKELETONS[skeleton_sha256] = (crt_name, strategy)
+    if db_path is not None:
+        p = Path(db_path)
+        data = {"schema": "aetherre-flirt-cfg-db.v2", "architectures": ["x86_64", "aarch64"], "signatures": []}
+        if p.is_file():
+            try:
+                data = json.loads(p.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+        sigs = [r for r in data.get("signatures", []) if r.get("skeleton_sha256") != skeleton_sha256]
+        sigs.append({
+            "skeleton_sha256": skeleton_sha256,
+            "crt_name": crt_name,
+            "strategy": strategy,
+            "arch": arch,
+            "toolchain": toolchain,
+        })
+        data["signatures"] = sigs
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    return {"skeleton_sha256": skeleton_sha256, "crt_name": crt_name, "strategy": strategy, "registered": True}
+
+
+_CANONICAL_CFG_SKELETONS.update(load_flirt_signature_bank())
 
 
 def _classify_cfg_signature(

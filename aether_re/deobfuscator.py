@@ -11,6 +11,8 @@ from __future__ import annotations
 import re
 from typing import Any, Sequence
 
+from aether_re.smt_solver import prove_opaque_predicate_bv64
+
 SCHEMA = "deobfuscation-report.v1"
 
 # Padrões canônicos de simplificação MBA
@@ -121,6 +123,22 @@ def detect_opaque_predicate(condition_str: str) -> dict[str, Any]:
         return {"is_opaque": True, "static_truth_value": True, "rule": "mba_reduction_true", "original_condition": condition_str}
     if simplified in {"0", "false", "False"}:
         return {"is_opaque": True, "static_truth_value": False, "rule": "mba_reduction_false", "original_condition": condition_str}
+
+    # Fallback formal via Z3 bitvector-64 quando há álgebra suspeita (sem chamadas externas)
+    if (
+        len(simplified) <= 128
+        and "aether_" not in simplified
+        and any(op in simplified for op in ("^", "%", "&", "|", "*"))
+        and any(cmp_op in simplified for cmp_op in ("==", "!=", "<", ">"))
+    ):
+        z3_res = prove_opaque_predicate_bv64(simplified, timeout_ms=150)
+        if z3_res.get("proved"):
+            return {
+                "is_opaque": True,
+                "static_truth_value": bool(z3_res["truth_value"]),
+                "rule": f"z3_{z3_res['status'].lower()}",
+                "original_condition": condition_str,
+            }
 
     return {"is_opaque": False, "static_truth_value": None, "rule": "dynamic", "original_condition": condition_str}
 

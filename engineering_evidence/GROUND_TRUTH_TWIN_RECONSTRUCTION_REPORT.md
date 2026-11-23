@@ -6,12 +6,12 @@ Verificação empírica real (sem mocks): reconstrução de binários MSVC x64 `
 
 | Binário Real | Alvos | 100% Lifted | C-Tree | Win64 Unwind / SEH | FLIRT CFG | Congruência | MSVC + Typed C DLL | LLVM O3 DLL (COFF Link) | Structs | Tempo (ms) |
 |---|---:|---:|---:|---|---|---:|---|---|---:|---:|
-| `cjson.dll` | 78 | 78 | 78 | 510 (73 SEH) | 8 | **100.0%** | PASS (427008 B / typed 420864 B) | PASS (476672 B / obj 161945 B) | 7 | 14556.9 |
-| `cjson_utils.dll` | 92 | 92 | 92 | 547 (73 SEH) | 8 | **100.0%** | PASS (448000 B / typed 440320 B) | PASS (498688 B / obj 193718 B) | 7 | 30526.09 |
-| `tinyexpr.dll` | 5 | 5 | 5 | 528 (69 SEH) | 7 | **100.0%** | PASS (464896 B / typed 461312 B) | PASS (480768 B / obj 106011 B) | 7 | 5219.63 |
-| `poly_test.dll` | 10 | 10 | 10 | 332 (60 SEH) | 7 | **100.0%** | PASS (235520 B / typed 235520 B) | PASS (245248 B / obj 3666 B) | 1 | 691.97 |
-| `multi_poly.dll` | 11 | 11 | 11 | 333 (60 SEH) | 7 | **100.0%** | PASS (236032 B / typed 236032 B) | PASS (245248 B / obj 3830 B) | 1 | 732.21 |
-| `lz4.dll` | 44 | 44 | 44 | 428 (62 SEH) | 7 | **100.0%** | PASS (423424 B / typed 415744 B) | PASS (465920 B / obj 243309 B) | 7 | 19836.35 |
+| `cjson.dll` | 78 | 78 | 78 | 510 (73 SEH) | 8 | **100.0%** | PASS (426496 B / typed 420864 B) | PASS (475136 B / obj 157140 B) | 7 | 14595.11 |
+| `cjson_utils.dll` | 92 | 92 | 92 | 547 (73 SEH) | 8 | **100.0%** | PASS (447488 B / typed 440320 B) | PASS (495616 B / obj 187921 B) | 7 | 28217.23 |
+| `tinyexpr.dll` | 5 | 5 | 5 | 528 (69 SEH) | 7 | **100.0%** | PASS (465920 B / typed 461824 B) | PASS (478208 B / obj 101073 B) | 7 | 7309.92 |
+| `poly_test.dll` | 10 | 10 | 10 | 332 (60 SEH) | 7 | **100.0%** | PASS (235520 B / typed 235520 B) | PASS (245248 B / obj 3328 B) | 1 | 657.48 |
+| `multi_poly.dll` | 11 | 11 | 11 | 333 (60 SEH) | 7 | **100.0%** | PASS (236032 B / typed 236032 B) | PASS (245248 B / obj 3632 B) | 1 | 650.3 |
+| `lz4.dll` | 44 | 44 | 44 | 428 (62 SEH) | 7 | **100.0%** | PASS (424448 B / typed 416256 B) | PASS (464896 B / obj 239360 B) | 7 | 29997.6 |
 
 ## 2. Interoperabilidade Ao Vivo em Heap Compartilhado (`DLL Original` <-> `reconstructed_twin.dll`)
 
@@ -22,7 +22,7 @@ Verificação empírica real (sem mocks): reconstrução de binários MSVC x64 `
 | `compiled twin poly_test :: Full C++ VTable Lifecycle (create/execute/reset/destroy x2)` | `[31, 77, 31, 4925, 97, 4925]` | `[31, 77, 31, 4925, 97, 4925]` | **PASS (100%)** |
 | `multi_poly.dll <-> compiled twin :: DualDevice multiple-inheritance heap` | `[100, 777]` | `[100, 777]` | **PASS (100%)** |
 | `compiled twin multi_poly :: Full Multiple-Inheritance Lifecycle (create/read/write/destroy)` | `[42, 42]` | `[42, 42]` | **PASS (100%)** |
-| `cjson.dll <-> compiled twin :: Live cJSON DOM heap traversal & predicates` | `[3, 1, 1, 1, 1410979147504, 0]` | `[3, 1, 1, 1, 1410979147504, 0]` | **PASS (100%)** |
+| `cjson.dll <-> compiled twin :: Live cJSON DOM heap traversal & predicates` | `[3, 1, 1, 1, 1943119591856, 0]` | `[3, 1, 1, 1, 1943119591856, 0]` | **PASS (100%)** |
 | `cjson.dll <-> compiled twin :: IEEE-754 XMM GetNumberValue(3.14159/NULL) & SetNumberHelper(99.75)` | `[3.14159, True, 99.75]` | `[3.14159, True, 99.75]` | **PASS (100%)** |
 | `compiled twin -> orig cjson.dll :: Live CRT Heap DOM Construction (CreateArray+Number+True+Bool+Null) & PrintUnformatted` | `['[42.5,true,false,null]', 4]` | `['[42.5,true,false,null]', 4]` | **PASS (100%)** |
 | `compiled twin -> orig cjson.dll :: Live Object+String+AddTrue+GetObjectItemCS+Delete` | `['aether_v39', '{"msg":"aether_v39","ok":true}']` | `['aether_v39', '{"msg":"aether_v39","ok":true}']` | **PASS (100%)** |

@@ -198,3 +198,105 @@ def lift_to_ssa_ir(instructions: Sequence[dict[str, Any]],
     except (ValueError,TypeError,KeyError) as exc:
         report["errors"].append(str(exc))
     return report
+
+
+def build_ssa_for_cfg_blocks(
+    block_names: Sequence[str],
+    edges: Sequence[tuple[str, str]],
+    block_stmts: dict[str, Sequence[tuple[str | None, set[str]]]],
+    entry: str,
+) -> dict[str, Any]:
+    """Constructs Cytron dominance-frontier phi placement and SSA version renaming over basic-block (def, uses) pairs."""
+    nodes = list(dict.fromkeys(block_names))
+    if not nodes or entry not in nodes:
+        return {
+            "idoms": {},
+            "frontiers": {},
+            "children": {},
+            "phi_nodes": {},
+            "stmt_ssa": {},
+            "phi_count": 0,
+        }
+    node_set = set(nodes)
+    active_edges = [(u, v) for u, v in edges if u in node_set and v in node_set]
+    idoms = compute_immediate_dominators_pure(nodes, active_edges, entry)
+    frontiers = compute_dominance_frontier(nodes, active_edges, idoms)
+    children: dict[str, list[str]] = {n: [] for n in nodes}
+    preds: dict[str, list[str]] = {n: [] for n in nodes}
+    succs: dict[str, list[str]] = {n: [] for n in nodes}
+    for u, v in active_edges:
+        succs[u].append(v)
+        preds[v].append(u)
+    for blk, parent in idoms.items():
+        if blk != entry and parent is not None and parent in children:
+            children[parent].append(blk)
+
+    sites: dict[str, set[str]] = defaultdict(set)
+    for blk in nodes:
+        for def_v, _ in block_stmts.get(blk, ()):
+            if def_v:
+                sites[def_v].add(blk)
+
+    phis: dict[str, dict[str, dict[str, Any]]] = {n: {} for n in nodes}
+    phi_count = 0
+    for var, defsites in sorted(sites.items()):
+        work = sorted(defsites)
+        queued = set(defsites)
+        while work:
+            src_blk = work.pop()
+            for df_blk in frontiers.get(src_blk, ()):
+                if var not in phis[df_blk]:
+                    phi_count += 1
+                    phis[df_blk][var] = {
+                        "block": df_blk,
+                        "variable": var,
+                        "dest": None,
+                        "incoming": {},
+                    }
+                    if df_blk not in queued:
+                        queued.add(df_blk)
+                        work.append(df_blk)
+
+    counters: dict[str, int] = defaultdict(int)
+    stacks: dict[str, list[str]] = defaultdict(list)
+
+    def read_ver(var: str) -> str:
+        return stacks[var][-1] if stacks[var] else f"{var}_0"
+
+    def write_ver(var: str, pushed: list[str]) -> str:
+        counters[var] += 1
+        ver = f"{var}_{counters[var]}"
+        stacks[var].append(ver)
+        pushed.append(var)
+        return ver
+
+    stmt_ssa: dict[tuple[str, int], tuple[str | None, dict[str, str]]] = {}
+    events: list[tuple[str, str, list[str] | None]] = [("enter", entry, None)]
+    while events:
+        phase, blk, pushed = events.pop()
+        if phase == "exit":
+            for var in reversed(pushed or []):
+                stacks[var].pop()
+            continue
+        frame_pushed: list[str] = []
+        for var, phi in sorted(phis[blk].items()):
+            phi["dest"] = write_ver(var, frame_pushed)
+        for s_idx, (def_v, use_vars) in enumerate(block_stmts.get(blk, ())):
+            use_vers = {u: read_ver(u) for u in use_vars}
+            def_ver = write_ver(def_v, frame_pushed) if def_v else None
+            stmt_ssa[(blk, s_idx)] = (def_ver, use_vers)
+        for succ in succs[blk]:
+            for var, phi in phis[succ].items():
+                phi["incoming"][blk] = read_ver(var)
+        events.append(("exit", blk, frame_pushed))
+        for child in reversed(children.get(blk, [])):
+            events.append(("enter", child, None))
+
+    return {
+        "idoms": idoms,
+        "frontiers": frontiers,
+        "children": children,
+        "phi_nodes": {b: sorted(v.values(), key=lambda item: item["variable"]) for b, v in phis.items() if v},
+        "stmt_ssa": stmt_ssa,
+        "phi_count": phi_count,
+    }

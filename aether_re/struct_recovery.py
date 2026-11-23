@@ -12,6 +12,8 @@ from __future__ import annotations
 import re
 from typing import Any, Sequence
 
+from aether_re.til_engine import CANONICAL_TIL_STRUCTS, match_struct_by_field_offsets
+
 SCHEMA = "struct-recovery-report.v1"
 
 SIZE_TO_TYPE = {
@@ -156,12 +158,24 @@ def recover_struct_layouts(
         c_lines.append("#pragma pack(pop)")
         c_declaration = "\n".join(c_lines) + "\n"
 
+        til_match = None
+        if len(sorted_offsets) >= 2:
+            til_cands = match_struct_by_field_offsets(sorted_offsets)
+            if til_cands and til_cands[0]["match_score"] >= 0.75:
+                til_match = til_cands[0]["struct_name"]
+                til_info = CANONICAL_TIL_STRUCTS.get(til_match, {}).get("fields", {})
+                for fld in field_list:
+                    if fld["offset"] in til_info:
+                        fld["semantic_name"] = til_info[fld["offset"]]["name"]
+                        fld["semantic_type"] = til_info[fld["offset"]]["type"]
+
         recovered_structs.append({
             "name": struct_name,
             "base_register": base_reg,
             "fields_count": len(field_list),
             "total_size_bytes": total_size,
             "fields": field_list,
+            "matched_til_struct": til_match,
             "c_declaration": c_declaration,
         })
 
@@ -248,18 +262,83 @@ _REG_OFF_EXPR_RE = re.compile(
 _SIMPLE_MEM_READ_RE = re.compile(
     r"aether_mem_read\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*(?:\+\s*(0x[0-9a-fA-F]+|\d+))?\s*,\s*(\d+)\s*\)"
 )
-_FN_SIG_START_RE = re.compile(r"^(?:long long|int64_t|double)\s+[A-Za-z_][A-Za-z0-9_]*\s*\(")
+_FN_SIG_START_RE = re.compile(r"^(?:long long|int64_t|double)\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(")
 _REG_COPY_STMT_RE = re.compile(
-    r"^(r[abcd]x|r[sd]i|rbp|r(?:[89]|1[0-5]))\s*=\s*(?:\(\s*(?:long long|int64_t)\s*\)\s*)?(r[abcd]x|r[sd]i|rbp|r(?:[89]|1[0-5]))\s*;\s*(?:/\*.*\*/)?$"
+    r"^(r[abcd]x|r[sd]i|rbp|r(?:[89]|1[0-5])|x(?:[0-2]?\d|30))\s*=\s*(?:\(\s*(?:long long|int64_t)\s*\)\s*)?(r[abcd]x|r[sd]i|rbp|r(?:[89]|1[0-5])|x(?:[0-2]?\d|30))\s*;\s*(?:/\*.*\*/)?$"
 )
-_REG_ASSIGN_RE = re.compile(r"^(r[abcd]x|r[sd]i|rbp|r(?:[89]|1[0-5]))\s*(?:\+=|-=|=)")
+_REG_ASSIGN_RE = re.compile(r"^(r[abcd]x|r[sd]i|rbp|r(?:[89]|1[0-5])|x(?:[0-2]?\d|30))\s*(?:\+=|-=|=)")
+
+
+def propagate_interprocedural_structs(
+    records_list: Sequence[dict[str, Any]],
+    structs: Sequence[dict[str, Any]],
+    *,
+    arch: str = "x86_64",
+) -> dict[str, dict[str, str]]:
+    """Propagates RecoveredStruct_<REG>_t pointer types across caller->callee callsites via worklist."""
+    reg_to_struct: dict[str, str] = {}
+    for st in structs:
+        reg = str(st.get("base_register", "")).lower()
+        name = str(st.get("name", ""))
+        if reg and name:
+            reg_to_struct[reg] = name
+
+    rva_to_name: dict[int, str] = {}
+    fn_param_structs: dict[str, dict[str, str]] = {}
+    param_regs = (
+        ("x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7")
+        if "aarch64" in arch.lower() or "arm64" in arch.lower()
+        else ("rcx", "rdx", "r8", "r9")
+    )
+    for rec in records_list:
+        ident = str(rec.get("c_ident") or rec.get("name") or "")
+        rva = rec.get("rva")
+        if isinstance(rva, int) and ident:
+            rva_to_name[rva] = ident
+        fn_param_structs[ident] = {
+            pr: reg_to_struct[pr] for pr in param_regs if pr in reg_to_struct
+        }
+
+    # Propagate caller argument setup across direct call edges (max 4 worklist rounds)
+    call_arg_re = re.compile(r"\b(rcx|rdx|r8|r9|x[0-7])\s*=\s*(?:\([^)]*\)\s*)*([A-Za-z_][A-Za-z0-9_]*)")
+    fn_call_re = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(")
+    for _ in range(4):
+        changed = False
+        for rec in records_list:
+            caller_ident = str(rec.get("c_ident") or rec.get("name") or "")
+            c_src = str(rec.get("lifted_c_code") or rec.get("c_code") or "")
+            if not caller_ident or not c_src:
+                continue
+            caller_types = dict(fn_param_structs.get(caller_ident, {}))
+            last_reg_src: dict[str, str] = {}
+            for raw_ln in c_src.splitlines():
+                ln = raw_ln.strip()
+                m_arg = call_arg_re.search(ln)
+                if m_arg:
+                    dst_p, src_r = m_arg.group(1).lower(), m_arg.group(2).lower()
+                    inferred = caller_types.get(src_r) or reg_to_struct.get(src_r)
+                    if inferred:
+                        last_reg_src[dst_p] = inferred
+                for m_c in fn_call_re.finditer(ln):
+                    callee = m_c.group(1)
+                    if callee in fn_param_structs and not callee.startswith("aether_"):
+                        for p_reg, st_nm in last_reg_src.items():
+                            if p_reg not in fn_param_structs[callee]:
+                                fn_param_structs[callee][p_reg] = st_nm
+                                changed = True
+        if not changed:
+            break
+    return {k: v for k, v in fn_param_structs.items() if v}
 
 
 def emit_typed_c_from_structured(
     structured_c: str,
     structs: Sequence[dict[str, Any]],
+    *,
+    function_param_structs: dict[str, dict[str, str]] | None = None,
+    function_prototypes: dict[str, dict[str, Any]] | None = None,
 ) -> str:
-    """Rewrites raw aether_mem_read/write into typed struct pointer dereferences with intra-procedural alias propagation."""
+    """Rewrites raw aether_mem_read/write into typed struct pointer dereferences with intra- and inter-procedural alias propagation."""
     if not structured_c or not structs:
         return structured_c
     lookup = _build_struct_field_lookup(structs)
@@ -267,9 +346,18 @@ def emit_typed_c_from_structured(
         return structured_c
 
     active_alias: dict[str, str] = {}
+    current_fn_param_structs: dict[str, str] = {}
+    struct_by_name = {str(st.get("name", "")): st for st in structs if st.get("name")}
 
     def _resolve_field(reg_name: str, off: int, width: int) -> tuple[str, str, str, int] | None:
         rlow = reg_name.lower()
+        if rlow in current_fn_param_structs:
+            mapped_st = struct_by_name.get(current_fn_param_structs[rlow])
+            if mapped_st:
+                mapped_reg = str(mapped_st.get("base_register", "")).lower()
+                hit_p = lookup.get((mapped_reg, off))
+                if hit_p and hit_p[3] == width:
+                    return hit_p
         hit = lookup.get((rlow, off))
         if hit and hit[3] == width:
             return hit
@@ -298,8 +386,20 @@ def emit_typed_c_from_structured(
     out_lines: list[str] = []
     for ln in structured_c.splitlines():
         st_orig = ln.strip()
-        if _FN_SIG_START_RE.match(st_orig):
+        m_fn = _FN_SIG_START_RE.match(st_orig)
+        if m_fn:
             active_alias.clear()
+            fn_ident = m_fn.group(1)
+            current_fn_param_structs = (function_param_structs or {}).get(fn_ident, {})
+            proto_info = (function_prototypes or {}).get(fn_ident)
+            if proto_info or current_fn_param_structs:
+                parts_anno = []
+                if proto_info and proto_info.get("typed_c_signature"):
+                    parts_anno.append(f"ABI({proto_info.get('calling_convention', 'win64')}, params={proto_info.get('estimated_param_count', 0)}): {proto_info['typed_c_signature']}")
+                if current_fn_param_structs:
+                    p_desc = ", ".join(f"{r}: {s}_t*" for r, s in sorted(current_fn_param_structs.items()))
+                    parts_anno.append(f"Interproc-Structs: {p_desc}")
+                out_lines.append(f"/* {' | '.join(parts_anno)} */")
 
         new_ln = _SIMPLE_MEM_READ_RE.sub(_repl_read, ln)
 

@@ -23,6 +23,10 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+from aether_re.cfg_dominance import find_natural_loops
+from aether_re.deobfuscator import detect_opaque_predicate, simplify_mba_expression
+from aether_re.ssa_ir import build_ssa_for_cfg_blocks
+
 _TRACKED_VARS: Tuple[str, ...] = (
     "rax", "rbx", "rcx", "rdx", "rsi", "rdi", "rbp", "rsp",
     "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15",
@@ -1099,11 +1103,236 @@ def _backward_liveness_dce(
     return dead_flags, dead_assigns
 
 
-def optimize_lifted_c_via_ssa(c_code: str) -> Tuple[str, Dict[str, int]]:
-    """Runs iterative CFG cleanup, stack-slot mem2reg, constant/copy propagation, algebraic fold, and DCE."""
+def _compute_cfg_edges_and_defs(
+    blocks: List[_IRBlock],
+    tracked: Set[str],
+) -> Tuple[List[str], List[Tuple[str, str]], Dict[str, List[Tuple[Optional[str], Set[str]]]]]:
+    names = [b.name for b in blocks]
+    _, succs = _block_successors(blocks)
+    edges: List[Tuple[str, str]] = []
+    block_defs: Dict[str, List[Tuple[Optional[str], Set[str]]]] = {}
+    for b in blocks:
+        for s in succs[b.name]:
+            edges.append((b.name, s))
+        du_list: List[Tuple[Optional[str], Set[str]]] = []
+        for stmt in b.stmts:
+            uses, must_def, _ = _stmt_use_def(stmt, tracked)
+            du_list.append((must_def, uses))
+        block_defs[b.name] = du_list
+    return names, edges, block_defs
+
+
+def _inline_flag_comparisons(blocks: List[_IRBlock], tracked: Set[str]) -> int:
+    """Inlines single-block pure `cmp_lhs`/`cmp_rhs` definitions directly into `cbranch` predicates."""
+    inlined = 0
+    for b in blocks:
+        if b.term_kind != "cbranch" or not b.term_cond or not b.stmts:
+            continue
+        cond = b.term_cond
+        if "cmp_lhs" not in cond and "cmp_rhs" not in cond:
+            continue
+        clobbered: Set[str] = set()
+        subs: Dict[str, str] = {}
+        for stmt in reversed(b.stmts[-8:]):
+            m_as = _SIMPLE_ASSIGN_RE.match(stmt)
+            if not m_as:
+                uses_st, def_st, _ = _stmt_use_def(stmt, tracked)
+                if def_st:
+                    clobbered.add(def_st)
+                if not _is_pure_rhs(stmt) or "aether_mem_read" in stmt:
+                    clobbered.add("__mem_barrier__")
+                continue
+            lhs, rhs = m_as.group(1), m_as.group(2).strip()
+            if lhs in ("cmp_lhs", "cmp_rhs") and lhs not in subs and lhs not in clobbered:
+                if len(rhs) <= 84 and _is_pure_rhs(rhs) and "aether_mem_read" not in rhs:
+                    rhs_uses = _extract_identifiers(rhs, tracked)
+                    if not (rhs_uses & clobbered):
+                        subs[lhs] = rhs
+            clobbered.add(lhs)
+            if not _is_pure_rhs(rhs) or "aether_mem_read" in rhs:
+                clobbered.add("__mem_barrier__")
+        if subs:
+            new_cond = _subst_vars(cond, subs)
+            if len(new_cond) <= 220:
+                new_cond_s = _simplify_expr(new_cond, tracked)
+                if new_cond_s != b.term_cond:
+                    b.term_cond = new_cond_s
+                    inlined += len(subs)
+    return inlined
+
+
+def _gvn_cse_over_domtree(
+    blocks: List[_IRBlock],
+    tracked: Set[str],
+) -> Tuple[int, int, Dict[str, Any]]:
+    """Cytron SSA + Dominator-Tree Global Value Numbering (GVN/CSE)."""
+    if not blocks:
+        return 0, 0, {}
+    names, edges, block_defs = _compute_cfg_edges_and_defs(blocks, tracked)
+    entry = names[0]
+    ssa = build_ssa_for_cfg_blocks(names, edges, block_defs, entry)
+    if not ssa.get("idoms"):
+        return 0, 0, ssa
+
+    name_to_block = {b.name: b for b in blocks}
+    children = ssa["children"]
+    phi_nodes = ssa["phi_nodes"]
+    stmt_ssa = ssa["stmt_ssa"]
+
+    gvn_hits = 0
+    active_ver: Dict[str, str] = {}
+    # expr_key -> stack of (holder_var, holder_ver)
+    expr_table: Dict[Tuple[str, Tuple[Tuple[str, str], ...]], Tuple[str, str]] = {}
+
+    def _walk_dom(blk: str) -> None:
+        nonlocal gvn_hits
+        saved_active = dict(active_ver)
+        added_expr_keys: List[Tuple[str, Tuple[Tuple[str, str], ...]]] = []
+
+        for phi in phi_nodes.get(blk, ()):
+            active_ver[phi["variable"]] = phi["dest"]
+
+        b_obj = name_to_block.get(blk)
+        if b_obj is not None:
+            for s_idx, stmt in enumerate(b_obj.stmts):
+                def_ver, use_vers = stmt_ssa.get((blk, s_idx), (None, {}))
+                m_as = _SIMPLE_ASSIGN_RE.match(stmt)
+                if m_as and def_ver is not None:
+                    lhs, rhs = m_as.group(1), m_as.group(2).strip()
+                    if (
+                        lhs in tracked
+                        and lhs not in ("rsp", "cmp_lhs", "cmp_rhs")
+                        and not _TYPE_CAST_IDENT_ONLY_RE.fullmatch(rhs)
+                        and _parse_int_const(rhs) is None
+                        and "aether_mem_read" not in rhs
+                        and _is_pure_rhs(rhs)
+                    ):
+                        key_uses = tuple(sorted((u, use_vers.get(u, f"{u}_0")) for u in use_vers))
+                        ekey = (rhs, key_uses)
+                        prev = expr_table.get(ekey)
+                        if prev is not None:
+                            holder_var, holder_ver = prev
+                            if holder_var != lhs and active_ver.get(holder_var) == holder_ver:
+                                b_obj.stmts[s_idx] = f"{lhs} = {holder_var}"
+                                gvn_hits += 1
+                        else:
+                            expr_table[ekey] = (lhs, def_ver)
+                            added_expr_keys.append(ekey)
+                    active_ver[lhs] = def_ver
+                else:
+                    uses_st, def_st, _ = _stmt_use_def(stmt, tracked)
+                    if def_st and def_ver:
+                        active_ver[def_st] = def_ver
+
+        for ch in children.get(blk, ()):
+            _walk_dom(ch)
+
+        for ek in added_expr_keys:
+            expr_table.pop(ek, None)
+        active_ver.clear()
+        active_ver.update(saved_active)
+
+    _walk_dom(entry)
+    return gvn_hits, int(ssa.get("phi_count", 0)), ssa
+
+
+def _hoist_loop_invariants(blocks: List[_IRBlock], returns_double: bool, tracked: Set[str]) -> int:
+    """Hoists side-effect-free loop-invariant pure definitions into unique unconditional preheaders."""
+    if len(blocks) < 2:
+        return 0
+    names, edges, _ = _compute_cfg_edges_and_defs(blocks, tracked)
+    entry = names[0]
+    from aether_re.cfg_dominance import compute_immediate_dominators_pure
+
+    idoms = compute_immediate_dominators_pure(names, edges, entry)
+    loops = find_natural_loops(names, edges, idoms)
+    if not loops:
+        return 0
+
+    name_to_block = {b.name: b for b in blocks}
+    _, succs = _block_successors(blocks)
+    preds: Dict[str, List[str]] = {b.name: [] for b in blocks}
+    for u, vs in succs.items():
+        for v in vs:
+            preds[v].append(u)
+
+    hoisted = 0
+    for loop in loops:
+        header = loop["header"]
+        loop_nodes = set(loop["nodes"])
+        ext_preds = [p for p in preds.get(header, ()) if p not in loop_nodes]
+        if len(ext_preds) != 1:
+            continue
+        pre_name = ext_preds[0]
+        pre_blk = name_to_block.get(pre_name)
+        hdr_blk = name_to_block.get(header)
+        if pre_blk is None or hdr_blk is None:
+            continue
+        if pre_blk.term_kind not in ("goto", "fall"):
+            continue
+        # Only hoist assignments inside header whose LHS is never used before def in header
+        loop_defs: Dict[str, int] = {}
+        loop_uses_before_def: Set[str] = set()
+        ordered_loop_nodes = [header] + [
+            b.name for b in blocks if b.name in loop_nodes and b.name != header
+        ]
+        for ln_name in ordered_loop_nodes:
+            lb = name_to_block.get(ln_name)
+            if lb is None:
+                continue
+            for st in lb.stmts:
+                u_st, d_st, _ = _stmt_use_def(st, tracked)
+                for uv in u_st:
+                    if uv not in loop_defs:
+                        loop_uses_before_def.add(uv)
+                if d_st:
+                    loop_defs[d_st] = loop_defs.get(d_st, 0) + 1
+            if lb.term_kind == "cbranch":
+                for uv in _extract_identifiers(lb.term_cond, tracked):
+                    if uv not in loop_defs:
+                        loop_uses_before_def.add(uv)
+            elif lb.term_kind == "return":
+                for uv in _extract_identifiers(lb.term_ret, tracked):
+                    if uv not in loop_defs:
+                        loop_uses_before_def.add(uv)
+
+        kept_hdr_stmts: List[str] = []
+        seen_defs_in_hdr: Set[str] = set()
+        for st in hdr_blk.stmts:
+            m_as = _SIMPLE_ASSIGN_RE.match(st)
+            if m_as:
+                lhs, rhs = m_as.group(1), m_as.group(2).strip()
+                rhs_uses = _extract_identifiers(rhs, tracked)
+                if (
+                    lhs in tracked
+                    and lhs not in ("rsp", "cmp_lhs", "cmp_rhs")
+                    and loop_defs.get(lhs, 0) == 1
+                    and lhs not in loop_uses_before_def
+                    and lhs not in seen_defs_in_hdr
+                    and _is_pure_rhs(rhs)
+                    and "aether_mem_read" not in rhs
+                    and not (rhs_uses & set(loop_defs.keys()))
+                ):
+                    pre_blk.stmts.append(st)
+                    hoisted += 1
+                    seen_defs_in_hdr.add(lhs)
+                    continue
+            u_st, d_st, _ = _stmt_use_def(st, tracked)
+            if d_st:
+                seen_defs_in_hdr.add(d_st)
+            kept_hdr_stmts.append(st)
+        hdr_blk.stmts = kept_hdr_stmts
+    return hoisted
+
+
+def optimize_lifted_c_to_ir_bundle(c_code: str) -> Tuple[str, Dict[str, int], Optional[Dict[str, Any]]]:
+    """Runs CFG cleanup, mem2reg, GVN/CSE, LICM, expression flag inlining, constant/copy prop, and DCE.
+
+    Returns ``(optimized_c, metrics, structured_ir_bundle_or_None)``.
+    """
     parsed = _parse_c_function(c_code)
     if parsed is None:
-        return c_code, {"skipped": 1}
+        return c_code, {"skipped": 1}, None
 
     header_lines, blocks, _ = parsed
     returns_double = any(ln.strip().startswith("double ") for ln in header_lines[:2])
@@ -1117,15 +1346,76 @@ def optimize_lifted_c_via_ssa(c_code: str) -> Tuple[str, Dict[str, int]]:
     dead_flags_total = 0
     dead_assigns_total = 0
     prop_edits_total = 0
+    gvn_hits_total = 0
+    flag_inlines_total = 0
+    licm_hoisted_total = 0
+    phi_nodes_placed = 0
+    mba_simplified_total = 0
+    opaque_pruned_total = 0
 
-    for _ in range(4):
+    for idx_iter in range(4):
         blocks = _cleanup_cfg(blocks, returns_double)
+        if idx_iter == 0:
+            for blk_m in blocks:
+                for st_i, st_raw in enumerate(blk_m.stmts):
+                    if any(op in st_raw for op in ("^", "&", "|", "~")):
+                        m_as = _SIMPLE_ASSIGN_RE.match(st_raw)
+                        if m_as:
+                            lhs_m, rhs_m = m_as.group(1), m_as.group(2).strip()
+                            simp_m = simplify_mba_expression(rhs_m)
+                            if simp_m != rhs_m and _is_pure_rhs(simp_m):
+                                blk_m.stmts[st_i] = f"{lhs_m} = {simp_m}"
+                                mba_simplified_total += 1
+                if (
+                    blk_m.term_kind == "cbranch"
+                    and blk_m.term_cond
+                    and "0xffffffff" not in blk_m.term_cond.lower()
+                    and "aether_" not in blk_m.term_cond
+                    and any(op in blk_m.term_cond for op in ("^", "%", "&", "|", "*"))
+                ):
+                    op_eval = detect_opaque_predicate(blk_m.term_cond)
+                    if op_eval.get("is_opaque"):
+                        if op_eval["static_truth_value"] is True:
+                            blk_m.term_kind = "goto"
+                            blk_m.term_cond = ""
+                        else:
+                            blk_m.term_kind = "fall"
+                            blk_m.term_cond = ""
+                            blk_m.term_target = ""
+                        opaque_pruned_total += 1
         p_edits = _forward_const_and_copy_prop(blocks, tracked_vars)
+        fi = _inline_flag_comparisons(blocks, tracked_vars)
+        if fi > 0:
+            for blk_fi in blocks:
+                if (
+                    blk_fi.term_kind == "cbranch"
+                    and blk_fi.term_cond
+                    and "0xffffffff" not in blk_fi.term_cond.lower()
+                    and "aether_" not in blk_fi.term_cond
+                    and any(op in blk_fi.term_cond for op in ("^", "%", "&", "|", "*"))
+                ):
+                    op_eval2 = detect_opaque_predicate(blk_fi.term_cond)
+                    if op_eval2.get("is_opaque"):
+                        if op_eval2["static_truth_value"] is True:
+                            blk_fi.term_kind = "goto"
+                            blk_fi.term_cond = ""
+                        else:
+                            blk_fi.term_kind = "fall"
+                            blk_fi.term_cond = ""
+                            blk_fi.term_target = ""
+                        opaque_pruned_total += 1
+        gv, phis_cnt, _ = _gvn_cse_over_domtree(blocks, tracked_vars)
+        if phis_cnt > phi_nodes_placed:
+            phi_nodes_placed = phis_cnt
+        lh = _hoist_loop_invariants(blocks, returns_double, tracked_vars) if idx_iter == 0 else 0
         df, da = _backward_liveness_dce(blocks, returns_double, tracked_vars)
         prop_edits_total += p_edits
+        flag_inlines_total += fi
+        gvn_hits_total += gv
+        licm_hoisted_total += lh
         dead_flags_total += df
         dead_assigns_total += da
-        if p_edits == 0 and df == 0 and da == 0:
+        if p_edits == 0 and df == 0 and da == 0 and fi == 0 and gv == 0 and lh == 0:
             break
     blocks = _cleanup_cfg(blocks, returns_double)
 
@@ -1168,11 +1458,33 @@ def optimize_lifted_c_via_ssa(c_code: str) -> Tuple[str, Dict[str, int]]:
         "dead_flags_removed": dead_flags_total,
         "dead_assigns_removed": dead_assigns_total,
         "prop_edits": prop_edits_total,
+        "gvn_hits": gvn_hits_total,
+        "flag_inlines": flag_inlines_total,
+        "licm_hoisted": licm_hoisted_total,
+        "phi_nodes_placed": phi_nodes_placed,
+        "mba_simplified": mba_simplified_total,
+        "opaque_pruned": opaque_pruned_total,
     }
-    return "\n".join(out_lines), metrics
+    names, edges, block_defs = _compute_cfg_edges_and_defs(blocks, tracked_vars)
+    final_ssa = build_ssa_for_cfg_blocks(names, edges, block_defs, names[0]) if names else {}
+    ir_bundle = {
+        "header_lines": header_lines,
+        "blocks": blocks,
+        "promoted_slots": active_slots,
+        "returns_double": returns_double,
+        "ssa": final_ssa,
+        "metrics": metrics,
+    }
+    return "\n".join(out_lines), metrics, ir_bundle
+
+
+def optimize_lifted_c_via_ssa(c_code: str) -> Tuple[str, Dict[str, int]]:
+    """Runs iterative CFG cleanup, stack-slot mem2reg, Cytron SSA GVN/CSE, LICM, flag inlining, constant/copy prop, and DCE."""
+    opt, metrics, _ = optimize_lifted_c_to_ir_bundle(c_code)
+    return opt, metrics
 
 
 def optimize_lifted_c(c_code: str) -> str:
     """Convenience wrapper returning optimized C source."""
-    opt, _ = optimize_lifted_c_via_ssa(c_code)
+    opt, _, _ = optimize_lifted_c_to_ir_bundle(c_code)
     return opt
