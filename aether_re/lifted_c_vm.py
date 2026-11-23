@@ -114,7 +114,38 @@ def _pcmpeqb64(a: int, b: int) -> int:
 def _pmaxud64(a: int, b: int) -> int:
     lo = max(a & 0xFFFFFFFF, b & 0xFFFFFFFF)
     hi = max((a >> 32) & 0xFFFFFFFF, (b >> 32) & 0xFFFFFFFF)
-    return _to_int64(lo | (hi << 32))
+    return _to_int64((hi << 32) | lo)
+
+
+def _paddd64(a: int, b: int) -> int:
+    lo = ((a & 0xFFFFFFFF) + (b & 0xFFFFFFFF)) & 0xFFFFFFFF
+    hi = (((a >> 32) & 0xFFFFFFFF) + ((b >> 32) & 0xFFFFFFFF)) & 0xFFFFFFFF
+    return _to_int64((hi << 32) | lo)
+
+
+def _pmulld64(a: int, b: int) -> int:
+    lo = ((a & 0xFFFFFFFF) * (b & 0xFFFFFFFF)) & 0xFFFFFFFF
+    hi = (((a >> 32) & 0xFFFFFFFF) * ((b >> 32) & 0xFFFFFFFF)) & 0xFFFFFFFF
+    return _to_int64((hi << 32) | lo)
+
+
+def _paddb64(a: int, b: int) -> int:
+    out = 0
+    for i in range(8):
+        out |= ((((a >> (i * 8)) & 0xFF) + ((b >> (i * 8)) & 0xFF)) & 0xFF) << (i * 8)
+    return _to_int64(out)
+
+
+def _f32_add(a_bits: int, b_bits: int) -> int:
+    fa = struct.unpack("<f", struct.pack("<I", int(a_bits) & 0xFFFFFFFF))[0]
+    fb = struct.unpack("<f", struct.pack("<I", int(b_bits) & 0xFFFFFFFF))[0]
+    return struct.unpack("<I", struct.pack("<f", fa + fb))[0]
+
+
+def _f32_mul(a_bits: int, b_bits: int) -> int:
+    fa = struct.unpack("<f", struct.pack("<I", int(a_bits) & 0xFFFFFFFF))[0]
+    fb = struct.unpack("<f", struct.pack("<I", int(b_bits) & 0xFFFFFFFF))[0]
+    return struct.unpack("<I", struct.pack("<f", fa * fb))[0]
 
 
 def _pcmpeqd64(a: int, b: int) -> int:
@@ -261,6 +292,10 @@ def _compile_lifted_program(c_code: str) -> CompiledLiftedProgram:
         if ln == "return aether_bits_to_f64(xmm0);":
             raw_ops.append(("ret_xmm0",))
             continue
+        if ln.startswith("return ") and ln.endswith(";"):
+            expr_s = ln[7:-1].strip()
+            raw_ops.append(("ret_expr", _compile_eval_cached(_clean_c_stmt(expr_s))))
+            continue
         if ln.startswith("if (") and ("goto " in ln or ") {" in ln):
             if ") goto " in ln:
                 cond_str = ln[4 : ln.index(") goto")].strip()
@@ -345,6 +380,11 @@ _STATIC_BASE_ENV: Dict[str, Any] = {
     "aether_pow": lambda a, b: _safe_f64_pow(float(a), float(b)),
     "aether_fmod": lambda a, b: math.fmod(float(a), float(b)) if float(b) != 0.0 else float("nan"),
     "aether_pmaxud64": _pmaxud64,
+    "aether_paddd64": _paddd64,
+    "aether_pmulld64": _pmulld64,
+    "aether_paddb64": _paddb64,
+    "aether_f32_add": _f32_add,
+    "aether_f32_mul": _f32_mul,
     "aether_pcmpeqd64": _pcmpeqd64,
     "aether_psubd64": _psubd64,
     "aether_f64_to_bits": _f64_to_bits,
@@ -592,6 +632,8 @@ def execute_lifted_c_ast(
                 return _fast_i64(int(env["rax"]))
             elif kind == "ret_xmm0":
                 return _fast_i64(int(env["xmm0"]))
+            elif kind == "ret_expr":
+                return _fast_i64(int(eval(op[1], builtins_ns, env)))
             elif kind == "cond_exec":
                 if eval(op[1], builtins_ns, env):
                     for st_code, norm_var in op[2]:

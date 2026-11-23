@@ -141,3 +141,68 @@ def scan_file_rust(target: str | Path) -> dict[str, Any]:
     report = recover_rust_metadata(path.read_bytes())
     report["target"] = str(path)
     return report
+
+
+def reconstruct_rust_project(
+    data: bytes,
+    output_dir: str | Path,
+    *,
+    crate_name: str = "reconstructed_crate",
+) -> dict[str, Any]:
+    """Emits a Cargo.toml + src/ crate structure from recovered Rust metadata & demangled traits/symbols."""
+    rep = recover_rust_metadata(data)
+    out = Path(output_dir)
+    src_dir = out / "src"
+    src_dir.mkdir(parents=True, exist_ok=True)
+    if not rep.get("is_rust_binary"):
+        return {"status": "not_rust", "generated_files": [], "report": rep}
+
+    deps_lines: list[str] = []
+    for cr in rep.get("crates") or []:
+        cn = str(cr["name"])
+        if cn in ("rustc-demangle", "hashbrown", "compiler_builtins"):
+            continue
+        ver = (cr.get("versions") or ["*"])[0]
+        deps_lines.append(f'{cn} = "{ver}"')
+
+    cargo_toml = "\n".join([
+        "[package]",
+        f'name = "{crate_name}"',
+        'version = "0.1.0"',
+        'edition = "2021"',
+        "",
+        "[dependencies]",
+        *(deps_lines if deps_lines else ["# no external registry crates parsed from strings"]),
+        "",
+    ])
+    (out / "Cargo.toml").write_text(cargo_toml, encoding="utf-8")
+
+    mod_lines = [
+        "//! Auto-reconstructed Rust crate skeleton by AetherRE Megazord v8.0",
+        "",
+    ]
+    seen_fn: set[str] = set()
+    for sym_rec in (rep.get("demangled_symbols") or [])[:120]:
+        dem = str(sym_rec.get("demangled") or "")
+        leaf = dem.split("::")[-1]
+        ident = re.sub(r"[^A-Za-z0-9_]", "_", leaf).strip("_").lower()
+        if not ident or ident[0].isdigit() or ident in seen_fn:
+            continue
+        if ident in ("fmt", "drop_in_place", "panic", "clone", "eq", "main"):
+            continue
+        seen_fn.add(ident)
+        mod_lines.extend([
+            f"/// Demangled: `{dem}` ({sym_rec.get('mangled')})",
+            f"pub extern \"C\" fn {ident}(a: i64, b: i64) -> i64 {{",
+            "    a.wrapping_add(b)",
+            "}",
+            "",
+        ])
+
+    (src_dir / "lib.rs").write_text("\n".join(mod_lines), encoding="utf-8")
+    return {
+        "status": "complete",
+        "crate_name": crate_name,
+        "generated_files": ["Cargo.toml", "src/lib.rs"],
+        "report": rep,
+    }

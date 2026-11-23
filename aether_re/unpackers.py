@@ -12,9 +12,12 @@ cotas de ficheiros/bytes e integridade de hashes para:
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
+import marshal
 import os
 import re
+import shutil
 import stat
 import struct
 import tarfile
@@ -547,14 +550,10 @@ def unpack_container(
             elif fmt == "firmware":
                 extracted = _carve_firmware_streams(snapshot, stage, max_files=max_files, max_bytes=max_bytes)
             elif fmt == "pyinstaller":
-                pos = data.find(PYZ_COOKIE)
-                if pos != -1:
-                    pyz_blob = data[pos:]
-                    if len(pyz_blob) > min(max_file_bytes, max_bytes):
-                        raise UnpackError("pyz_output_budget_exceeded")
-                    (stage / "extracted_payload.pyz").write_bytes(pyz_blob)
-                    extracted = [{"relative_path": "extracted_payload.pyz", "size_bytes": len(pyz_blob),
-                                  "sha256": _sha256_bytes(pyz_blob)}]
+                extracted = _unpack_pyinstaller_full(
+                    data, stage, max_files=max_files,
+                    max_bytes=max_bytes, max_file_bytes=max_file_bytes,
+                )
             else:
                 raise UnpackError(f"unsupported_container_format:{fmt}")
             _validate_extraction_files(stage, extracted, max_files=max_files,
@@ -588,4 +587,243 @@ def unpack_container(
             "limites de arquivo e contenção fail-closed são aplicados contra zip-bomb e path traversal",
             *(["carving parcial: não reconstrói a árvore original de arquivos nem valida o instalador"] if carving else []),
         ],
+    }
+
+
+def _pyc_header_bytes(pyc_magic: bytes | None = None) -> bytes:
+    """Returns a valid PEP 552 16-byte .pyc header."""
+    magic = pyc_magic if pyc_magic and len(pyc_magic) == 4 else importlib.util.MAGIC_NUMBER
+    return magic + struct.pack("<III", 0, 0, 0)
+
+
+def _extract_pyz_modules(
+    pyz_blob: bytes,
+    out_sub: Path,
+    *,
+    max_files: int,
+    max_bytes: int,
+    max_file_bytes: int,
+) -> list[dict[str, Any]]:
+    """Extracts Python modules (.pyc) from a PyInstaller PYZ\x00 archive."""
+    if not pyz_blob.startswith(PYZ_COOKIE) or len(pyz_blob) < 16:
+        return []
+    pyc_magic = pyz_blob[4:8]
+    toc_off = struct.unpack_from("!I", pyz_blob, 8)[0]
+    if toc_off <= 12 or toc_off >= len(pyz_blob):
+        return []
+    try:
+        toc = marshal.loads(pyz_blob[toc_off:])
+    except Exception:
+        return []
+    if not isinstance(toc, (list, tuple, dict)):
+        return []
+
+    entries = toc.items() if isinstance(toc, dict) else [(e[0], (e[1], e[2])) for e in toc if len(e) >= 3]
+    out_files: list[dict[str, Any]] = []
+    total_b = 0
+    for mod_name, info in entries:
+        if len(out_files) >= max_files:
+            break
+        if isinstance(info, (list, tuple)) and len(info) >= 3:
+            _ispkg, pos_v, length_v = info[0], info[1], info[2]
+        elif isinstance(info, (list, tuple)) and len(info) == 2:
+            pos_v, length_v = info[0], info[1]
+        else:
+            continue
+        pos_i, len_i = int(pos_v), int(length_v)
+        if pos_i < 0 or len_i <= 0 or pos_i + len_i > len(pyz_blob):
+            continue
+        raw_chunk = pyz_blob[pos_i : pos_i + len_i]
+        try:
+            body = zlib.decompress(raw_chunk)
+        except Exception:
+            continue
+        full_pyc = _pyc_header_bytes(pyc_magic) + body
+        if len(full_pyc) > max_file_bytes or total_b + len(full_pyc) > max_bytes:
+            continue
+        safe_mod = str(mod_name).replace(".", "/") + ".pyc"
+        rel = _sanitize_path(f"pyz_modules/{safe_mod}")
+        dest = out_sub / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(full_pyc)
+        total_b += len(full_pyc)
+        out_files.append({
+            "relative_path": rel,
+            "size_bytes": len(full_pyc),
+            "sha256": _sha256_bytes(full_pyc),
+            "type": "pyinstaller_pyz_module",
+        })
+    return out_files
+
+
+def _unpack_pyinstaller_full(
+    data: bytes,
+    stage: Path,
+    *,
+    max_files: int,
+    max_bytes: int,
+    max_file_bytes: int,
+) -> list[dict[str, Any]]:
+    """Extracts PyInstaller CArchive TOC + PYZ sub-modules with fallback to PYZ carving."""
+    extracted: list[dict[str, Any]] = []
+    total_b = 0
+
+    cookie_pos = data.rfind(PYINSTALLER_COOKIE)
+    if cookie_pos != -1:
+        # Try PyInstaller v2.1+ (88 bytes) or v2.0 (24 bytes) cookie layout
+        for hdr_sz in (88, 24):
+            if cookie_pos + hdr_sz > len(data):
+                continue
+            if hdr_sz == 88:
+                _mag, pkg_len, toc_off, toc_len, pyvers = struct.unpack_from("!8sIIII", data, cookie_pos)
+            else:
+                _mag, pkg_len, toc_off, toc_len, pyvers = struct.unpack_from("!8sIIII", data, cookie_pos)
+            overlay_off = (cookie_pos + hdr_sz) - pkg_len
+            abs_toc = overlay_off + toc_off
+            if overlay_off >= 0 and toc_len > 0 and abs_toc + toc_len <= cookie_pos:
+                pos = abs_toc
+                end_toc = abs_toc + toc_len
+                while pos + 18 <= end_toc and len(extracted) < max_files:
+                    entry_len, dpos, dlen, ulen, cflag, tcode = struct.unpack_from("!IIIIBc", data, pos)
+                    if entry_len < 18 or pos + entry_len > end_toc:
+                        break
+                    name_raw = data[pos + 18 : pos + entry_len].split(b"\x00", 1)[0]
+                    name_s = name_raw.decode("utf-8", errors="replace").strip() or f"entry_{pos:x}"
+                    tchar = tcode.decode("ascii", errors="replace")
+                    abs_data = overlay_off + dpos
+                    if 0 <= abs_data and abs_data + dlen <= len(data):
+                        raw_entry = data[abs_data : abs_data + dlen]
+                        if cflag == 1:
+                            try:
+                                raw_entry = zlib.decompress(raw_entry)
+                            except Exception:
+                                pass
+                        if tchar == "s" and not name_s.endswith(".pyc"):
+                            name_s = name_s + ".pyc"
+                            if not (len(raw_entry) >= 4 and raw_entry[2:4] == b"\x0d\x0a"):
+                                raw_entry = _pyc_header_bytes() + raw_entry
+                        if len(raw_entry) <= max_file_bytes and total_b + len(raw_entry) <= max_bytes:
+                            rel = _sanitize_path(f"carchive/{name_s}")
+                            dest = stage / rel
+                            dest.parent.mkdir(parents=True, exist_ok=True)
+                            dest.write_bytes(raw_entry)
+                            total_b += len(raw_entry)
+                            extracted.append({
+                                "relative_path": rel,
+                                "size_bytes": len(raw_entry),
+                                "sha256": _sha256_bytes(raw_entry),
+                                "type": f"pyinstaller_{tchar}",
+                            })
+                            if tchar in ("z", "Z") and raw_entry.startswith(PYZ_COOKIE):
+                                pyz_items = _extract_pyz_modules(
+                                    raw_entry,
+                                    stage,
+                                    max_files=max(1, max_files - len(extracted)),
+                                    max_bytes=max(1, max_bytes - total_b),
+                                    max_file_bytes=max_file_bytes,
+                                )
+                                extracted.extend(pyz_items)
+                                total_b += sum(it["size_bytes"] for it in pyz_items)
+                    pos += entry_len
+                if extracted:
+                    return extracted
+
+    pos = data.find(PYZ_COOKIE)
+    if pos != -1:
+        pyz_blob = data[pos:]
+        if len(pyz_blob) > min(max_file_bytes, max_bytes):
+            raise UnpackError("pyz_output_budget_exceeded")
+        (stage / "extracted_payload.pyz").write_bytes(pyz_blob)
+        extracted.append({
+            "relative_path": "extracted_payload.pyz",
+            "size_bytes": len(pyz_blob),
+            "sha256": _sha256_bytes(pyz_blob),
+        })
+        pyz_items = _extract_pyz_modules(
+            pyz_blob,
+            stage,
+            max_files=max(1, max_files - len(extracted)),
+            max_bytes=max(1, max_bytes - len(pyz_blob)),
+            max_file_bytes=max_file_bytes,
+        )
+        extracted.extend(pyz_items)
+    return extracted
+
+
+def unpack_recursive_tree(
+    target: Path,
+    out_dir: Path,
+    *,
+    max_depth: int = 4,
+    allow_dynamic_pe_unpack: bool = True,
+    max_files: int = 5000,
+    max_bytes: int = 512 * 1024 * 1024,
+    max_file_bytes: int = 64 * 1024 * 1024,
+) -> dict[str, Any]:
+    """Recursively unpacks nested containers (installers, ASAR, ZIP, PyInstaller, packed PEs)."""
+    target_p = Path(target)
+    dest_p = Path(out_dir)
+    root_rep = unpack_container(
+        target_p,
+        dest_p,
+        max_files=max_files,
+        max_bytes=max_bytes,
+        max_file_bytes=max_file_bytes,
+    )
+    layers: list[dict[str, Any]] = [
+        {"depth": 0, "artifact": str(target_p), "format": root_rep.get("container_format"), "status": root_rep.get("status"), "file_count": root_rep.get("file_count", 0)}
+    ]
+    if root_rep.get("status") == "failed":
+        return {"schema": "recursive-unpack-tree.v1", "status": "failed", "root": root_rep, "layers": layers, "nested_unpacked": []}
+
+    nested_results: list[dict[str, Any]] = []
+    visited_hashes: set[str] = {str(root_rep.get("target_sha256") or "")}
+
+    queue: list[tuple[Path, int]] = [(dest_p, 1)]
+    while queue:
+        cur_dir, depth = queue.pop(0)
+        if depth > max_depth or not cur_dir.is_dir():
+            continue
+        for item in sorted(cur_dir.rglob("*")):
+            if not item.is_file() or item.is_symlink():
+                continue
+            item_bytes = item.read_bytes()
+            ih = _sha256_bytes(item_bytes)
+            if ih in visited_hashes:
+                continue
+            visited_hashes.add(ih)
+
+            sub_fmt = detect_container_format(item)
+            if sub_fmt in {"asar", "zip", "tar", "gzip", "nsis", "innosetup", "pyinstaller"}:
+                sub_out = item.parent / f"{item.name}.unpacked"
+                if not sub_out.exists():
+                    sub_rep = unpack_container(
+                        item,
+                        sub_out,
+                        max_files=max_files,
+                        max_bytes=max_bytes,
+                        max_file_bytes=max_file_bytes,
+                    )
+                    nested_results.append({"path": str(sub_out), "source": str(item), "format": sub_fmt, "status": sub_rep.get("status"), "file_count": sub_rep.get("file_count", 0)})
+                    layers.append({"depth": depth, "artifact": str(item), "format": sub_fmt, "status": sub_rep.get("status"), "file_count": sub_rep.get("file_count", 0)})
+                    if sub_rep.get("status") != "failed":
+                        queue.append((sub_out, depth + 1))
+            elif allow_dynamic_pe_unpack and len(item_bytes) >= 64 and item_bytes[:2] == b"MZ":
+                from aether_re.packer_detect import analyze_packer_and_compiler
+                pk = analyze_packer_and_compiler(item, data=item_bytes)
+                if pk.get("is_packed"):
+                    from aether_re.dynamic_unpacker import unpack_pe_in_sandbox
+                    unp_path = item.parent / f"{item.stem}.unpacked{item.suffix or '.bin'}"
+                    du = unpack_pe_in_sandbox(item_bytes, output_pe_path=unp_path)
+                    if du.get("status") == "unpacked":
+                        nested_results.append({"path": str(unp_path), "source": str(item), "format": "packed_pe", "status": "unpacked", "oep_rva": du.get("oep_rva")})
+                        layers.append({"depth": depth, "artifact": str(item), "format": "packed_pe", "status": "unpacked", "file_count": 1})
+
+    return {
+        "schema": "recursive-unpack-tree.v1",
+        "status": "complete",
+        "destination": str(dest_p.resolve()),
+        "root": root_rep,
+        "layers": layers,
+        "nested_unpacked": nested_results,
     }

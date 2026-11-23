@@ -96,6 +96,11 @@ _EXT_HELPER_SIGS: Dict[str, Tuple[Tuple[ir.Type, ...], ir.Type]] = {
     "aether_fcall_f64": ((_I64, _I64, _I64, _I64, _I64, _I64, _I64, _I64, _I64), _F64),
     "aether_cfcall_f64": ((_I64, _I64, _I64, _I64, _I64, _I64, _I64, _I64, _I64), _F64),
     "aether_pmaxud64": ((_I64, _I64), _I64),
+    "aether_paddd64": ((_I64, _I64), _I64),
+    "aether_pmulld64": ((_I64, _I64), _I64),
+    "aether_paddb64": ((_I64, _I64), _I64),
+    "aether_f32_add": ((_I64, _I64), _I64),
+    "aether_f32_mul": ((_I64, _I64), _I64),
     "aether_pcmpeqd64": ((_I64, _I64), _I64),
     "aether_psubd64": ((_I64, _I64), _I64),
     "aether_pcmpeqb64": ((_I64, _I64), _I64),
@@ -517,6 +522,32 @@ class _FunctionLowerer:
             va = self.builder.bitcast(a, ir.VectorType(_I32, 2))
             vb = self.builder.bitcast(b, ir.VectorType(_I32, 2))
             return self.builder.bitcast(self.builder.sub(va, vb), _I64)
+        if fname == "aether_paddd64" and len(arg_nodes) == 2:
+            a = self._ensure_i64(self._eval_ast(arg_nodes[0]))
+            b = self._ensure_i64(self._eval_ast(arg_nodes[1]))
+            va = self.builder.bitcast(a, ir.VectorType(_I32, 2))
+            vb = self.builder.bitcast(b, ir.VectorType(_I32, 2))
+            return self.builder.bitcast(self.builder.add(va, vb), _I64)
+        if fname == "aether_pmulld64" and len(arg_nodes) == 2:
+            a = self._ensure_i64(self._eval_ast(arg_nodes[0]))
+            b = self._ensure_i64(self._eval_ast(arg_nodes[1]))
+            va = self.builder.bitcast(a, ir.VectorType(_I32, 2))
+            vb = self.builder.bitcast(b, ir.VectorType(_I32, 2))
+            return self.builder.bitcast(self.builder.mul(va, vb), _I64)
+        if fname == "aether_paddb64" and len(arg_nodes) == 2:
+            a = self._ensure_i64(self._eval_ast(arg_nodes[0]))
+            b = self._ensure_i64(self._eval_ast(arg_nodes[1]))
+            va = self.builder.bitcast(a, ir.VectorType(_I8, 8))
+            vb = self.builder.bitcast(b, ir.VectorType(_I8, 8))
+            return self.builder.bitcast(self.builder.add(va, vb), _I64)
+        if fname in ("aether_f32_add", "aether_f32_mul") and len(arg_nodes) == 2:
+            a32 = self.builder.trunc(self._ensure_i64(self._eval_ast(arg_nodes[0])), _I32)
+            b32 = self.builder.trunc(self._ensure_i64(self._eval_ast(arg_nodes[1])), _I32)
+            fa = self.builder.bitcast(a32, ir.FloatType())
+            fb = self.builder.bitcast(b32, ir.FloatType())
+            res_f = self.builder.fadd(fa, fb) if fname == "aether_f32_add" else self.builder.fmul(fa, fb)
+            res32 = self.builder.bitcast(res_f, _I32)
+            return self.builder.zext(res32, _I64)
 
         # 3c. Optional null-guarded direct native pointer memory load/store (inline_direct_memory=True)
         if self.inline_direct_memory and fname == "aether_mem_read" and len(arg_nodes) == 2:

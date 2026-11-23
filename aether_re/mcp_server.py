@@ -736,6 +736,64 @@ TOOLS = [
             "required": ["source_c", "decompiled_c", "function_name"]
         }
     },
+    {
+        "name": "aether_universal_clone",
+        "description": "Orquestrador OmniClone v8.0: desempacota recursivamente, reconstrói projeto compilável completo em qualquer ecossistema, gera harness simbólico e audita vulnerabilidades SARIF.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "target": {"type": "string", "description": "Caminho do artefato alvo"},
+                "out_dir": {"type": "string", "description": "Diretório de saída do workspace clonado"},
+            },
+            "required": ["target", "out_dir"]
+        }
+    },
+    {
+        "name": "aether_dynamic_unpack",
+        "description": "Desempacota binário PE32/PE64 em emulação Unicorn isolada localizando OEP e reconstruindo IAT.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "target": {"type": "string", "description": "Caminho do binário PE packed"},
+                "out_pe": {"type": "string", "description": "Caminho opcional do PE desempacotado"},
+            },
+            "required": ["target"]
+        }
+    },
+    {
+        "name": "aether_cff_devirtualize",
+        "description": "Remove Control-Flow Flattening via Z3 BV64 e resolve hashes de API em código C levantado.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "c_code": {"type": "string", "description": "Código C levantado contendo dispatcher CFF"},
+            },
+            "required": ["c_code"]
+        }
+    },
+    {
+        "name": "aether_symbolic_equivalence",
+        "description": "Sintetiza inputs concretos via angr para cobertura de branches e prova equivalência BV64.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "hex_bytes": {"type": "string", "description": "Bytes hexadecimais de código de máquina"},
+                "arch": {"type": "string", "description": "amd64, x86_32 ou aarch64"},
+            },
+            "required": ["hex_bytes"]
+        }
+    },
+    {
+        "name": "aether_exploit_prove",
+        "description": "Audita projeto reconstruído para taint-to-sink, overflow Z3 PoC e exporta SARIF 2.1.0.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "project_dir": {"type": "string", "description": "Diretório do projeto reconstruído"},
+            },
+            "required": ["project_dir"]
+        }
+    },
 ]
 
 
@@ -1350,6 +1408,36 @@ class AetherMcpDispatcher:
             parsed_c = list(constraints)
         return evaluate_path_feasibility(parsed_c)
 
+    @staticmethod
+    def handle_universal_clone(target: str, out_dir: str) -> dict[str, Any]:
+        from aether_re.omniclone import clone_and_audit_project
+        return clone_and_audit_project(target, out_dir)
+
+    @staticmethod
+    def handle_dynamic_unpack(target: str, out_pe: str | None = None) -> dict[str, Any]:
+        from aether_re.dynamic_unpacker import unpack_file_in_sandbox
+        res = unpack_file_in_sandbox(target, output_pe_path=out_pe)
+        res.pop("unpacked_bytes", None)
+        return res
+
+    @staticmethod
+    def handle_cff_devirtualize(c_code: str) -> dict[str, Any]:
+        from aether_re.cff_devirtualizer import rewrite_api_hashes_in_c, unflatten_cff_function
+        unflat_c, cff_m = unflatten_cff_function(c_code)
+        ann_c, hash_m = rewrite_api_hashes_in_c(unflat_c)
+        return {"optimized_c": ann_c, "cff_metrics": cff_m, "hash_metrics": hash_m}
+
+    @staticmethod
+    def handle_symbolic_equivalence(hex_bytes: str, arch: str = "amd64") -> dict[str, Any]:
+        from aether_re.symbolic_equivalence import synthesize_branch_inputs_angr
+        raw = bytes.fromhex(re.sub(r"\s+", "", hex_bytes))
+        return synthesize_branch_inputs_angr(raw, arch=arch)
+
+    @staticmethod
+    def handle_exploit_prove(project_dir: str) -> dict[str, Any]:
+        from aether_re.exploit_prover import audit_reconstructed_project_exploits
+        return audit_reconstructed_project_exploits(project_dir)
+
 
 def run_mcp_server() -> int:
     """Executa o loop stdio oficial do servidor MCP (JSON-RPC 2.0)."""
@@ -1574,6 +1662,16 @@ def run_mcp_server() -> int:
                         )
                     elif tool_name == "aether_check_feasibility":
                         data = dispatcher.handle_check_feasibility(args["constraints"])
+                    elif tool_name == "aether_universal_clone":
+                        data = dispatcher.handle_universal_clone(args["target"], args["out_dir"])
+                    elif tool_name == "aether_dynamic_unpack":
+                        data = dispatcher.handle_dynamic_unpack(args["target"], out_pe=args.get("out_pe"))
+                    elif tool_name == "aether_cff_devirtualize":
+                        data = dispatcher.handle_cff_devirtualize(args["c_code"])
+                    elif tool_name == "aether_symbolic_equivalence":
+                        data = dispatcher.handle_symbolic_equivalence(args["hex_bytes"], arch=args.get("arch", "amd64"))
+                    elif tool_name == "aether_exploit_prove":
+                        data = dispatcher.handle_exploit_prove(args["project_dir"])
                     else:
                         raise ValueError(f"Ferramenta desconhecida: {tool_name}")
 

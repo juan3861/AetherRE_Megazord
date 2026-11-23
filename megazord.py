@@ -3563,6 +3563,14 @@ def cmd_reconstruct_project(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_universal_clone(args: argparse.Namespace) -> int:
+    """Executa o orquestrador OmniClone v8.0 ponta a ponta."""
+    from aether_re.omniclone import clone_and_audit_project
+    rep = clone_and_audit_project(args.target, args.out_dir)
+    print(json.dumps(rep, indent=2, ensure_ascii=False))
+    return 0 if rep.get("status") == "complete" else 1
+
+
 def cmd_omni_audit(args: argparse.Namespace) -> int:
     """Orquestrador paralelo Zero-Copy das 21 engrenagens sobre um único buffer em memória."""
     from aether_re.omni_audit import scan_file_omni_audit
@@ -5401,6 +5409,11 @@ def main() -> int:
     rec_parser.add_argument("--out-dir", required=True, help="Diretório de saída do projeto reconstruído")
     rec_parser.add_argument("--out", help="Arquivo opcional de saída JSON")
     rec_parser.set_defaults(func=cmd_reconstruct_project)
+
+    uc_parser = sub.add_parser("universal-clone", help="Pipeline OmniClone v8.0: unpack recursivo, reconstrução universal e auditoria SARIF")
+    uc_parser.add_argument("target", help="Artefato alvo")
+    uc_parser.add_argument("--out-dir", required=True, help="Workspace clonado de saída")
+    uc_parser.set_defaults(func=cmd_universal_clone)
 
     args = p.parse_args()
 

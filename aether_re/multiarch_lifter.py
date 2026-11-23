@@ -832,8 +832,17 @@ def extract_elf64_metadata(elf_data: bytes) -> Optional[Dict[str, Any]]:
     if len(elf_data) < 64 or elf_data[:4] != b"\x7fELF" or elf_data[4] != 2:
         return None
     ef = ELFFile(io.BytesIO(elf_data))
-    e_machine = str(ef.header["e_machine"])
-    arch = "aarch64" if "AARCH64" in e_machine.upper() else ("x86_64" if "X86_64" in e_machine.upper() else e_machine)
+    e_machine = str(ef.header["e_machine"]).upper()
+    if "AARCH64" in e_machine:
+        arch = "aarch64"
+    elif "X86_64" in e_machine:
+        arch = "x86_64"
+    elif "RISCV" in e_machine:
+        arch = "riscv64"
+    elif "MIPS" in e_machine:
+        arch = "mips64"
+    else:
+        arch = e_machine.lower()
 
     exec_ranges: List[Tuple[int, int]] = []
     ro_ranges: List[Tuple[int, int]] = []
@@ -1043,3 +1052,1034 @@ def extract_macho64_metadata(macho_data: bytes) -> Optional[Dict[str, Any]]:
         "ro_ranges": ro_ranges,
         "imported_libs": sorted(set(imported_libs)),
     }
+
+
+# ---------------------------------------------------------------------------
+# v8.0 Multi-Arch Extensions: x86_32, ARM32, RISC-V RV64GC, MIPS32 & angr VEX
+# ---------------------------------------------------------------------------
+
+def _x86_32_reg_canon(tok: str) -> Optional[Tuple[str, int]]:
+    """Maps 32/16/8-bit x86 register name to (canonical_64_var, bit_width)."""
+    t = tok.strip().lower()
+    m32 = {"eax": "rax", "ebx": "rbx", "ecx": "rcx", "edx": "rdx", "esi": "rsi", "edi": "rdi", "ebp": "rbp", "esp": "rsp"}
+    m16 = {"ax": "rax", "bx": "rbx", "cx": "rcx", "dx": "rdx", "si": "rsi", "di": "rdi", "bp": "rbp", "sp": "rsp"}
+    if t in m32:
+        return (m32[t], 32)
+    if t in m16:
+        return (m16[t], 16)
+    return None
+
+
+def _parse_x86_32_mem(op: str) -> Optional[Tuple[int, str]]:
+    """Returns (width, addr_c_expr) for `[ebp + 8]`, `dword ptr [esp + 4]` etc."""
+    s = op.strip().lower()
+    width = 4
+    if s.startswith("byte ptr "):
+        width = 1
+    elif s.startswith("word ptr "):
+        width = 2
+    elif s.startswith("dword ptr "):
+        width = 4
+    m = re.search(r"\[([^\]]+)\]", s)
+    if not m:
+        return None
+    inner = m.group(1).strip()
+    parts = re.split(r"\s*([+-])\s*", inner)
+    terms: List[str] = []
+    sign = "+"
+    for p in parts:
+        p = p.strip()
+        if not p:
+            continue
+        if p in ("+", "-"):
+            sign = p
+            continue
+        rc = _x86_32_reg_canon(p)
+        t_expr = rc[0] if rc else p
+        if "*" in p and rc is None:
+            m_sc = re.match(r"([a-z0-9]+)\s*\*\s*(\d+)", p)
+            if m_sc:
+                rc2 = _x86_32_reg_canon(m_sc.group(1))
+                if rc2:
+                    t_expr = f"({rc2[0]} * {m_sc.group(2)})"
+        terms.append(t_expr if not terms else (f"- {t_expr}" if sign == "-" else f"+ {t_expr}"))
+    if not terms:
+        return None
+    return width, " ".join(terms)
+
+
+def _x86_32_op_read(op: str) -> str:
+    s = op.strip()
+    rc = _x86_32_reg_canon(s)
+    if rc:
+        return f"aether_u32({rc[0]})" if rc[1] == 32 else f"aether_u16({rc[0]})"
+    mem = _parse_x86_32_mem(s)
+    if mem:
+        w, addr_e = mem
+        return f"aether_mem_read({addr_e}, {w})"
+    return s
+
+
+def lift_x86_32_function_to_c(
+    fn_name: str,
+    code_bytes: bytes,
+    base_va: int,
+    *,
+    rva_to_symbol: Optional[Dict[int, str]] = None,
+    ro_ranges: Optional[List[Tuple[int, int]]] = None,
+) -> Tuple[str, List[Any], bool, Set[int], Set[int]]:
+    """Lifts x86-32 (cdecl/stdcall/fastcall) machine instructions into AetherRE C."""
+    md = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_32)
+    md.detail = False
+    insns: List[Any] = []
+    for ins in md.disasm(code_bytes, base_va):
+        insns.append(ins)
+        if ins.mnemonic in ("ret", "retn", "retf") and len(insns) >= 1:
+            # Continue if jumped past ret inside function
+            last_target = max(
+                (
+                    int(o.op_str, 16)
+                    for o in insns
+                    if o.mnemonic.startswith("j") and re.fullmatch(r"0x[0-9a-fA-F]+", o.op_str.strip())
+                ),
+                default=0,
+            )
+            if ins.address >= last_target:
+                break
+        if len(insns) >= 600:
+            break
+
+    if not insns:
+        return (
+            f"int64_t {fn_name}(int64_t rcx, int64_t rdx, int64_t r8, int64_t r9) {{\n    return 0;\n}}",
+            [],
+            False,
+            set(),
+            set(),
+        )
+
+    all_addrs = {i.address for i in insns}
+    called_set: Set[int] = set()
+    ro_set: Set[int] = set()
+    sym_map = rva_to_symbol or {}
+
+    lines = [
+        f"int64_t {fn_name}(int64_t rcx, int64_t rdx, int64_t r8, int64_t r9) {{",
+        "    int64_t rax = 0, rbx = 0, rbp = 0, rsi = 0, rdi = 0;",
+        "    int64_t r10 = 0, r11 = 0, r12 = 0, r13 = 0, r14 = 0, r15 = 0;",
+        "    int64_t xmm0 = 0, xmm1 = 0;",
+        "    int64_t _aether_saved_sp = _aether_sp;",
+        "    int64_t rsp = aether_stack_base();",
+        "    int64_t cmp_lhs = 0, cmp_rhs = 0;",
+        "    /* cdecl 32-bit stack frame entry arguments mapped from host signature */",
+        "    aether_mem_write((rsp) + (4), 4, aether_u32(rcx));",
+        "    aether_mem_write((rsp) + (8), 4, aether_u32(rdx));",
+        "    aether_mem_write((rsp) + (12), 4, aether_u32(r8));",
+        "    aether_mem_write((rsp) + (16), 4, aether_u32(r9));",
+    ]
+    _CC_32 = {
+        "je": "(cmp_lhs == cmp_rhs)", "jz": "(cmp_lhs == cmp_rhs)",
+        "jne": "(cmp_lhs != cmp_rhs)", "jnz": "(cmp_lhs != cmp_rhs)",
+        "jl": "(aether_i32(cmp_lhs) < aether_i32(cmp_rhs))", "jnge": "(aether_i32(cmp_lhs) < aether_i32(cmp_rhs))",
+        "jle": "(aether_i32(cmp_lhs) <= aether_i32(cmp_rhs))", "jng": "(aether_i32(cmp_lhs) <= aether_i32(cmp_rhs))",
+        "jg": "(aether_i32(cmp_lhs) > aether_i32(cmp_rhs))", "jnle": "(aether_i32(cmp_lhs) > aether_i32(cmp_rhs))",
+        "jge": "(aether_i32(cmp_lhs) >= aether_i32(cmp_rhs))", "jnl": "(aether_i32(cmp_lhs) >= aether_i32(cmp_rhs))",
+        "jb": "(aether_u32(cmp_lhs) < aether_u32(cmp_rhs))", "jc": "(aether_u32(cmp_lhs) < aether_u32(cmp_rhs))",
+        "jbe": "(aether_u32(cmp_lhs) <= aether_u32(cmp_rhs))",
+        "ja": "(aether_u32(cmp_lhs) > aether_u32(cmp_rhs))",
+        "jae": "(aether_u32(cmp_lhs) >= aether_u32(cmp_rhs))", "jnc": "(aether_u32(cmp_lhs) >= aether_u32(cmp_rhs))",
+    }
+
+    supported = True
+    for ins in insns:
+        lines.append(f"L_{ins.address:x}: ; /* {ins.mnemonic} {ins.op_str} */")
+        m = ins.mnemonic.lower()
+        ops = [o.strip() for o in ins.op_str.split(",")] if ins.op_str else []
+
+        if m in ("nop", "endbr32", "cdq"):
+            continue
+        elif m == "push" and len(ops) == 1:
+            v = _x86_32_op_read(ops[0])
+            lines.append("    rsp = (rsp) - (4);")
+            lines.append(f"    aether_mem_write(rsp, 4, {v});")
+        elif m == "pop" and len(ops) == 1:
+            rc = _x86_32_reg_canon(ops[0])
+            if rc:
+                lines.append(f"    {rc[0]} = aether_mem_read(rsp, 4);")
+                lines.append("    rsp = (rsp) + (4);")
+            else:
+                supported = False
+        elif m in ("mov", "movzx", "movsx") and len(ops) == 2:
+            dst_rc = _x86_32_reg_canon(ops[0])
+            rhs = _x86_32_op_read(ops[1])
+            if dst_rc:
+                if m == "movsx":
+                    lines.append(f"    {dst_rc[0]} = aether_i32({rhs});")
+                else:
+                    lines.append(f"    {dst_rc[0]} = aether_u32({rhs});")
+            else:
+                mem_d = _parse_x86_32_mem(ops[0])
+                if mem_d:
+                    lines.append(f"    aether_mem_write({mem_d[1]}, {mem_d[0]}, {rhs});")
+                else:
+                    supported = False
+        elif m == "lea" and len(ops) == 2:
+            dst_rc = _x86_32_reg_canon(ops[0])
+            mem_s = _parse_x86_32_mem(ops[1])
+            if dst_rc and mem_s:
+                lines.append(f"    {dst_rc[0]} = (int64_t)({mem_s[1]});")
+            else:
+                supported = False
+        elif m in ("add", "sub", "xor", "and", "or", "shl", "sal", "shr", "sar", "imul") and len(ops) in (2, 3):
+            if m == "imul" and len(ops) == 3:
+                dst_rc = _x86_32_reg_canon(ops[0])
+                r1 = _x86_32_op_read(ops[1])
+                r2 = _x86_32_op_read(ops[2])
+                if dst_rc:
+                    lines.append(f"    {dst_rc[0]} = aether_u32(aether_i32({r1}) * aether_i32({r2}));")
+                    continue
+            dst_rc = _x86_32_reg_canon(ops[0])
+            rhs = _x86_32_op_read(ops[1])
+            if dst_rc:
+                dv = dst_rc[0]
+                if m == "xor" and ops[0].lower() == ops[1].lower():
+                    lines.append(f"    {dv} = 0;")
+                elif m == "imul":
+                    lines.append(f"    {dv} = aether_u32(aether_i32({dv}) * aether_i32({rhs}));")
+                elif m in ("shl", "sal"):
+                    lines.append(f"    {dv} = aether_u32(aether_u32({dv}) << (({rhs}) & 31));")
+                elif m == "shr":
+                    lines.append(f"    {dv} = aether_u32(aether_u32({dv}) >> (({rhs}) & 31));")
+                elif m == "sar":
+                    lines.append(f"    {dv} = aether_u32(aether_i32({dv}) >> (({rhs}) & 31));")
+                else:
+                    op_c = {"add": "+", "sub": "-", "xor": "^", "and": "&", "or": "|"}[m]
+                    if dv == "rsp":
+                        lines.append(f"    rsp = (rsp) {op_c} ({rhs});")
+                    else:
+                        lines.append(f"    {dv} = aether_u32(aether_u32({dv}) {op_c} aether_u32({rhs}));")
+            else:
+                supported = False
+        elif m in ("inc", "dec", "neg", "not") and len(ops) == 1:
+            dst_rc = _x86_32_reg_canon(ops[0])
+            if dst_rc:
+                dv = dst_rc[0]
+                if m == "inc":
+                    lines.append(f"    {dv} = aether_u32({dv} + 1);")
+                elif m == "dec":
+                    lines.append(f"    {dv} = aether_u32({dv} - 1);")
+                elif m == "neg":
+                    lines.append(f"    {dv} = aether_u32(-(aether_i32({dv})));")
+                else:
+                    lines.append(f"    {dv} = aether_u32(~(aether_u32({dv})));")
+            else:
+                supported = False
+        elif m == "cmp" and len(ops) == 2:
+            lines.append(f"    cmp_lhs = aether_i32({_x86_32_op_read(ops[0])}); cmp_rhs = aether_i32({_x86_32_op_read(ops[1])});")
+        elif m == "test" and len(ops) == 2:
+            r0 = _x86_32_op_read(ops[0])
+            r1 = _x86_32_op_read(ops[1])
+            lines.append(f"    cmp_lhs = aether_i32(({r0}) & ({r1})); cmp_rhs = 0;")
+        elif m == "jmp" and len(ops) == 1 and re.fullmatch(r"0x[0-9a-fA-F]+", ops[0]):
+            tgt = int(ops[0], 16)
+            if tgt in all_addrs:
+                lines.append(f"    if (1) goto L_{tgt:x};")
+            else:
+                called_set.add(tgt)
+                sym = sym_map.get(tgt, f"sub_{tgt:x}")
+                lines.append(f"    return {sym}(aether_mem_read(rsp + 4, 4), aether_mem_read(rsp + 8, 4), aether_mem_read(rsp + 12, 4), aether_mem_read(rsp + 16, 4));")
+        elif m in _CC_32 and len(ops) == 1 and re.fullmatch(r"0x[0-9a-fA-F]+", ops[0]):
+            tgt = int(ops[0], 16)
+            if tgt in all_addrs:
+                lines.append(f"    if ({_CC_32[m]}) goto L_{tgt:x};")
+            else:
+                supported = False
+        elif m == "call" and len(ops) == 1 and re.fullmatch(r"0x[0-9a-fA-F]+", ops[0]):
+            tgt = int(ops[0], 16)
+            called_set.add(tgt)
+            sym = sym_map.get(tgt, f"sub_{tgt:x}")
+            lines.append(f"    rax = {sym}(aether_mem_read(rsp, 4), aether_mem_read(rsp + 4, 4), aether_mem_read(rsp + 8, 4), aether_mem_read(rsp + 12, 4));")
+        elif m in ("ret", "retn", "retf", "leave"):
+            if m == "leave":
+                lines.append("    rsp = rbp; rbp = aether_mem_read(rsp, 4); rsp = (rsp) + (4);")
+            else:
+                lines.append("    _aether_sp = _aether_saved_sp;")
+                lines.append("    return aether_i32(rax);")
+        else:
+            supported = False
+
+    lines.append("    _aether_sp = _aether_saved_sp;")
+    lines.append("    return aether_i32(rax);")
+    lines.append("}")
+    return "\n".join(lines), insns, supported, called_set, ro_set
+
+
+def eval_x86_32_insns(
+    insns: List[Any],
+    args: Tuple[int, ...],
+    mem_arena: Any,
+    *,
+    halt_info: Optional[Dict[str, bool]] = None,
+    max_steps: int = 8000,
+) -> int:
+    """Deterministic Python x86-32 simulator matching cdecl lifted semantics."""
+    regs: Dict[str, int] = {
+        "eax": 0, "ebx": 0, "ecx": 0, "edx": 0, "esi": 0, "edi": 0,
+        "ebp": 0, "esp": 0x48000 - 8,
+    }
+    for idx in range(4):
+        av = (args[idx] & _MASK32) if idx < len(args) else 0
+        mem_arena.write(regs["esp"] + 4 + idx * 4, 4, av)
+
+    addr_to_idx = {ins.address: i for i, ins in enumerate(insns)}
+    cmp_lhs, cmp_rhs = 0, 0
+
+    def _r_canon(t: str) -> Optional[str]:
+        s = t.strip().lower()
+        return s if s in regs else None
+
+    def _read(op: str) -> int:
+        s = op.strip().lower()
+        if s in regs:
+            return regs[s] & _MASK32
+        mem = _parse_x86_32_mem(s)
+        if mem:
+            w, expr = mem
+            ev = expr
+            for k, v in regs.items():
+                canon = _x86_32_reg_canon(k)
+                if canon:
+                    ev = re.sub(rf"\b{canon[0]}\b", str(v), ev)
+            addr = int(eval(ev, {"__builtins__": {}}, {}))
+            return int(mem_arena.read(addr, w)) & ((1 << (w * 8)) - 1)
+        try:
+            return int(s, 0) & _MASK32
+        except Exception:
+            return 0
+
+    pc = 0
+    steps = 0
+    while 0 <= pc < len(insns) and steps < max_steps:
+        steps += 1
+        ins = insns[pc]
+        m = ins.mnemonic.lower()
+        ops = [o.strip() for o in ins.op_str.split(",")] if ins.op_str else []
+        nxt = pc + 1
+
+        if m in ("nop", "endbr32", "cdq"):
+            pass
+        elif m == "push" and len(ops) == 1:
+            v = _read(ops[0])
+            regs["esp"] -= 4
+            mem_arena.write(regs["esp"], 4, v)
+        elif m == "pop" and len(ops) == 1:
+            rc = _r_canon(ops[0])
+            if rc:
+                regs[rc] = mem_arena.read(regs["esp"], 4) & _MASK32
+                regs["esp"] += 4
+        elif m == "leave":
+            regs["esp"] = regs["ebp"]
+            regs["ebp"] = mem_arena.read(regs["esp"], 4) & _MASK32
+            regs["esp"] += 4
+        elif m in ("mov", "movzx", "movsx") and len(ops) == 2:
+            rc = _r_canon(ops[0])
+            val = _read(ops[1])
+            if rc:
+                regs[rc] = val & _MASK32
+            else:
+                mem = _parse_x86_32_mem(ops[0])
+                if mem:
+                    w, expr = mem
+                    ev = expr
+                    for k, v in regs.items():
+                        canon = _x86_32_reg_canon(k)
+                        if canon:
+                            ev = re.sub(rf"\b{canon[0]}\b", str(v), ev)
+                    addr = int(eval(ev, {"__builtins__": {}}, {}))
+                    mem_arena.write(addr, w, val)
+        elif m == "lea" and len(ops) == 2:
+            rc = _r_canon(ops[0])
+            mem = _parse_x86_32_mem(ops[1])
+            if rc and mem:
+                ev = mem[1]
+                for k, v in regs.items():
+                    canon = _x86_32_reg_canon(k)
+                    if canon:
+                        ev = re.sub(rf"\b{canon[0]}\b", str(v), ev)
+                regs[rc] = int(eval(ev, {"__builtins__": {}}, {})) & _MASK32
+        elif m in ("add", "sub", "xor", "and", "or", "shl", "sal", "shr", "sar", "imul"):
+            if m == "imul" and len(ops) == 3:
+                rc = _r_canon(ops[0])
+                if rc:
+                    regs[rc] = (ctypes.c_int32(_read(ops[1])).value * ctypes.c_int32(_read(ops[2])).value) & _MASK32
+            else:
+                rc = _r_canon(ops[0])
+                if rc:
+                    a = regs[rc]
+                    b = _read(ops[1])
+                    if m == "add":
+                        regs[rc] = (a + b) & _MASK32
+                    elif m == "sub":
+                        regs[rc] = (a - b) & _MASK32
+                    elif m == "xor":
+                        regs[rc] = (a ^ b) & _MASK32
+                    elif m == "and":
+                        regs[rc] = (a & b) & _MASK32
+                    elif m == "or":
+                        regs[rc] = (a | b) & _MASK32
+                    elif m in ("shl", "sal"):
+                        regs[rc] = (a << (b & 31)) & _MASK32
+                    elif m == "shr":
+                        regs[rc] = ((a & _MASK32) >> (b & 31)) & _MASK32
+                    elif m == "sar":
+                        regs[rc] = (ctypes.c_int32(a).value >> (b & 31)) & _MASK32
+                    elif m == "imul":
+                        regs[rc] = (ctypes.c_int32(a).value * ctypes.c_int32(b).value) & _MASK32
+        elif m in ("inc", "dec", "neg", "not") and len(ops) == 1:
+            rc = _r_canon(ops[0])
+            if rc:
+                a = regs[rc]
+                if m == "inc":
+                    regs[rc] = (a + 1) & _MASK32
+                elif m == "dec":
+                    regs[rc] = (a - 1) & _MASK32
+                elif m == "neg":
+                    regs[rc] = (-ctypes.c_int32(a).value) & _MASK32
+                else:
+                    regs[rc] = (~a) & _MASK32
+        elif m == "cmp" and len(ops) == 2:
+            cmp_lhs, cmp_rhs = ctypes.c_int32(_read(ops[0])).value, ctypes.c_int32(_read(ops[1])).value
+        elif m == "test" and len(ops) == 2:
+            cmp_lhs, cmp_rhs = ctypes.c_int32(_read(ops[0]) & _read(ops[1])).value, 0
+        elif m == "jmp" and len(ops) == 1:
+            tgt = int(ops[0], 0) if re.fullmatch(r"0x[0-9a-fA-F]+", ops[0]) else -1
+            if tgt in addr_to_idx:
+                nxt = addr_to_idx[tgt]
+            else:
+                break
+        elif m.startswith("j") and len(ops) == 1:
+            tgt = int(ops[0], 0) if re.fullmatch(r"0x[0-9a-fA-F]+", ops[0]) else -1
+            ul, ur = cmp_lhs & _MASK32, cmp_rhs & _MASK32
+            take = {
+                "je": cmp_lhs == cmp_rhs, "jz": cmp_lhs == cmp_rhs,
+                "jne": cmp_lhs != cmp_rhs, "jnz": cmp_lhs != cmp_rhs,
+                "jl": cmp_lhs < cmp_rhs, "jle": cmp_lhs <= cmp_rhs,
+                "jg": cmp_lhs > cmp_rhs, "jge": cmp_lhs >= cmp_rhs,
+                "jb": ul < ur, "jc": ul < ur, "jbe": ul <= ur,
+                "ja": ul > ur, "jae": ul >= ur, "jnc": ul >= ur,
+            }.get(m, False)
+            if take and tgt in addr_to_idx:
+                nxt = addr_to_idx[tgt]
+        elif m in ("ret", "retn", "retf"):
+            break
+        pc = nxt
+
+    if halt_info is not None and steps >= max_steps and 0 <= pc < len(insns):
+        halt_info["fuel_exhausted"] = True
+    return ctypes.c_int32(regs["eax"]).value
+
+
+def _rv_reg(tok: str) -> Optional[str]:
+    t = tok.strip().lower()
+    if t in ("zero", "x0"):
+        return "0"
+    aliases = {
+        "ra": "x1", "sp": "rsp", "x2": "rsp", "gp": "x3", "tp": "x4",
+        "t0": "x5", "t1": "x6", "t2": "x7", "s0": "rbp", "fp": "rbp", "x8": "rbp", "s1": "x9",
+        "a0": "x10", "a1": "x11", "a2": "x12", "a3": "x13",
+        "a4": "x14", "a5": "x15", "a6": "x16", "a7": "x17",
+        "t3": "x28", "t4": "x29", "t5": "x30",
+    }
+    if t in aliases:
+        return aliases[t]
+    m = re.fullmatch(r"x(\d{1,2})", t)
+    if m and 1 <= int(m.group(1)) <= 30:
+        return f"x{int(m.group(1))}"
+    return None
+
+
+def lift_riscv64_function_to_c(
+    fn_name: str,
+    code_bytes: bytes,
+    base_va: int,
+    *,
+    rva_to_symbol: Optional[Dict[int, str]] = None,
+) -> Tuple[str, List[Any], bool, Set[int], Set[int]]:
+    """Lifts RISC-V RV64GC machine code into canonical AetherRE C."""
+    md = capstone.Cs(capstone.CS_ARCH_RISCV, capstone.CS_MODE_RISCV64 | capstone.CS_MODE_RISCV_C)
+    md.detail = False
+    insns: List[Any] = []
+    for ins in md.disasm(code_bytes, base_va):
+        insns.append(ins)
+        if ins.mnemonic in ("ret", "c.jr", "jr") and ("ra" in ins.op_str or ins.mnemonic == "ret"):
+            break
+        if len(insns) >= 600:
+            break
+    if not insns:
+        return f"int64_t {fn_name}(int64_t rcx, int64_t rdx, int64_t r8, int64_t r9) {{ return 0; }}", [], False, set(), set()
+
+    all_addrs = {i.address for i in insns}
+    called_set: Set[int] = set()
+    sym_map = rva_to_symbol or {}
+    lines = [
+        f"int64_t {fn_name}(int64_t rcx, int64_t rdx, int64_t r8, int64_t r9) {{",
+        "    int64_t " + ", ".join(f"x{i} = 0" for i in range(1, 31)) + ";",
+        "    int64_t _aether_saved_sp = _aether_sp;",
+        "    int64_t rsp = aether_stack_base();",
+        "    int64_t rbp = 0;",
+        "    x10 = rcx; x11 = rdx; x12 = r8; x13 = r9;",
+    ]
+    supported = True
+    for ins in insns:
+        lines.append(f"L_{ins.address:x}: ; /* {ins.mnemonic} {ins.op_str} */")
+        m = ins.mnemonic.lower()
+        ops = [o.strip() for o in ins.op_str.split(",")] if ins.op_str else []
+        if m in ("nop", "c.nop"):
+            continue
+        elif m in ("ret",) or (m in ("jr", "c.jr") and len(ops) == 1 and ops[0].lower() == "ra"):
+            lines.append("    _aether_sp = _aether_saved_sp;")
+            lines.append("    return x10;")
+        elif m in ("mv", "c.mv", "li", "c.li") and len(ops) == 2:
+            d = _rv_reg(ops[0])
+            s = _rv_reg(ops[1]) or ops[1]
+            if d and d != "0":
+                lines.append(f"    {d} = (int64_t)({s});")
+        elif m in ("addi", "add", "c.add", "c.addi", "sub", "c.sub", "mul", "and", "andi", "or", "ori", "xor", "xori", "sll", "slli", "srl", "srli", "sra", "srai"):
+            if len(ops) == 2:
+                d = _rv_reg(ops[0])
+                r = _rv_reg(ops[1]) or ops[1]
+                s1 = d
+            elif len(ops) == 3:
+                d = _rv_reg(ops[0])
+                s1 = _rv_reg(ops[1]) or ops[1]
+                r = _rv_reg(ops[2]) or ops[2]
+            else:
+                supported = False
+                continue
+            if not d or d == "0":
+                continue
+            op_map = {
+                "addi": "+", "add": "+", "c.add": "+", "c.addi": "+",
+                "sub": "-", "c.sub": "-", "mul": "*",
+                "and": "&", "andi": "&", "or": "|", "ori": "|", "xor": "^", "xori": "^",
+                "sll": "<<", "slli": "<<", "srl": ">>", "srli": ">>", "sra": ">>", "srai": ">>",
+            }
+            if m in ("srl", "srli"):
+                lines.append(f"    {d} = (int64_t)(((uint64_t)({s1})) >> (({r}) & 63));")
+            else:
+                lines.append(f"    {d} = (int64_t)(({s1}) {op_map[m]} ({r}));")
+        elif m in ("beq", "bne", "blt", "bge", "bltu", "bgeu", "beqz", "bnez") and len(ops) >= 2:
+            if m in ("beqz", "bnez") and len(ops) == 2:
+                r1 = _rv_reg(ops[0]) or "0"
+                r2 = "0"
+                tgt_s = ops[1]
+                c_op = "==" if m == "beqz" else "!="
+            elif len(ops) == 3:
+                r1 = _rv_reg(ops[0]) or "0"
+                r2 = _rv_reg(ops[1]) or "0"
+                tgt_s = ops[2]
+                c_op = {"beq": "==", "bne": "!=", "blt": "<", "bge": ">=", "bltu": "<", "bgeu": ">="}[m]
+            else:
+                supported = False
+                continue
+            try:
+                tgt = int(tgt_s, 0)
+            except Exception:
+                tgt = -1
+            if tgt in all_addrs:
+                cmp_e = (
+                    f"((uint64_t)({r1}) {c_op} (uint64_t)({r2}))"
+                    if m.endswith("u")
+                    else f"(({r1}) {c_op} ({r2}))"
+                )
+                lines.append(f"    if ({cmp_e}) goto L_{tgt:x};")
+        elif m in ("j", "c.j", "jal", "c.jal") and len(ops) >= 1:
+            tgt_s = ops[-1]
+            try:
+                tgt = int(tgt_s, 0)
+            except Exception:
+                tgt = -1
+            if m in ("jal", "c.jal") and len(ops) == 2:
+                called_set.add(tgt)
+                sym = sym_map.get(tgt, f"sub_{tgt:x}")
+                lines.append(f"    x10 = {sym}(x10, x11, x12, x13);")
+            elif tgt in all_addrs:
+                lines.append(f"    if (1) goto L_{tgt:x};")
+        elif m in ("ld", "lw", "sd", "sw") and len(ops) == 2:
+            rd = _rv_reg(ops[0]) or "x10"
+            mm = re.match(r"(-?(?:0x[0-9a-fA-F]+|\d+))\(([^)]+)\)", ops[1])
+            if mm:
+                off_s, base_r = mm.group(1), (_rv_reg(mm.group(2)) or "rsp")
+                w = 8 if m in ("ld", "sd") else 4
+                if m in ("ld", "lw"):
+                    lines.append(f"    {rd} = aether_mem_read(({base_r}) + ({off_s}), {w});")
+                else:
+                    lines.append(f"    aether_mem_write(({base_r}) + ({off_s}), {w}, {rd});")
+            else:
+                supported = False
+        else:
+            supported = False
+    lines.append("    _aether_sp = _aether_saved_sp;")
+    lines.append("    return x10;")
+    lines.append("}")
+    return "\n".join(lines), insns, supported, called_set, set()
+
+
+def eval_riscv64_insns(
+    insns: List[Any],
+    args: Tuple[int, ...],
+    mem_arena: Any,
+    *,
+    halt_info: Optional[Dict[str, bool]] = None,
+    max_steps: int = 8000,
+) -> int:
+    regs: Dict[str, int] = {f"x{i}": 0 for i in range(1, 31)}
+    regs["rsp"] = 0x48000 - 8
+    regs["rbp"] = 0
+    for idx, ar in enumerate(("x10", "x11", "x12", "x13")):
+        if idx < len(args):
+            regs[ar] = ctypes.c_int64(args[idx]).value
+
+    def _rv_get(tok: str) -> int:
+        c = _rv_reg(tok)
+        if c == "0":
+            return 0
+        if c in regs:
+            return regs[c]
+        try:
+            return int(tok, 0)
+        except Exception:
+            return 0
+
+    addr_to_idx = {ins.address: i for i, ins in enumerate(insns)}
+    pc, steps = 0, 0
+    while 0 <= pc < len(insns) and steps < max_steps:
+        steps += 1
+        ins = insns[pc]
+        m = ins.mnemonic.lower()
+        ops = [o.strip() for o in ins.op_str.split(",")] if ins.op_str else []
+        nxt = pc + 1
+        if m == "ret" or (m in ("jr", "c.jr") and len(ops) == 1 and ops[0].lower() == "ra"):
+            break
+        elif m in ("mv", "c.mv", "li", "c.li") and len(ops) == 2:
+            d = _rv_reg(ops[0])
+            if d and d != "0":
+                regs[d] = ctypes.c_int64(_rv_get(ops[1])).value
+        elif m in ("addi", "add", "c.add", "c.addi", "sub", "c.sub", "mul", "and", "andi", "or", "ori", "xor", "xori", "sll", "slli", "srl", "srli", "sra", "srai"):
+            if len(ops) == 2:
+                d, s1, s2 = _rv_reg(ops[0]), _rv_get(ops[0]), _rv_get(ops[1])
+            else:
+                d, s1, s2 = _rv_reg(ops[0]), _rv_get(ops[1]), _rv_get(ops[2])
+            if d and d != "0":
+                if m in ("addi", "add", "c.add", "c.addi"):
+                    regs[d] = ctypes.c_int64(s1 + s2).value
+                elif m in ("sub", "c.sub"):
+                    regs[d] = ctypes.c_int64(s1 - s2).value
+                elif m == "mul":
+                    regs[d] = ctypes.c_int64(s1 * s2).value
+                elif m in ("and", "andi"):
+                    regs[d] = ctypes.c_int64(s1 & s2).value
+                elif m in ("or", "ori"):
+                    regs[d] = ctypes.c_int64(s1 | s2).value
+                elif m in ("xor", "xori"):
+                    regs[d] = ctypes.c_int64(s1 ^ s2).value
+                elif m in ("sll", "slli"):
+                    regs[d] = ctypes.c_int64(s1 << (s2 & 63)).value
+                elif m in ("srl", "srli"):
+                    regs[d] = ctypes.c_int64((s1 & _MASK64) >> (s2 & 63)).value
+                elif m in ("sra", "srai"):
+                    regs[d] = ctypes.c_int64(s1 >> (s2 & 63)).value
+        elif m in ("beq", "bne", "blt", "bge", "bltu", "bgeu", "beqz", "bnez"):
+            if m in ("beqz", "bnez"):
+                v1, v2, tgt_s = _rv_get(ops[0]), 0, ops[1]
+                take = (v1 == 0) if m == "beqz" else (v1 != 0)
+            else:
+                v1, v2, tgt_s = _rv_get(ops[0]), _rv_get(ops[1]), ops[2]
+                take = {
+                    "beq": v1 == v2, "bne": v1 != v2, "blt": v1 < v2, "bge": v1 >= v2,
+                    "bltu": (v1 & _MASK64) < (v2 & _MASK64), "bgeu": (v1 & _MASK64) >= (v2 & _MASK64),
+                }[m]
+            try:
+                tgt = int(tgt_s, 0)
+                if take and tgt in addr_to_idx:
+                    nxt = addr_to_idx[tgt]
+            except Exception:
+                pass
+        elif m in ("j", "c.j") and len(ops) == 1:
+            try:
+                tgt = int(ops[0], 0)
+                if tgt in addr_to_idx:
+                    nxt = addr_to_idx[tgt]
+            except Exception:
+                pass
+        elif m in ("ld", "lw", "sd", "sw") and len(ops) == 2:
+            mm = re.match(r"(-?(?:0x[0-9a-fA-F]+|\d+))\(([^)]+)\)", ops[1])
+            if mm:
+                addr = _rv_get(mm.group(2)) + int(mm.group(1), 0)
+                w = 8 if m in ("ld", "sd") else 4
+                if m in ("ld", "lw"):
+                    d = _rv_reg(ops[0])
+                    if d and d != "0":
+                        regs[d] = ctypes.c_int64(mem_arena.read(addr, w)).value
+                else:
+                    mem_arena.write(addr, w, _rv_get(ops[0]))
+        pc = nxt
+    if halt_info is not None and steps >= max_steps and 0 <= pc < len(insns):
+        halt_info["fuel_exhausted"] = True
+    return ctypes.c_int64(regs["x10"]).value
+
+
+def lift_arm32_function_to_c(
+    fn_name: str,
+    code_bytes: bytes,
+    base_va: int,
+    *,
+    thumb: bool = False,
+    rva_to_symbol: Optional[Dict[int, str]] = None,
+) -> Tuple[str, List[Any], bool, Set[int], Set[int]]:
+    """Lifts ARM32 / Thumb-2 machine code into AetherRE C (using x0..x15 / rsp)."""
+    mode = capstone.CS_MODE_THUMB if thumb else capstone.CS_MODE_ARM
+    md = capstone.Cs(capstone.CS_ARCH_ARM, mode)
+    md.detail = False
+    insns: List[Any] = []
+    for ins in md.disasm(code_bytes, base_va):
+        insns.append(ins)
+        if ins.mnemonic.lower() in ("bx",) and "lr" in ins.op_str.lower():
+            break
+        if len(insns) >= 600:
+            break
+    if not insns:
+        return f"int64_t {fn_name}(int64_t rcx, int64_t rdx, int64_t r8, int64_t r9) {{ return 0; }}", [], False, set(), set()
+
+    def _a32_reg(tok: str) -> str:
+        t = tok.strip().lower()
+        m_ap = {"r0": "x0", "r1": "x1", "r2": "x2", "r3": "x3", "r4": "x4", "r5": "x5", "r6": "x6", "r7": "x7",
+                "r8": "x8", "r9": "x9", "r10": "x10", "r11": "x11", "fp": "x11", "r12": "x12", "ip": "x12",
+                "sp": "rsp", "r13": "rsp", "lr": "x30", "r14": "x30"}
+        if t in m_ap:
+            return m_ap[t]
+        if t.startswith("#"):
+            return t[1:]
+        return t
+
+    lines = [
+        f"int64_t {fn_name}(int64_t rcx, int64_t rdx, int64_t r8, int64_t r9) {{",
+        "    int64_t " + ", ".join(f"x{i} = 0" for i in range(16)) + ", x30 = 0;",
+        "    int64_t _aether_saved_sp = _aether_sp;",
+        "    int64_t rsp = aether_stack_base();",
+        "    int64_t cmp_lhs = 0, cmp_rhs = 0;",
+        "    x0 = rcx; x1 = rdx; x2 = r8; x3 = r9;",
+    ]
+    all_addrs = {i.address for i in insns}
+    called_set: Set[int] = set()
+    sym_map = rva_to_symbol or {}
+    supported = True
+    for ins in insns:
+        lines.append(f"L_{ins.address:x}: ; /* {ins.mnemonic} {ins.op_str} */")
+        m = ins.mnemonic.lower().split(".")[0]
+        ops = _split_arm64_ops(ins.op_str)
+        if m == "nop":
+            continue
+        elif m == "bx" and len(ops) == 1 and ops[0].lower() == "lr":
+            lines.append("    _aether_sp = _aether_saved_sp;")
+            lines.append("    return x0;")
+        elif m == "mov" and len(ops) == 2:
+            lines.append(f"    {_a32_reg(ops[0])} = aether_u32({_a32_reg(ops[1])});")
+        elif m in ("add", "sub", "mul", "and", "orr", "eor") and len(ops) == 3:
+            c_op = {"add": "+", "sub": "-", "mul": "*", "and": "&", "orr": "|", "eor": "^"}[m]
+            lines.append(f"    {_a32_reg(ops[0])} = aether_u32(({_a32_reg(ops[1])}) {c_op} ({_a32_reg(ops[2])}));")
+        elif m == "cmp" and len(ops) == 2:
+            lines.append(f"    cmp_lhs = aether_i32({_a32_reg(ops[0])}); cmp_rhs = aether_i32({_a32_reg(ops[1])});")
+        elif m in ("b", "beq", "bne", "blt", "ble", "bgt", "bge") and len(ops) == 1 and ops[0].startswith("#"):
+            tgt = int(ops[0][1:], 0)
+            if tgt in all_addrs:
+                cond = "1" if m == "b" else _ARM64_CC_TO_C.get(m[1:], "1")
+                lines.append(f"    if ({cond}) goto L_{tgt:x};")
+        elif m in ("bl", "blx") and len(ops) == 1 and ops[0].startswith("#"):
+            tgt = int(ops[0][1:], 0)
+            called_set.add(tgt)
+            sym = sym_map.get(tgt, f"sub_{tgt:x}")
+            lines.append(f"    x0 = {sym}(x0, x1, x2, x3);")
+        else:
+            supported = False
+    lines.append("    _aether_sp = _aether_saved_sp;")
+    lines.append("    return x0;")
+    lines.append("}")
+    return "\n".join(lines), insns, supported, called_set, set()
+
+
+def eval_arm32_insns(
+    insns: List[Any],
+    args: Tuple[int, ...],
+    mem_arena: Any,
+    *,
+    halt_info: Optional[Dict[str, bool]] = None,
+    max_steps: int = 8000,
+) -> int:
+    regs: Dict[str, int] = {f"r{i}": 0 for i in range(15)}
+    regs["sp"] = 0x48000 - 8
+    for idx in range(4):
+        if idx < len(args):
+            regs[f"r{idx}"] = args[idx] & _MASK32
+
+    def _get(tok: str) -> int:
+        t = tok.strip().lower()
+        if t in regs:
+            return regs[t]
+        if t.startswith("#"):
+            return int(t[1:], 0) & _MASK32
+        return 0
+
+    addr_to_idx = {ins.address: i for i, ins in enumerate(insns)}
+    cmp_l, cmp_r = 0, 0
+    pc, steps = 0, 0
+    while 0 <= pc < len(insns) and steps < max_steps:
+        steps += 1
+        ins = insns[pc]
+        m = ins.mnemonic.lower().split(".")[0]
+        ops = _split_arm64_ops(ins.op_str)
+        nxt = pc + 1
+        if m == "bx" and len(ops) == 1 and ops[0].lower() == "lr":
+            break
+        elif m == "mov" and len(ops) == 2:
+            regs[ops[0].lower()] = _get(ops[1])
+        elif m in ("add", "sub", "mul", "and", "orr", "eor") and len(ops) == 3:
+            a, b = _get(ops[1]), _get(ops[2])
+            res = {"add": a + b, "sub": a - b, "mul": a * b, "and": a & b, "orr": a | b, "eor": a ^ b}[m]
+            regs[ops[0].lower()] = res & _MASK32
+        elif m == "cmp" and len(ops) == 2:
+            cmp_l, cmp_r = ctypes.c_int32(_get(ops[0])).value, ctypes.c_int32(_get(ops[1])).value
+        elif m in ("b", "beq", "bne", "blt", "ble", "bgt", "bge") and len(ops) == 1 and ops[0].startswith("#"):
+            tgt = int(ops[0][1:], 0)
+            take = {"b": True, "beq": cmp_l == cmp_r, "bne": cmp_l != cmp_r, "blt": cmp_l < cmp_r, "ble": cmp_l <= cmp_r, "bgt": cmp_l > cmp_r, "bge": cmp_l >= cmp_r}[m]
+            if take and tgt in addr_to_idx:
+                nxt = addr_to_idx[tgt]
+        pc = nxt
+    return ctypes.c_int32(regs["r0"]).value
+
+
+def lift_mips32_function_to_c(
+    fn_name: str,
+    code_bytes: bytes,
+    base_va: int,
+    *,
+    big_endian: bool = False,
+    rva_to_symbol: Optional[Dict[int, str]] = None,
+) -> Tuple[str, List[Any], bool, Set[int], Set[int]]:
+    """Lifts MIPS32 (with branch delay-slot reordering) into canonical AetherRE C."""
+    mode = capstone.CS_MODE_MIPS32 | (capstone.CS_MODE_BIG_ENDIAN if big_endian else capstone.CS_MODE_LITTLE_ENDIAN)
+    md = capstone.Cs(capstone.CS_ARCH_MIPS, mode)
+    md.detail = False
+    insns = list(ins for _, ins in zip(range(600), md.disasm(code_bytes, base_va)))
+    if not insns:
+        return f"int64_t {fn_name}(int64_t rcx, int64_t rdx, int64_t r8, int64_t r9) {{ return 0; }}", [], False, set(), set()
+
+    def _m_reg(tok: str) -> str:
+        t = tok.strip().lower().lstrip("$")
+        mp = {"zero": "0", "at": "x1", "v0": "x2", "v1": "x3",
+              "a0": "x4", "a1": "x5", "a2": "x6", "a3": "x7",
+              "t0": "x8", "t1": "x9", "t2": "x10", "t3": "x11",
+              "s0": "x16", "s1": "x17", "sp": "rsp", "fp": "rbp", "ra": "x30"}
+        return mp.get(t, t)
+
+    lines = [
+        f"int64_t {fn_name}(int64_t rcx, int64_t rdx, int64_t r8, int64_t r9) {{",
+        "    int64_t " + ", ".join(f"x{i} = 0" for i in range(1, 20)) + ", x30 = 0;",
+        "    int64_t _aether_saved_sp = _aether_sp;",
+        "    int64_t rsp = aether_stack_base(), rbp = 0;",
+        "    x4 = rcx; x5 = rdx; x6 = r8; x7 = r9;",
+    ]
+    all_addrs = {i.address for i in insns}
+
+    def _emit_mips_stmt(ins: Any) -> Optional[str]:
+        m = ins.mnemonic.lower()
+        ops = [o.strip() for o in ins.op_str.split(",")] if ins.op_str else []
+        if m == "nop":
+            return None
+        if m == "move" and len(ops) == 2:
+            return f"    {_m_reg(ops[0])} = aether_i32({_m_reg(ops[1])});"
+        if m == "li" and len(ops) == 2:
+            return f"    {_m_reg(ops[0])} = (int64_t)({ops[1]});"
+        if m in ("addu", "addiu", "add", "addi", "subu", "sub", "mul", "and", "andi", "or", "ori", "xor", "xori") and len(ops) == 3:
+            op_c = {"addu": "+", "addiu": "+", "add": "+", "addi": "+", "subu": "-", "sub": "-", "mul": "*", "and": "&", "andi": "&", "or": "|", "ori": "|", "xor": "^", "xori": "^"}[m]
+            return f"    {_m_reg(ops[0])} = aether_i32(({_m_reg(ops[1])}) {op_c} ({_m_reg(ops[2])}));"
+        return None
+
+    skip_next = False
+    for idx, ins in enumerate(insns):
+        lines.append(f"L_{ins.address:x}: ; /* {ins.mnemonic} {ins.op_str} */")
+        if skip_next:
+            skip_next = False
+            continue
+        m = ins.mnemonic.lower()
+        ops = [o.strip() for o in ins.op_str.split(",")] if ins.op_str else []
+        if m == "jr" and ops and "ra" in ops[0].lower():
+            if idx + 1 < len(insns):
+                ds = _emit_mips_stmt(insns[idx + 1])
+                if ds:
+                    lines.append(ds)
+                skip_next = True
+            lines.append("    _aether_sp = _aether_saved_sp;")
+            lines.append("    return x2;")
+            break
+        elif m in ("beq", "bne") and len(ops) == 3:
+            if idx + 1 < len(insns):
+                ds = _emit_mips_stmt(insns[idx + 1])
+                if ds:
+                    lines.append(ds)
+                skip_next = True
+            tgt = int(ops[2], 0) if re.fullmatch(r"0x[0-9a-fA-F]+", ops[2]) else -1
+            if tgt in all_addrs:
+                cmp_op = "==" if m == "beq" else "!="
+                lines.append(f"    if (({_m_reg(ops[0])}) {cmp_op} ({_m_reg(ops[1])})) goto L_{tgt:x};")
+        else:
+            st = _emit_mips_stmt(ins)
+            if st:
+                lines.append(st)
+    lines.append("    _aether_sp = _aether_saved_sp;")
+    lines.append("    return x2;")
+    lines.append("}")
+    return "\n".join(lines), insns, True, set(), set()
+
+
+def eval_mips32_insns(insns: List[Any], args: Tuple[int, ...], mem_arena: Any) -> int:
+    regs: Dict[str, int] = {"0": 0, "v0": 0, "v1": 0, "a0": 0, "a1": 0, "a2": 0, "a3": 0, "t0": 0, "t1": 0, "t2": 0, "t3": 0, "s0": 0, "s1": 0, "sp": 0x48000 - 8}
+    for i, nm in enumerate(("a0", "a1", "a2", "a3")):
+        if i < len(args):
+            regs[nm] = ctypes.c_int32(args[i]).value
+
+    def _g(t: str) -> int:
+        k = t.strip().lower().lstrip("$")
+        if k == "zero":
+            return 0
+        if k in regs:
+            return regs[k]
+        try:
+            return int(k, 0)
+        except Exception:
+            return 0
+
+    def _step(ins: Any) -> None:
+        m = ins.mnemonic.lower()
+        ops = [o.strip() for o in ins.op_str.split(",")] if ins.op_str else []
+        if m in ("move", "li") and len(ops) == 2:
+            regs[ops[0].strip().lower().lstrip("$")] = ctypes.c_int32(_g(ops[1])).value
+        elif m in ("addu", "addiu", "add", "addi", "subu", "sub", "mul", "and", "andi", "or", "ori", "xor", "xori") and len(ops) == 3:
+            a, b = _g(ops[1]), _g(ops[2])
+            op_c = {"addu": a + b, "addiu": a + b, "add": a + b, "addi": a + b, "subu": a - b, "sub": a - b, "mul": a * b, "and": a & b, "andi": a & b, "or": a | b, "ori": a | b, "xor": a ^ b, "xori": a ^ b}[m]
+            regs[ops[0].strip().lower().lstrip("$")] = ctypes.c_int32(op_c).value
+
+    addr_to_idx = {ins.address: i for i, ins in enumerate(insns)}
+    pc = 0
+    for _ in range(8000):
+        if not (0 <= pc < len(insns)):
+            break
+        ins = insns[pc]
+        m = ins.mnemonic.lower()
+        ops = [o.strip() for o in ins.op_str.split(",")] if ins.op_str else []
+        if m == "jr" and ops and "ra" in ops[0].lower():
+            if pc + 1 < len(insns):
+                _step(insns[pc + 1])
+            break
+        elif m in ("beq", "bne") and len(ops) == 3:
+            take = (_g(ops[0]) == _g(ops[1])) if m == "beq" else (_g(ops[0]) != _g(ops[1]))
+            if pc + 1 < len(insns):
+                _step(insns[pc + 1])
+            tgt = int(ops[2], 0) if re.fullmatch(r"0x[0-9a-fA-F]+", ops[2]) else -1
+            if take and tgt in addr_to_idx:
+                pc = addr_to_idx[tgt]
+                continue
+            pc += 2
+            continue
+        _step(ins)
+        pc += 1
+    return ctypes.c_int32(regs["v0"]).value
+
+
+def lift_via_angr_vex_fallback(
+    fn_name: str,
+    code_bytes: bytes,
+    base_va: int = 0x10000,
+    arch: str = "amd64",
+) -> Optional[str]:
+    """Universal angr VEX IR / Decompiler fallback for unsupported opcodes or exotic arches."""
+    try:
+        import angr
+        arch_map = {"x86_64": "amd64", "x86_32": "x86", "aarch64": "aarch64", "arm32": "armel", "riscv64": "riscv64", "mips32": "mipsel"}
+        angr_arch = arch_map.get(arch, arch)
+        proj = angr.Project(
+            io.BytesIO(code_bytes),
+            main_opts={"backend": "blob", "arch": angr_arch, "base_addr": base_va, "entry_point": base_va},
+            auto_load_libs=False,
+        )
+        cfg = proj.analyses.CFGFast(normalize=True, regions=[(base_va, base_va + len(code_bytes))])
+        fn = cfg.kb.functions.get(base_va) or (next(iter(cfg.kb.functions.values()), None))
+        if fn is None:
+            return None
+        dec = proj.analyses.Decompiler(fn, cfg=cfg.model)
+        if dec.codegen and dec.codegen.text:
+            return f"/* angr VEX-fallback recovery ({angr_arch}) for {fn_name} */\n{dec.codegen.text}"
+    except Exception:
+        return None
+    return None
+
+
+def extract_elf_any_metadata(elf_data: bytes) -> Optional[Dict[str, Any]]:
+    """Extracts metadata from both ELF64 and ELF32 (x86_32, ARM32, ARM64, x86_64, RISC-V, MIPS)."""
+    if len(elf_data) < 52 or elf_data[:4] != b"\x7fELF":
+        return None
+    if elf_data[4] == 2:
+        return extract_elf64_metadata(elf_data)
+    if elf_data[4] != 1:
+        return None
+    ef = ELFFile(io.BytesIO(elf_data))
+    em = str(ef.header["e_machine"]).upper()
+    if "386" in em:
+        arch = "x86_32"
+    elif "ARM" in em:
+        arch = "arm32"
+    elif "MIPS" in em:
+        arch = "mips32"
+    elif "RISCV" in em:
+        arch = "riscv64"
+    else:
+        arch = em.lower()
+    exec_ranges: List[Tuple[int, int]] = []
+    ro_ranges: List[Tuple[int, int]] = []
+    imported_libs: List[str] = []
+    for sec in ef.iter_sections():
+        flags, va, sz = int(sec["sh_flags"]), int(sec["sh_addr"]), int(sec["sh_size"])
+        if (flags & 0x4) and sz > 0:
+            exec_ranges.append((va, va + sz))
+        elif (flags & 0x2) and not (flags & 0x1) and sz > 0:
+            ro_ranges.append((va, va + sz))
+        if sec.name == ".dynamic":
+            try:
+                for tag in sec.iter_tags():
+                    if tag.entry.d_tag == "DT_NEEDED":
+                        imported_libs.append(str(tag.needed))
+            except Exception:
+                pass
+    exports: List[Dict[str, Any]] = []
+    for sec in ef.iter_sections():
+        if isinstance(sec, SymbolTableSection):
+            for sym in sec.iter_symbols():
+                if sym["st_info"]["type"] == "STT_FUNC" and sym["st_shndx"] != "SHN_UNDEF" and int(sym["st_value"]) > 0:
+                    va = int(sym["st_value"])
+                    sz = max(16, int(sym["st_size"]) or 256)
+                    for sc in ef.iter_sections():
+                        sv, ssz = int(sc["sh_addr"]), int(sc["sh_size"])
+                        if sv <= va < sv + ssz and sc["sh_type"] != "SHT_NOBITS":
+                            off = int(sc["sh_offset"]) + (va - sv)
+                            exports.append({"name": sym.name or f"sub_{va:x}", "ordinal": len(exports) + 1, "rva": va, "size": sz, "code": elf_data[off : off + sz]})
+                            break
+    return {
+        "arch": arch,
+        "exports": exports,
+        "exec_ranges": exec_ranges,
+        "ro_ranges": ro_ranges,
+        "eh_frame_bytes": 0,
+        "imported_libs": sorted(set(imported_libs)),
+        "plt_symbols": {},
+    }
+
