@@ -111,6 +111,24 @@ MODULE_PHASE: dict[str, str] = {
     "memory_forensics": "F08", "minidump_parser": "F08",
     "semantic_deobfuscator": "F05", "smt_solver": "F09",
     "ground_truth_eval": "F10", "c_equivalence": "F09",
+    # Motores v7.0 / v8.0 / v8.1 (F05/F06/F07/F09)
+    "cff_devirtualizer": "F05",
+    "dynamic_unpacker": "F08",
+    "exploit_prover": "F07",
+    "firmware_reconstructor": "F06",
+    "flirt_cfg": "F05",
+    "ir_optimizer": "F05",
+    "lifted_c_vm": "F06",
+    "llvm_backend": "F06",
+    "managed_reconstructors": "F06",
+    "multiarch_lifter": "F05",
+    "omniclone": "F06",
+    "runtime_emitter": "F06",
+    "symbolic_equivalence": "F09",
+    "webcrack_bridge": "F05",
+    "win64_unwind": "F05",
+    "ast_deobfuscator_acorn": "F05",
+    "batch_deobfuscator": "F05",
 }
 
 _IMPORT_RE = re.compile(r"^\s*(?:from|import)\s+aether_re(?:\.([A-Za-z_][\w.]*))?", re.M)
