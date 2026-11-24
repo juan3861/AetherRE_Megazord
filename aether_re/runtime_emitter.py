@@ -7,11 +7,12 @@ and ``AETHER_RT`` runtime shim generation from binary lifting orchestration.
 from __future__ import annotations
 
 import hashlib
+import re
 import shutil
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 _MSVC_X64_ENV_CACHE: Dict[str, Dict[str, str]] = {}
 
@@ -90,19 +91,33 @@ def compile_reconstructed_project(
     output_dll_name: str = "reconstructed_twin.dll",
     source_rel: str = "src/reconstructed_project.c",
 ) -> Dict[str, Any]:
-    """Compiles a reconstructed twin C project into a native shared library (.dll/.so) when a compiler is available."""
+    """Compiles a reconstructed twin C project (single file or `multi_tu` modules) into a native shared library."""
     proj = Path(project_dir).resolve()
-    c_src = proj / source_rel
     def_file = proj / "src" / "exports.def"
     out_dll = proj / output_dll_name
-    if not c_src.is_file():
-        return {"compiled": False, "status": "missing_source", "error": f"Not found: {c_src}"}
+
+    if source_rel == "multi_tu":
+        c_sources = sorted((proj / "src" / "modules").glob("*.c"))
+        if not c_sources:
+            return {"compiled": False, "status": "missing_source", "error": f"No modules in {proj / 'src' / 'modules'}"}
+    else:
+        c_src = proj / source_rel
+        if not c_src.is_file():
+            return {"compiled": False, "status": "missing_source", "error": f"Not found: {c_src}"}
+        c_sources = [c_src]
 
     vc_info = _find_msvc_x64_toolchain()
     if vc_info is not None:
         vc, cached_env, cl_in_env, _ = vc_info
+        src_strs = [str(p) for p in c_sources]
         if cached_env and cl_in_env:
-            cmd_args = [cl_in_env, "/nologo", "/LD", "/O2", str(c_src), f"/Fe:{out_dll}"]
+            cmd_args = [cl_in_env, "/nologo", "/LD", "/O2"]
+            if len(c_sources) > 1:
+                obj_dir = proj / "build_tu"
+                obj_dir.mkdir(parents=True, exist_ok=True)
+                cmd_args.append(f"/Fo{obj_dir}{chr(92)}")
+            cmd_args.extend(src_strs)
+            cmd_args.append(f"/Fe:{out_dll}")
             if def_file.is_file():
                 cmd_args.extend(["/link", f"/DEF:{def_file}"])
             proc = subprocess.run(
@@ -117,11 +132,12 @@ def compile_reconstructed_project(
             )
         else:
             def_arg = f'/link /DEF:"{def_file}"' if def_file.is_file() else ""
+            quoted_srcs = " ".join(f'"{s}"' for s in src_strs)
             bat_body = (
                 "@echo off\n"
                 f'call "{vc}" >nul\n'
                 f'cd /d "{proj}"\n'
-                f'cl /nologo /LD /O2 "{c_src}" /Fe:"{out_dll}" {def_arg}\n'
+                f'cl /nologo /LD /O2 {quoted_srcs} /Fe:"{out_dll}" {def_arg}\n'
             )
             with tempfile.NamedTemporaryFile("w", suffix=".bat", delete=False, encoding="utf-8") as tf:
                 tf.write(bat_body)
@@ -142,6 +158,7 @@ def compile_reconstructed_project(
             "compiled": ok,
             "status": "compiled" if ok else "compile_failed",
             "compiler": "msvc_cl_x64",
+            "translation_units": len(c_sources),
             "dll_path": str(out_dll) if ok else None,
             "dll_size_bytes": out_dll.stat().st_size if ok else 0,
             "dll_sha256": hashlib.sha256(out_dll.read_bytes()).hexdigest() if ok else None,
@@ -151,7 +168,7 @@ def compile_reconstructed_project(
 
     cc = shutil.which("clang") or shutil.which("gcc")
     if cc:
-        cmd = [cc, "-shared", "-O2", str(c_src), "-o", str(out_dll)]
+        cmd = [cc, "-shared", "-O2", *(str(p) for p in c_sources), "-o", str(out_dll)]
         if def_file.is_file():
             cmd.append(str(def_file))
         proc = subprocess.run(cmd, cwd=str(proj), capture_output=True, text=True, timeout=60)
@@ -160,6 +177,7 @@ def compile_reconstructed_project(
             "compiled": ok,
             "status": "compiled" if ok else "compile_failed",
             "compiler": Path(cc).name,
+            "translation_units": len(c_sources),
             "dll_path": str(out_dll) if ok else None,
             "dll_size_bytes": out_dll.stat().st_size if ok else 0,
             "dll_sha256": hashlib.sha256(out_dll.read_bytes()).hexdigest() if ok else None,
@@ -635,3 +653,103 @@ def _base_runtime_header_lines() -> List[str]:
         "static inline int64_t aether_f64_div(int64_t a, int64_t b) { return aether_f64_to_bits(aether_bits_to_f64(a) / aether_bits_to_f64(b)); }",
         "",
     ]
+
+
+def emit_partitioned_c_modules(
+    out_root: Path,
+    records_list: Sequence[Dict[str, Any]],
+    *,
+    extra_stubs: Sequence[str] = (),
+    is_executable_entry: bool = False,
+    arch_label: str = "x86_64",
+) -> List[str]:
+    """Partitions reconstructed C functions into modular `src/modules/*.c` translation units + `CMakeLists.multi_tu.txt`."""
+    mod_dir = out_root / "src" / "modules"
+    mod_dir.mkdir(parents=True, exist_ok=True)
+
+    buckets: Dict[str, List[str]] = {}
+    for idx, rec in enumerate(records_list):
+        c_code = str(rec.get("c_code", "")).strip()
+        if not c_code:
+            continue
+        sym = str(rec.get("c_ident") or rec.get("symbol") or rec.get("c_symbol") or rec.get("name") or f"fn_{idx}")
+        if sym.startswith("sub_"):
+            group = "internal"
+        elif "_" in sym:
+            pref = re.sub(r"[^a-z0-9]", "", sym.split("_", 1)[0].lower())
+            group = pref or "core"
+        else:
+            group = f"unit_{idx % 4}" if len(records_list) >= 2 else "core"
+        buckets.setdefault(group, []).append(c_code)
+
+    # Collapse small/excess prefix buckets cleanly while keeping >=2 TUs when multiple functions exist
+    if len(buckets) > 12:
+        sorted_groups = sorted(buckets.items(), key=lambda kv: -len(kv[1]))
+        kept: Dict[str, List[str]] = {k: v for k, v in sorted_groups[:11]}
+        overflow: List[str] = []
+        for _k, v in sorted_groups[11:]:
+            overflow.extend(v)
+        kept["misc"] = overflow
+        buckets = kept
+    elif len(buckets) == 1 and len(records_list) >= 2:
+        only_items = next(iter(buckets.values()))
+        mid = len(only_items) // 2
+        buckets = {"part_0": only_items[:mid], "part_1": only_items[mid:]}
+
+    generated: List[str] = []
+    tu_rels: List[str] = []
+    for g_name, bodies in sorted(buckets.items()):
+        rel = f"src/modules/mod_{g_name}.c"
+        txt = "\n".join([
+            f"/* Auto-Partitioned Translation Unit `{g_name}` ({arch_label}) by AetherRE v8.3 */",
+            '#include "../../include/reconstructed_api.h"',
+            "",
+            *bodies,
+            "",
+        ])
+        (out_root / rel).write_text(txt, encoding="utf-8")
+        generated.append(rel)
+        tu_rels.append(rel)
+
+    if extra_stubs:
+        rel_s = "src/modules/mod_stubs.c"
+        txt_s = "\n".join([
+            f"/* External/Unresolved Stubs Translation Unit ({arch_label}) by AetherRE v8.3 */",
+            '#include "../../include/reconstructed_api.h"',
+            "",
+            *extra_stubs,
+            "",
+        ])
+        (out_root / rel_s).write_text(txt_s, encoding="utf-8")
+        generated.append(rel_s)
+        tu_rels.append(rel_s)
+
+    if is_executable_entry:
+        rel_e = "src/modules/mod_entry.c"
+        txt_e = "\n".join([
+            f"/* Entrypoint Wrapper Translation Unit ({arch_label}) by AetherRE v8.3 */",
+            '#include "../../include/reconstructed_api.h"',
+            "",
+            "int main(int argc, char** argv) {",
+            "    (void)argc; (void)argv;",
+            "    return (int)main_entry(0, 0, 0, 0);",
+            "}",
+            "",
+        ])
+        (out_root / rel_e).write_text(txt_e, encoding="utf-8")
+        generated.append(rel_e)
+        tu_rels.append(rel_e)
+
+    target_kind = "add_executable(reconstructed_twin " + " ".join(tu_rels) + ")" if is_executable_entry else (
+        "add_library(reconstructed_twin SHARED " + " ".join(tu_rels) + " src/exports.def)"
+    )
+    cmake_multi = "\n".join([
+        "cmake_minimum_required(VERSION 3.16)",
+        "project(reconstructed_twin_multi_tu LANGUAGES C)",
+        target_kind,
+        "target_include_directories(reconstructed_twin PUBLIC include)",
+        "",
+    ])
+    (out_root / "CMakeLists.multi_tu.txt").write_text(cmake_multi, encoding="utf-8")
+    generated.append("CMakeLists.multi_tu.txt")
+    return generated

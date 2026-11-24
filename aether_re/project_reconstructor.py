@@ -79,6 +79,7 @@ from aether_re.runtime_emitter import (
     _get_msvc_x64_env,
     compile_llvm_twin_project,
     compile_reconstructed_project,
+    emit_partitioned_c_modules,
 )
 from aether_re.lifted_c_vm import (
     _AST_LHS_ASSIGN_RE,
@@ -3378,12 +3379,14 @@ def _reconstruct_multiarch_project(
         if is_lifted:
             report.fully_lifted_functions += 1
 
+    multiarch_stubs: List[str] = []
     for un_rva in sorted(all_called_rvas - defined_rvas):
         sym_nm = rva_to_symbol.get(un_rva, f"sub_{un_rva:x}")
         stub_def = f"int64_t {sym_nm}(int64_t rcx, int64_t rdx, int64_t r8, int64_t r9) {{ (void)rcx; (void)rdx; (void)r8; (void)r9; return 0; }}"
         fn_decls.append(f"int64_t {sym_nm}(int64_t rcx, int64_t rdx, int64_t r8, int64_t r9);")
         c_source_lines.append(stub_def)
         structured_source_lines.append(stub_def)
+        multiarch_stubs.append(stub_def)
 
     struct_res = recover_struct_layouts(all_disasm_insns)
     report.struct_layouts_count = struct_res.get("total_structs_recovered", 0)
@@ -3467,6 +3470,13 @@ def _reconstruct_multiarch_project(
         ]),
         encoding="utf-8",
     )
+    multi_tu_files = emit_partitioned_c_modules(
+        out_root,
+        records_list,
+        extra_stubs=multiarch_stubs,
+        is_executable_entry=bool(report.is_executable_entry),
+        arch_label=report.architecture,
+    )
 
     llvm_res = compile_project_to_llvm_ir(
         records_list,
@@ -3485,6 +3495,7 @@ def _reconstruct_multiarch_project(
         "src/llvm_runtime_shim.c",
         "src/exports.def",
         "CMakeLists.txt",
+        *multi_tu_files,
         "twin_congruence_report.json",
         "ir/reconstructed_project.ll",
     ]
@@ -4787,6 +4798,7 @@ def reconstruct_project(
             if is_lifted:
                 report.fully_lifted_functions += 1
 
+        pe_stubs: List[str] = []
         for un_rva in sorted(called_rvas - defined_rvas):
             sym_name = rva_to_symbol.get(un_rva, f"sub_{un_rva:x}")
             stub_def = f"int64_t {sym_name}(int64_t rcx, int64_t rdx, int64_t r8, int64_t r9) {{ (void)rcx; (void)rdx; (void)r8; (void)r9; return 0; }}"
@@ -4795,6 +4807,7 @@ def reconstruct_project(
             )
             c_source_lines.append(stub_def)
             structured_source_lines.append(stub_def)
+            pe_stubs.append(stub_def)
 
         struct_res = recover_struct_layouts(all_disasm_insns)
         report.struct_layouts_count = struct_res.get("total_structs_recovered", 0)
@@ -5011,6 +5024,13 @@ def reconstruct_project(
         )
         (src_dir / "exports.def").write_text("\n".join(def_lines) + "\n", encoding="utf-8")
         (out_root / "CMakeLists.txt").write_text(cmake_content, encoding="utf-8")
+        multi_tu_files = emit_partitioned_c_modules(
+            out_root,
+            records_list,
+            extra_stubs=pe_stubs,
+            is_executable_entry=bool(report.is_executable_entry),
+            arch_label=report.architecture,
+        )
 
         llvm_res = compile_project_to_llvm_ir(
             records_list,
@@ -5031,6 +5051,7 @@ def reconstruct_project(
             "src/llvm_runtime_shim.c",
             "src/exports.def",
             "CMakeLists.txt",
+            *multi_tu_files,
             "twin_congruence_report.json",
             "ir/reconstructed_project.ll",
             *rsrc_files,

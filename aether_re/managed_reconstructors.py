@@ -393,11 +393,23 @@ def _decode_jvm_class_to_java(cls: bytes) -> Optional[Tuple[str, str]]:
                 return c_nm, _utf8(n_idx), _utf8(d_idx)
         return "", f"method_{idx}", "()I"
 
-    def _parse_jvm_params(desc: str) -> Tuple[List[Tuple[str, int]], str]:
+    def _fieldref_info(idx: int) -> Tuple[str, str, str]:
+        return _methodref_info(idx)
+
+    def _jvm_type_from_desc(d: str) -> str:
+        if d == "J":
+            return "long"
+        if d in ("I", "Z", "B", "C", "S"):
+            return "int"
+        if d == "Ljava/lang/String;":
+            return "String"
+        return "Object"
+
+    def _parse_jvm_params(desc: str, *, is_static: bool = True) -> Tuple[List[Tuple[str, int]], str]:
         inner = desc[desc.find("(") + 1 : desc.find(")")] if "(" in desc and ")" in desc else ""
         ret_raw = desc[desc.find(")") + 1 :] if ")" in desc else "I"
         ptypes: List[Tuple[str, int]] = []
-        slot = 0
+        slot = 0 if is_static else 1
         pi = 0
         while pi < len(inner):
             ch = inner[pi]
@@ -436,11 +448,13 @@ def _decode_jvm_class_to_java(cls: bytes) -> Optional[Tuple[str, str]]:
     pos += 2 + if_cnt * 2
     fld_cnt = struct.unpack_from(">H", cls, pos)[0]
     pos += 2
+    parsed_fields: List[Tuple[int, str, str]] = []
     for _ in range(fld_cnt):
         if pos + 8 > len(cls):
             break
-        ac_cnt = struct.unpack_from(">H", cls, pos + 6)[0]
+        f_acc, f_name_idx, f_desc_idx, ac_cnt = struct.unpack_from(">HHHH", cls, pos)
         pos += 8
+        parsed_fields.append((f_acc, _utf8(f_name_idx), _utf8(f_desc_idx)))
         for _ in range(ac_cnt):
             alen = struct.unpack_from(">I", cls, pos + 2)[0]
             pos += 6 + alen
@@ -460,6 +474,18 @@ def _decode_jvm_class_to_java(cls: bytes) -> Optional[Tuple[str, str]]:
     if pkg:
         lines.extend([f"package {pkg};", ""])
     lines.append(f"public class {cls_simple} {{")
+    for f_acc, f_name, f_desc in parsed_fields:
+        if (f_acc & 0x1000) or not f_name:  # skip synthetic
+            continue
+        f_ty = _jvm_type_from_desc(f_desc)
+        if f_ty == "Object":
+            continue
+        stat_kw = "static " if (f_acc & 0x0008) else ""
+        safe_fn = re.sub(r"[^A-Za-z0-9_]", "_", f_name)
+        init_f = " = 0L" if (stat_kw and f_ty == "long") else (" = 0" if (stat_kw and f_ty == "int") else "")
+        lines.append(f"    public {stat_kw}{f_ty} {safe_fn}{init_f};")
+    if parsed_fields:
+        lines.append("")
 
     _JVM_BR_OPS = {
         0x99: ("zero", "=="), 0x9A: ("zero", "!="), 0x9B: ("zero", "<"),
@@ -479,11 +505,11 @@ def _decode_jvm_class_to_java(cls: bytes) -> Optional[Tuple[str, str]]:
             op = bc[p]
             p += 1
             arg = 0
-            if op in (0x10, 0x12, 0x15, 0x16, 0x36, 0x37):  # u1/s1
+            if op in (0x10, 0x12, 0x15, 0x16, 0x19, 0x36, 0x37, 0x3A):  # u1/s1
                 if p < len(bc):
                     arg = struct.unpack("<b", bytes([bc[p]]))[0] if op == 0x10 else bc[p]
                     p += 1
-                if op in (0x36, 0x37):
+                if op in (0x36, 0x37, 0x3A):
                     has_cf = True
             elif op in (0x11, 0x13, 0x14, 0xB8):  # u2/s2
                 if p + 1 < len(bc):
@@ -503,22 +529,24 @@ def _decode_jvm_class_to_java(cls: bytes) -> Optional[Tuple[str, str]]:
                     targets.add(arg)
                     has_cf = True
                     p += 2
-            elif op in (0x3B, 0x3C, 0x3D, 0x3E, 0x3F, 0x40, 0x41, 0x42):  # istore_n / lstore_n
+            elif op in (0x3B, 0x3C, 0x3D, 0x3E, 0x3F, 0x40, 0x41, 0x42, 0x4B, 0x4C, 0x4D, 0x4E):
                 has_cf = True
-            elif op in (0xB6, 0xB7, 0xB9, 0xB2, 0xB3, 0xB4, 0xB5, 0xBB):  # 2-byte CP ref
+            elif op in (0xB2, 0xB3, 0xB4, 0xB5, 0xB6, 0xB7, 0xB9, 0xBB):  # 2-byte CP ref
                 if p + 1 < len(bc):
                     arg = struct.unpack_from(">H", bc, p)[0]
                     p += 2
+                    if op in (0xB3, 0xB4, 0xB5, 0xB6, 0xB7, 0xBB):
+                        has_cf = True
             insns.append((pc, op, arg, p))
         return insns, targets, has_cf
 
-    def _lift_jvm_code(bc: bytes, ptypes: List[Tuple[str, int]], max_locals: int, ret_t: str) -> List[str]:
+    def _lift_jvm_code(bc: bytes, ptypes: List[Tuple[str, int]], max_locals: int, ret_t: str, *, is_static: bool = True) -> List[str]:
         insns, targets, has_cf = _decode_jvm_insns(bc)
         if not insns:
             return ["        return;" if ret_t == "void" else "        return 0;"]
 
-        # Fast-path linear expression lifter when there are no branches/stores
-        if not has_cf and all(op != 0xB8 for _, op, _, _ in insns):
+        # Fast-path linear expression lifter for pure static branchless methods
+        if is_static and not has_cf and all(op not in (0xB8, 0xB2, 0xB3, 0xB4, 0xB5, 0xB6, 0xB7) for _, op, _, _ in insns):
             st: List[str] = []
             out_j: List[str] = []
             for _pc, op, arg, _np in insns:
@@ -541,19 +569,26 @@ def _decode_jvm_class_to_java(cls: bytes) -> Optional[Tuple[str, str]]:
             if out_j:
                 return out_j
 
-        # Structured CFG state machine for arbitrary loops, branches, locals, and invokestatic
+        # Structured CFG state machine supporting OOP `this`, fields, locals, branches, and calls
         slot_types: Dict[int, str] = {slot: ty for ty, slot in ptypes}
         slot_inits: Dict[int, str] = {slot: f"p{idx}" for idx, (_ty, slot) in enumerate(ptypes)}
-        total_slots = max(max_locals, max(slot_types.keys(), default=-1) + 1)
+        total_slots = max(max_locals, max(slot_types.keys(), default=0) + 1, 2)
         out: List[str] = []
         for s_idx in range(total_slots):
             ty = slot_types.get(s_idx, "int")
             init_v = slot_inits.get(s_idx, "0")
-            if ty == "Object":
+            if ty == "Object" or (not is_static and s_idx == 0):
                 continue
             out.append(f"        long l{s_idx} = (long)({init_v});")
+        out.append(f"        Object[] _ol = new Object[{max(total_slots, 4)}];")
+        if not is_static:
+            out.append("        _ol[0] = this;")
+        for idx_p, (ty, slot) in enumerate(ptypes):
+            if ty == "Object":
+                out.append(f"        _ol[{slot}] = p{idx_p};")
         out.extend([
             "        long[] _st = new long[64];",
+            "        Object[] _ost = new Object[64];",
             "        int _sp = 0;",
             "        int _pc = 0;",
             "        while (true) {",
@@ -581,18 +616,26 @@ def _decode_jvm_class_to_java(cls: bytes) -> Optional[Tuple[str, str]]:
                 out.append(f"                _st[_sp++] = (int)l{op - 0x1A};")
             elif 0x1E <= op <= 0x21:  # lload_0..3
                 out.append(f"                _st[_sp++] = l{op - 0x1E};")
+            elif 0x2A <= op <= 0x2D:  # aload_0..3
+                out.append(f"                _ost[_sp] = _ol[{op - 0x2A}]; _st[_sp++] = 0L;")
             elif op == 0x15:  # iload
                 out.append(f"                _st[_sp++] = (int)l{arg};")
             elif op == 0x16:  # lload
                 out.append(f"                _st[_sp++] = l{arg};")
+            elif op == 0x19:  # aload
+                out.append(f"                _ost[_sp] = _ol[{arg}]; _st[_sp++] = 0L;")
             elif 0x3B <= op <= 0x3E:  # istore_0..3
                 out.append(f"                l{op - 0x3B} = (int)_st[--_sp];")
             elif 0x3F <= op <= 0x42:  # lstore_0..3
                 out.append(f"                l{op - 0x3F} = _st[--_sp];")
+            elif 0x4B <= op <= 0x4E:  # astore_0..3
+                out.append(f"                _ol[{op - 0x4B}] = _ost[--_sp];")
             elif op == 0x36:  # istore
                 out.append(f"                l{arg} = (int)_st[--_sp];")
             elif op == 0x37:  # lstore
                 out.append(f"                l{arg} = _st[--_sp];")
+            elif op == 0x3A:  # astore
+                out.append(f"                _ol[{arg}] = _ost[--_sp];")
             elif op == 0x84:  # iinc
                 i_slot = (arg >> 16) & 0xFF
                 i_const = struct.unpack("<h", struct.pack("<H", arg & 0xFFFF))[0]
@@ -600,7 +643,7 @@ def _decode_jvm_class_to_java(cls: bytes) -> Optional[Tuple[str, str]]:
             elif op == 0x57:  # pop
                 out.append("                _sp--;")
             elif op == 0x59:  # dup
-                out.append("                _st[_sp] = _st[_sp - 1]; _sp++;")
+                out.append("                _st[_sp] = _st[_sp - 1]; _ost[_sp] = _ost[_sp - 1]; _sp++;")
             elif op == 0x74:  # ineg
                 out.append("                _st[_sp - 1] = (int)(-(int)_st[_sp - 1]);")
             elif op == 0x75:  # lneg
@@ -632,31 +675,75 @@ def _decode_jvm_class_to_java(cls: bytes) -> Optional[Tuple[str, str]]:
                     out.append(f"                {{ int _a = (int)_st[--_sp]; if (_a {cmp_b} 0) {{ _pc = {arg}; continue; }} }}")
                 else:
                     out.append(f"                {{ int _b = (int)_st[--_sp]; int _a = (int)_st[--_sp]; if (_a {cmp_b} _b) {{ _pc = {arg}; continue; }} }}")
-            elif op == 0xB8:  # invokestatic
+            elif op == 0xB2:  # getstatic
+                f_cls, f_nm, f_desc = _fieldref_info(arg)
+                safe_fn = re.sub(r"[^A-Za-z0-9_]", "_", f_nm)
+                if f_cls == this_cls_raw and _jvm_type_from_desc(f_desc) in ("int", "long"):
+                    out.append(f"                _st[_sp++] = {cls_simple}.{safe_fn};")
+                else:
+                    out.append("                _st[_sp++] = 0L;")
+            elif op == 0xB3:  # putstatic
+                f_cls, f_nm, f_desc = _fieldref_info(arg)
+                safe_fn = re.sub(r"[^A-Za-z0-9_]", "_", f_nm)
+                fty = _jvm_type_from_desc(f_desc)
+                if f_cls == this_cls_raw and fty in ("int", "long"):
+                    out.append(f"                {cls_simple}.{safe_fn} = ({fty})_st[--_sp];")
+                else:
+                    out.append("                _sp--;")
+            elif op == 0xB4:  # getfield
+                f_cls, f_nm, f_desc = _fieldref_info(arg)
+                safe_fn = re.sub(r"[^A-Za-z0-9_]", "_", f_nm)
+                if f_cls == this_cls_raw and _jvm_type_from_desc(f_desc) in ("int", "long"):
+                    out.append(f"                _st[_sp - 1] = (({cls_simple})_ost[_sp - 1]).{safe_fn};")
+                else:
+                    out.append("                _st[_sp - 1] = 0L;")
+            elif op == 0xB5:  # putfield
+                f_cls, f_nm, f_desc = _fieldref_info(arg)
+                safe_fn = re.sub(r"[^A-Za-z0-9_]", "_", f_nm)
+                fty = _jvm_type_from_desc(f_desc)
+                if f_cls == this_cls_raw and fty in ("int", "long"):
+                    out.append(
+                        f"                {{ {fty} _fv = ({fty})_st[--_sp]; (({cls_simple})_ost[--_sp]).{safe_fn} = _fv; }}"
+                    )
+                else:
+                    out.append("                _sp = Math.max(0, _sp - 2);")
+            elif op in (0xB6, 0xB7, 0xB8):  # invokevirtual / invokespecial / invokestatic
                 c_cls, c_m, c_desc = _methodref_info(arg)
-                c_ptypes, c_ret = _parse_jvm_params(c_desc)
+                c_is_stat = (op == 0xB8)
+                c_ptypes, c_ret = _parse_jvm_params(c_desc, is_static=c_is_stat)
                 safe_cm = re.sub(r"[^A-Za-z0-9_]", "_", c_m)
                 n_cargs = len(c_ptypes)
-                if c_cls == this_cls_raw or c_cls == "java/lang/Math":
-                    prefix = "Math." if c_cls == "java/lang/Math" else ""
-                    arg_vars = []
+                if op == 0xB7 and c_m == "<init>":
+                    if n_cargs > 0:
+                        out.append(f"                _sp = Math.max(0, _sp - {n_cargs});")
+                    out.append("                _sp = Math.max(0, _sp - 1);")
+                elif c_cls == this_cls_raw or c_cls == "java/lang/Math":
                     out.append("                {")
+                    arg_vars = []
                     for ai in range(n_cargs - 1, -1, -1):
                         aty, _ = c_ptypes[ai]
                         cast_t = "long" if aty == "long" else "int"
                         out.append(f"                    {cast_t} _ca{ai} = ({cast_t})_st[--_sp];")
                         arg_vars.insert(0, f"_ca{ai}")
-                    call_expr = f"{prefix}{safe_cm}({', '.join(arg_vars)})"
+                    if c_is_stat:
+                        prefix = "Math." if c_cls == "java/lang/Math" else ""
+                        call_expr = f"{prefix}{safe_cm}({', '.join(arg_vars)})"
+                    else:
+                        out.append(f"                    {cls_simple} _recv = ({cls_simple})_ost[--_sp];")
+                        call_expr = f"_recv.{safe_cm}({', '.join(arg_vars)})"
                     if c_ret == "void":
                         out.append(f"                    {call_expr};")
                     else:
                         out.append(f"                    _st[_sp++] = {call_expr};")
                     out.append("                }")
                 else:
-                    if n_cargs > 0:
-                        out.append(f"                _sp = Math.max(0, _sp - {n_cargs});")
+                    pop_n = n_cargs + (0 if c_is_stat else 1)
+                    if pop_n > 0:
+                        out.append(f"                _sp = Math.max(0, _sp - {pop_n});")
                     if c_ret != "void":
                         out.append("                _st[_sp++] = 0L;")
+            elif op == 0xBB:  # new
+                out.append("                _ost[_sp] = null; _st[_sp++] = 0L;")
             elif op == 0xAC:  # ireturn
                 out.append("                return (int)_st[--_sp];")
             elif op == 0xAD:  # lreturn
@@ -690,18 +777,22 @@ def _decode_jvm_class_to_java(cls: bytes) -> Optional[Tuple[str, str]]:
                 code_bc = cls[pos + 8 : pos + 8 + code_len]
             pos += alen
 
-        if m_name in ("<init>", "<clinit>"):
+        if m_name == "<clinit>":
             continue
         is_static = bool(m_acc & 0x0008)
-        if not is_static:
-            continue
         if m_name == "main" and "[Ljava/lang/String;" in m_desc:
             lines.extend(["    public static void main(String[] args) {", "    }", ""])
             continue
-        ptypes, ret_t = _parse_jvm_params(m_desc)
+        ptypes, ret_t = _parse_jvm_params(m_desc, is_static=is_static)
         params_sig = ", ".join(f"{'long' if ty == 'long' else 'int'} p{idx}" for idx, (ty, _) in enumerate(ptypes))
-        lines.append(f"    public static {ret_t} {re.sub(r'[^A-Za-z0-9_]', '_', m_name)}({params_sig}) {{")
-        lines.extend(_lift_jvm_code(code_bc, ptypes, max_locals, ret_t))
+        if m_name == "<init>":
+            lines.append(f"    public {cls_simple}({params_sig}) {{")
+            lines.extend(_lift_jvm_code(code_bc, ptypes, max_locals, "void", is_static=False))
+            lines.extend(["    }", ""])
+            continue
+        stat_kw = "static " if is_static else ""
+        lines.append(f"    public {stat_kw}{ret_t} {re.sub(r'[^A-Za-z0-9_]', '_', m_name)}({params_sig}) {{")
+        lines.extend(_lift_jvm_code(code_bc, ptypes, max_locals, ret_t, is_static=is_static))
         lines.extend(["    }", ""])
 
     lines.append("}")
@@ -1442,6 +1533,80 @@ def reconstruct_wasm_project(
 # 5. JavaScript / Webpack Bundle -> TypeScript/ESM Project Reconstructor
 # ---------------------------------------------------------------------------
 
+_JS_MOD_HEAD_RE = re.compile(
+    r'(["\']?[A-Za-z0-9_./@-]+["\']?)\s*(?::\s*(?:function\s*\(([^(){}\n]*)\)|\(([^(){}\n]*)\)\s*=>|([A-Za-z_$][\w$]*)\s*=>)|\(([^(){}\n]*)\))\s*\{'
+)
+
+
+def _scan_balanced_braces(src: str, open_idx: int) -> Optional[int]:
+    """Finds the matching closing `}` for `src[open_idx] == '{'`, skipping strings, templates, and comments."""
+    if open_idx >= len(src) or src[open_idx] != "{":
+        return None
+    depth = 0
+    i = open_idx
+    n = len(src)
+    while i < n:
+        ch = src[i]
+        if ch in ("'", '"', "`"):
+            q = ch
+            i += 1
+            while i < n:
+                if src[i] == "\\":
+                    i += 2
+                    continue
+                if src[i] == q:
+                    i += 1
+                    break
+                i += 1
+            continue
+        if ch == "/" and i + 1 < n:
+            nxt = src[i + 1]
+            if nxt == "/":
+                nl = src.find("\n", i + 2)
+                i = n if nl == -1 else nl + 1
+                continue
+            if nxt == "*":
+                end_c = src.find("*/", i + 2)
+                i = n if end_c == -1 else end_c + 2
+                continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    return None
+
+
+def _extract_js_bundle_modules(js_text: str) -> List[Tuple[str, str, str]]:
+    """Extracts nested Webpack/ESBuild/CJS module bodies with arbitrary brace nesting."""
+    results: List[Tuple[str, str, str]] = []
+    pos = 0
+    n = len(js_text)
+    while pos < n and len(results) < 250:
+        m = _JS_MOD_HEAD_RE.search(js_text, pos)
+        if not m:
+            break
+        key_raw = m.group(1).strip("\"'")
+        # Skip control keywords that look like `if (...) {` or `while (...) {`
+        if key_raw in ("if", "else", "for", "while", "switch", "catch", "with", "function", "constructor", "__commonJS", "__esm"):
+            pos = m.end()
+            continue
+        brace_idx = m.end() - 1
+        end_idx = _scan_balanced_braces(js_text, brace_idx)
+        if end_idx is None:
+            pos = m.end()
+            continue
+        params = next((g for g in (m.group(2), m.group(3), m.group(4), m.group(5)) if g is not None), "")
+        body = js_text[brace_idx + 1 : end_idx]
+        # Avoid consuming an outer wrapper dictionary (`var mods = { alpha: ... }`) as a single module
+        if ":" in key_raw or key_raw.isidentifier() or key_raw.isdigit() or "/" in key_raw or "." in key_raw:
+            results.append((key_raw, params.strip(), body))
+        pos = end_idx + 1
+    return results
+
+
 def reconstruct_js_bundle_project(
     target_path: str | Path,
     output_dir: str | Path,
@@ -1456,39 +1621,54 @@ def reconstruct_js_bundle_project(
     generated: List[str] = []
     modules_extracted = 0
 
+    wb_text = ""
     # Try WebcrackBridge first if webcrack deps are available
     try:
         from aether_re.webcrack_bridge import WebcrackBridge
         wb = WebcrackBridge()
         w_res = wb.deobfuscate(t_path, output_dir=mod_dir, timeout_seconds=30)
         if w_res.success and w_res.deobfuscated_code:
-            (out_root / "src" / "index.js").write_text(w_res.deobfuscated_code, encoding="utf-8")
+            wb_text = w_res.deobfuscated_code
+            (out_root / "src" / "index.js").write_text(wb_text, encoding="utf-8")
             generated.append("src/index.js")
             modules_extracted = max(1, w_res.module_count)
     except Exception:
         pass
 
-    # Pure-Python Webpack/CJS dictionary module splitter + semantic deobfuscator
-    if modules_extracted == 0:
-        # Match patterns like: "modA": (module, exports, __webpack_require__) => { ... } or numeric keys 101: function(...) { ... }
-        mod_matches = re.findall(
-            r'(["\']?[A-Za-z0-9_./@-]+["\']?)\s*:\s*(?:function\s*\([^)]*\)|\([^)]*\)\s*=>)\s*\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}',
-            js_text,
-        )
-        if mod_matches:
-            for idx_m, (m_key, m_body) in enumerate(mod_matches[:200]):
-                clean_key = re.sub(r"[^A-Za-z0-9_]", "_", m_key.strip("\"'")) or f"mod_{idx_m}"
-                deob = deobfuscate_javascript_snippet(f"function module_{clean_key}() {{\n{m_body}\n}}")
-                m_file = mod_dir / f"{clean_key}.ts"
-                m_file.write_text(deob["deobfuscated_code"] + "\n" + "\n".join(deob.get("typescript_interfaces", [])), encoding="utf-8")
-                generated.append(f"src/modules/{m_file.name}")
-                modules_extracted += 1
-        else:
-            deob = deobfuscate_javascript_snippet(js_text)
-            idx_p = out_root / "src" / "index.ts"
-            idx_p.write_text(deob["deobfuscated_code"] + "\n" + "\n".join(deob.get("typescript_interfaces", [])), encoding="utf-8")
-            generated.append("src/index.ts")
-            modules_extracted = 1
+    # Lexical balanced-brace Webpack/ESBuild/CJS module splitter + semantic deobfuscator
+    source_for_split = wb_text or js_text
+    extracted_mods = _extract_js_bundle_modules(source_for_split)
+    if extracted_mods:
+        barrel_exports: List[str] = []
+        seen_keys: Set[str] = set()
+        ts_count = 0
+        for idx_m, (m_key, m_params, m_body) in enumerate(extracted_mods[:200]):
+            clean_key = re.sub(r"[^A-Za-z0-9_]", "_", m_key) or f"mod_{idx_m}"
+            if clean_key[0].isdigit():
+                clean_key = f"mod_{clean_key}"
+            if clean_key in seen_keys:
+                clean_key = f"{clean_key}_{idx_m}"
+            seen_keys.add(clean_key)
+            sig_p = ", ".join(p.strip() for p in m_params.split(",") if p.strip()) if m_params else ""
+            wrapped = f"export function module_{clean_key}({sig_p}) {{\n{m_body}\n}}"
+            deob = deobfuscate_javascript_snippet(wrapped)
+            m_file = mod_dir / f"{clean_key}.ts"
+            m_file.write_text(
+                deob["deobfuscated_code"] + "\n" + "\n".join(deob.get("typescript_interfaces", [])),
+                encoding="utf-8",
+            )
+            generated.append(f"src/modules/{m_file.name}")
+            barrel_exports.append(f'export * from "./modules/{clean_key}.js";')
+            ts_count += 1
+        (out_root / "src" / "index.ts").write_text("\n".join(barrel_exports) + "\n", encoding="utf-8")
+        generated.append("src/index.ts")
+        modules_extracted = max(modules_extracted, ts_count)
+    elif modules_extracted == 0:
+        deob = deobfuscate_javascript_snippet(js_text)
+        idx_p = out_root / "src" / "index.ts"
+        idx_p.write_text(deob["deobfuscated_code"] + "\n" + "\n".join(deob.get("typescript_interfaces", [])), encoding="utf-8")
+        generated.append("src/index.ts")
+        modules_extracted = 1
 
     (out_root / "package.json").write_text(
         json.dumps(
