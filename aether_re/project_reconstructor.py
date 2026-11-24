@@ -3407,13 +3407,17 @@ def _reconstruct_multiarch_project(
         "AETHER_RT int64_t aether_icall(int64_t fn_ptr, int64_t a0, int64_t a1, int64_t a2, int64_t a3) {",
         "    return fn_ptr ? ((aether_vfn_t)(uintptr_t)fn_ptr)(a0, a1, a2, a3) : 0;",
         "}",
+        "#ifdef AETHER_MULTI_TU_DECL",
+        "int64_t aether_vtable_ptr(int64_t rva);",
+        "int64_t aether_data_ptr(int64_t rva);",
+        "int64_t aether_crt_fn_ptr(int64_t kid);",
+        "int64_t aether_fn_ptr(int64_t rva);",
+        "int64_t aether_ro_ptr(int64_t rva);",
+        "#else",
         "AETHER_RT int64_t aether_vtable_ptr(int64_t rva) { (void)rva; return 0; }",
         "AETHER_RT int64_t aether_data_ptr(int64_t rva) { (void)rva; return 0; }",
         "AETHER_RT int64_t aether_crt_fn_ptr(int64_t kid) { (void)kid; return 0; }",
         "AETHER_RT int64_t aether_fn_ptr(int64_t rva) { (void)rva; return 0; }",
-        "AETHER_RT int64_t aether_abort(void) { return 0; }",
-        "AETHER_RT double aether_fcall_f64(int64_t p, int64_t a, int64_t b, int64_t c, int64_t d, int64_t e, int64_t f, int64_t g, int64_t h) { (void)p; (void)a; (void)b; (void)c; (void)d; (void)e; (void)f; (void)g; (void)h; return 0.0; }",
-        "AETHER_RT double aether_cfcall_f64(int64_t p, int64_t a, int64_t b, int64_t c, int64_t d, int64_t e, int64_t f, int64_t g, int64_t h) { (void)p; (void)a; (void)b; (void)c; (void)d; (void)e; (void)f; (void)g; (void)h; return 0.0; }",
     ])
     ro_map_local: Dict[int, bytes] = {}
     if ro_reader is not None:
@@ -3431,6 +3435,10 @@ def _reconstruct_multiarch_project(
         "    (void)rva;",
         "    return 0;",
         "}",
+        "#endif",
+        "AETHER_RT int64_t aether_abort(void) { return 0; }",
+        "AETHER_RT double aether_fcall_f64(int64_t p, int64_t a, int64_t b, int64_t c, int64_t d, int64_t e, int64_t f, int64_t g, int64_t h) { (void)p; (void)a; (void)b; (void)c; (void)d; (void)e; (void)f; (void)g; (void)h; return 0.0; }",
+        "AETHER_RT double aether_cfcall_f64(int64_t p, int64_t a, int64_t b, int64_t c, int64_t d, int64_t e, int64_t f, int64_t g, int64_t h) { (void)p; (void)a; (void)b; (void)c; (void)d; (void)e; (void)f; (void)g; (void)h; return 0.0; }",
         "#ifdef __cplusplus",
         "}",
         "#endif",
@@ -3952,7 +3960,16 @@ def reconstruct_project(
             "}",
             "AETHER_RT double aether_pow(double a, double b) { return pow(a, b); }",
             "AETHER_RT double aether_fmod(double a, double b) { return fmod(a, b); }",
+            "#ifdef AETHER_MULTI_TU_DECL",
+            "extern int64_t _aether_div_rem;",
+            "extern int64_t _aether_imul_hi;",
+            "#elif defined(AETHER_MULTI_TU_IMPL)",
+            "int64_t _aether_div_rem = 0;",
+            "int64_t _aether_imul_hi = 0;",
+            "#else",
             "static int64_t _aether_div_rem = 0;",
+            "static int64_t _aether_imul_hi = 0;",
+            "#endif",
             "static inline int64_t aether_udiv64(int64_t hi, int64_t lo, int64_t d) {",
             "    uint64_t ud = (uint64_t)d;",
             "    if (!ud) { _aether_div_rem = 0; return 0; }",
@@ -3973,7 +3990,6 @@ def reconstruct_project(
             "    _aether_div_rem = (int64_t)(uint32_t)(un % ud);",
             "    return (int64_t)(uint32_t)(un / ud);",
             "}",
-            "static int64_t _aether_imul_hi = 0;",
             "static inline int64_t aether_imul32(int64_t a, int64_t b) {",
             "    int64_t prod = (int64_t)(int32_t)a * (int64_t)(int32_t)b;",
             "    _aether_imul_hi = (int64_t)(uint32_t)((uint64_t)prod >> 32);",
@@ -4060,11 +4076,21 @@ def reconstruct_project(
             "}",
             "#ifdef _MSC_VER",
             "#define AETHER_TLS __declspec(thread)",
+            "#define AETHER_ALIGN16 __declspec(align(16))",
             "#else",
             "#define AETHER_TLS _Thread_local",
+            "#define AETHER_ALIGN16 __attribute__((aligned(16)))",
             "#endif",
-            "static AETHER_TLS uint8_t aether_tls_stack[131072];",
+            "#ifdef AETHER_MULTI_TU_DECL",
+            "extern AETHER_TLS AETHER_ALIGN16 uint8_t aether_tls_stack[131072];",
+            "extern AETHER_TLS int64_t _aether_sp;",
+            "#elif defined(AETHER_MULTI_TU_IMPL)",
+            "AETHER_TLS AETHER_ALIGN16 uint8_t aether_tls_stack[131072];",
+            "AETHER_TLS int64_t _aether_sp = 0;",
+            "#else",
+            "static AETHER_TLS AETHER_ALIGN16 uint8_t aether_tls_stack[131072];",
             "static AETHER_TLS int64_t _aether_sp = 0;",
+            "#endif",
             "AETHER_RT int64_t aether_get_sp(void) {",
             "    return _aether_sp;",
             "}",
@@ -4819,12 +4845,31 @@ def reconstruct_project(
                 header_lines.append("")
 
         header_lines.extend(fn_decls)
+        _math_unary_emit = (
+            "acos", "asin", "atan", "ceil", "cos", "cosh", "exp", "fabs",
+            "floor", "log", "log10", "sin", "sinh", "sqrt", "tan", "tanh",
+        )
+        for _mn in _math_unary_emit:
+            header_lines.append(f"AETHER_RT double aether_{_mn}(double x) {{ return {_mn}(x); }}")
+        header_lines.append("AETHER_RT double aether_atan2(double y, double x) { return atan2(y, x); }")
+        header_lines.append("AETHER_RT double aether_pow(double a, double b);")
+        header_lines.append("AETHER_RT double aether_fmod(double a, double b);")
+        header_lines.append("AETHER_RT int64_t aether_abort(void) { return 0; }")
+
         header_lines.extend([
             "",
             "typedef int64_t (*aether_vfn_t)(int64_t, int64_t, int64_t, int64_t);",
             "AETHER_RT int64_t aether_vcall(int64_t fn_ptr, int64_t a0, int64_t a1, int64_t a2, int64_t a3) {",
             "    return fn_ptr ? ((aether_vfn_t)(uintptr_t)fn_ptr)(a0, a1, a2, a3) : 0;",
             "}",
+            "#ifdef AETHER_MULTI_TU_DECL",
+            "int64_t aether_vtable_ptr(int64_t vt_rva);",
+            "int64_t aether_data_ptr(int64_t rva);",
+            "int64_t aether_crt_fn_ptr(int64_t kid);",
+            "int64_t aether_icall(int64_t fn_ptr, int64_t a0, int64_t a1, int64_t a2, int64_t a3);",
+            "int64_t aether_ro_ptr(int64_t rva);",
+            "int64_t aether_fn_ptr(int64_t rva);",
+            "#else",
         ])
         for vt_rva, slots in sorted(vtable_slot_map.items()):
             slot_syms = ", ".join(
@@ -4871,16 +4916,6 @@ def reconstruct_project(
             "    return ((aether_vfn_t)(uintptr_t)fn_ptr)(a0, a1, a2, a3);",
             "}",
         ])
-        _math_unary_emit = (
-            "acos", "asin", "atan", "ceil", "cos", "cosh", "exp", "fabs",
-            "floor", "log", "log10", "sin", "sinh", "sqrt", "tan", "tanh",
-        )
-        for _mn in _math_unary_emit:
-            header_lines.append(f"AETHER_RT double aether_{_mn}(double x) {{ return {_mn}(x); }}")
-        header_lines.append("AETHER_RT double aether_atan2(double y, double x) { return atan2(y, x); }")
-        header_lines.append("AETHER_RT double aether_pow(double a, double b);")
-        header_lines.append("AETHER_RT double aether_fmod(double a, double b);")
-        header_lines.append("AETHER_RT int64_t aether_abort(void) { return 0; }")
 
         use_ro_sec = bool(
             ro_relocs
@@ -4956,6 +4991,7 @@ def reconstruct_project(
             "    (void)rva;",
             "    return 0;",
             "}",
+            "#endif",
         ])
         header_lines.extend([
             "typedef double (*aether_fcall8_t)(double, double, double, double, double, double, double, double);",

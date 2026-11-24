@@ -473,7 +473,16 @@ def _base_runtime_header_lines() -> List[str]:
         "}",
         "AETHER_RT double aether_pow(double a, double b) { return pow(a, b); }",
         "AETHER_RT double aether_fmod(double a, double b) { return fmod(a, b); }",
+        "#ifdef AETHER_MULTI_TU_DECL",
+        "extern int64_t _aether_div_rem;",
+        "extern int64_t _aether_imul_hi;",
+        "#elif defined(AETHER_MULTI_TU_IMPL)",
+        "int64_t _aether_div_rem = 0;",
+        "int64_t _aether_imul_hi = 0;",
+        "#else",
         "static int64_t _aether_div_rem = 0;",
+        "static int64_t _aether_imul_hi = 0;",
+        "#endif",
         "static inline int64_t aether_udiv64(int64_t hi, int64_t lo, int64_t d) {",
         "    uint64_t ud = (uint64_t)d;",
         "    if (!ud) { _aether_div_rem = 0; return 0; }",
@@ -494,7 +503,6 @@ def _base_runtime_header_lines() -> List[str]:
         "    _aether_div_rem = (int64_t)(uint32_t)(un % ud);",
         "    return (int64_t)(uint32_t)(un / ud);",
         "}",
-        "static int64_t _aether_imul_hi = 0;",
         "static inline int64_t aether_imul32(int64_t a, int64_t b) {",
         "    int64_t prod = (int64_t)(int32_t)a * (int64_t)(int32_t)b;",
         "    _aether_imul_hi = (int64_t)(uint32_t)((uint64_t)prod >> 32);",
@@ -581,11 +589,21 @@ def _base_runtime_header_lines() -> List[str]:
         "}",
         "#ifdef _MSC_VER",
         "#define AETHER_TLS __declspec(thread)",
+        "#define AETHER_ALIGN16 __declspec(align(16))",
         "#else",
         "#define AETHER_TLS _Thread_local",
+        "#define AETHER_ALIGN16 __attribute__((aligned(16)))",
         "#endif",
-        "static AETHER_TLS uint8_t aether_tls_stack[131072];",
+        "#ifdef AETHER_MULTI_TU_DECL",
+        "extern AETHER_TLS AETHER_ALIGN16 uint8_t aether_tls_stack[131072];",
+        "extern AETHER_TLS int64_t _aether_sp;",
+        "#elif defined(AETHER_MULTI_TU_IMPL)",
+        "AETHER_TLS AETHER_ALIGN16 uint8_t aether_tls_stack[131072];",
+        "AETHER_TLS int64_t _aether_sp = 0;",
+        "#else",
+        "static AETHER_TLS AETHER_ALIGN16 uint8_t aether_tls_stack[131072];",
         "static AETHER_TLS int64_t _aether_sp = 0;",
+        "#endif",
         "AETHER_RT int64_t aether_get_sp(void) {",
         "    return _aether_sp;",
         "}",
@@ -701,7 +719,8 @@ def emit_partitioned_c_modules(
     for g_name, bodies in sorted(buckets.items()):
         rel = f"src/modules/mod_{g_name}.c"
         txt = "\n".join([
-            f"/* Auto-Partitioned Translation Unit `{g_name}` ({arch_label}) by AetherRE v8.3 */",
+            f"/* Auto-Partitioned Translation Unit `{g_name}` ({arch_label}) by AetherRE v8.4 */",
+            "#define AETHER_MULTI_TU_DECL 1",
             '#include "../../include/reconstructed_api.h"',
             "",
             *bodies,
@@ -714,7 +733,8 @@ def emit_partitioned_c_modules(
     if extra_stubs:
         rel_s = "src/modules/mod_stubs.c"
         txt_s = "\n".join([
-            f"/* External/Unresolved Stubs Translation Unit ({arch_label}) by AetherRE v8.3 */",
+            f"/* External/Unresolved Stubs Translation Unit ({arch_label}) by AetherRE v8.4 */",
+            "#define AETHER_MULTI_TU_DECL 1",
             '#include "../../include/reconstructed_api.h"',
             "",
             *extra_stubs,
@@ -727,7 +747,8 @@ def emit_partitioned_c_modules(
     if is_executable_entry:
         rel_e = "src/modules/mod_entry.c"
         txt_e = "\n".join([
-            f"/* Entrypoint Wrapper Translation Unit ({arch_label}) by AetherRE v8.3 */",
+            f"/* Entrypoint Wrapper Translation Unit ({arch_label}) by AetherRE v8.4 */",
+            "#define AETHER_MULTI_TU_DECL 1",
             '#include "../../include/reconstructed_api.h"',
             "",
             "int main(int argc, char** argv) {",
@@ -739,6 +760,18 @@ def emit_partitioned_c_modules(
         (out_root / rel_e).write_text(txt_e, encoding="utf-8")
         generated.append(rel_e)
         tu_rels.append(rel_e)
+
+    rel_rt = "src/modules/mod_runtime_shared.c"
+    txt_rt = "\n".join([
+        f"/* Shared Multi-TU .data/.rdata/vtable/TLS Runtime State ({arch_label}) by AetherRE v8.4 */",
+        "#define AETHER_RT_LINK 1",
+        "#define AETHER_MULTI_TU_IMPL 1",
+        '#include "../../include/reconstructed_api.h"',
+        "",
+    ])
+    (out_root / rel_rt).write_text(txt_rt, encoding="utf-8")
+    generated.append(rel_rt)
+    tu_rels.append(rel_rt)
 
     target_kind = "add_executable(reconstructed_twin " + " ".join(tu_rels) + ")" if is_executable_entry else (
         "add_library(reconstructed_twin SHARED " + " ".join(tu_rels) + " src/exports.def)"

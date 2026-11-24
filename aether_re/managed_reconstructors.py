@@ -403,6 +403,8 @@ def _decode_jvm_class_to_java(cls: bytes) -> Optional[Tuple[str, str]]:
             return "int"
         if d == "Ljava/lang/String;":
             return "String"
+        if d.startswith("L") and d.endswith(";"):
+            return d[1:-1].replace("/", ".")
         return "Object"
 
     def _parse_jvm_params(desc: str, *, is_static: bool = True) -> Tuple[List[Tuple[str, int]], str]:
@@ -423,8 +425,9 @@ def _decode_jvm_class_to_java(cls: bytes) -> Optional[Tuple[str, str]]:
                 pi += 1
             elif ch == "L":
                 end_l = inner.find(";", pi)
+                raw_cls = inner[pi + 1 : end_l].replace("/", ".") if end_l != -1 else "Object"
                 pi = (end_l + 1) if end_l != -1 else len(inner)
-                ptypes.append(("Object", slot))
+                ptypes.append(("String" if raw_cls == "java.lang.String" else raw_cls, slot))
                 slot += 1
             elif ch == "[":
                 pi += 1
@@ -437,15 +440,31 @@ def _decode_jvm_class_to_java(cls: bytes) -> Optional[Tuple[str, str]]:
                 slot += 1
             else:
                 pi += 1
-        ret_t = "void" if ret_raw == "V" else ("long" if ret_raw == "J" else "int")
+        if ret_raw == "V":
+            ret_t = "void"
+        elif ret_raw == "J":
+            ret_t = "long"
+        elif ret_raw in ("I", "Z", "B", "C", "S"):
+            ret_t = "int"
+        elif ret_raw.startswith("L") and ret_raw.endswith(";"):
+            rcls = ret_raw[1:-1].replace("/", ".")
+            ret_t = "String" if rcls == "java.lang.String" else rcls
+        else:
+            ret_t = "int"
         return ptypes, ret_t
 
     if pos + 6 > len(cls):
         return None
-    _acc, this_cls_idx, _super_idx = struct.unpack_from(">HHH", cls, pos)
+    cls_acc, this_cls_idx, super_idx = struct.unpack_from(">HHH", cls, pos)
     pos += 6
     if_cnt = struct.unpack_from(">H", cls, pos)[0]
-    pos += 2 + if_cnt * 2
+    pos += 2
+    iface_raws = [
+        _cls_name(struct.unpack_from(">H", cls, pos + k * 2)[0])
+        for k in range(if_cnt)
+        if pos + (k + 1) * 2 <= len(cls)
+    ]
+    pos += if_cnt * 2
     fld_cnt = struct.unpack_from(">H", cls, pos)[0]
     pos += 2
     parsed_fields: List[Tuple[int, str, str]] = []
@@ -465,6 +484,9 @@ def _decode_jvm_class_to_java(cls: bytes) -> Optional[Tuple[str, str]]:
     pos += 2
 
     this_cls_raw = _cls_name(this_cls_idx)
+    super_cls_raw = _cls_name(super_idx) if super_idx else "java/lang/Object"
+    is_interface_cls = bool(cls_acc & 0x0200)
+    is_abstract_cls = bool(cls_acc & 0x0400) and not is_interface_cls
     fqcn_raw = this_cls_raw.replace("/", ".")
     pkg, _, cls_simple = fqcn_raw.rpartition(".")
     cls_simple = re.sub(r"[^A-Za-z0-9_]", "_", cls_simple) or "RecoveredClass"
@@ -473,7 +495,15 @@ def _decode_jvm_class_to_java(cls: bytes) -> Optional[Tuple[str, str]]:
     lines: List[str] = []
     if pkg:
         lines.extend([f"package {pkg};", ""])
-    lines.append(f"public class {cls_simple} {{")
+    hdr_kw = "interface" if is_interface_cls else ("abstract class" if is_abstract_cls else "class")
+    ext_clause = ""
+    if not is_interface_cls and super_cls_raw not in ("", "java/lang/Object", "java/lang/Enum", "RecoveredClass"):
+        ext_clause += f" extends {super_cls_raw.replace('/', '.')}"
+    clean_ifaces = [ic.replace("/", ".") for ic in iface_raws if ic and ic != "RecoveredClass"]
+    if clean_ifaces:
+        kw_ic = "extends" if is_interface_cls else "implements"
+        ext_clause += f" {kw_ic} {', '.join(clean_ifaces)}"
+    lines.append(f"public {hdr_kw} {cls_simple}{ext_clause} {{")
     for f_acc, f_name, f_desc in parsed_fields:
         if (f_acc & 0x1000) or not f_name:  # skip synthetic
             continue
@@ -531,22 +561,27 @@ def _decode_jvm_class_to_java(cls: bytes) -> Optional[Tuple[str, str]]:
                     p += 2
             elif op in (0x3B, 0x3C, 0x3D, 0x3E, 0x3F, 0x40, 0x41, 0x42, 0x4B, 0x4C, 0x4D, 0x4E):
                 has_cf = True
-            elif op in (0xB2, 0xB3, 0xB4, 0xB5, 0xB6, 0xB7, 0xB9, 0xBB):  # 2-byte CP ref
+            elif op in (0xB2, 0xB3, 0xB4, 0xB5, 0xB6, 0xB7, 0xBB):  # 2-byte CP ref
                 if p + 1 < len(bc):
                     arg = struct.unpack_from(">H", bc, p)[0]
                     p += 2
                     if op in (0xB3, 0xB4, 0xB5, 0xB6, 0xB7, 0xBB):
                         has_cf = True
+            elif op == 0xB9:  # invokeinterface (u2 index, u1 count, u1 0)
+                if p + 3 < len(bc):
+                    arg = struct.unpack_from(">H", bc, p)[0]
+                    p += 4
+                    has_cf = True
             insns.append((pc, op, arg, p))
         return insns, targets, has_cf
 
-    def _lift_jvm_code(bc: bytes, ptypes: List[Tuple[str, int]], max_locals: int, ret_t: str, *, is_static: bool = True) -> List[str]:
+    def _lift_jvm_code(bc: bytes, ptypes: List[Tuple[str, int]], max_locals: int, ret_t: str, *, is_static: bool = True, is_ctor: bool = False) -> List[str]:
         insns, targets, has_cf = _decode_jvm_insns(bc)
         if not insns:
             return ["        return;" if ret_t == "void" else "        return 0;"]
 
         # Fast-path linear expression lifter for pure static branchless methods
-        if is_static and not has_cf and all(op not in (0xB8, 0xB2, 0xB3, 0xB4, 0xB5, 0xB6, 0xB7) for _, op, _, _ in insns):
+        if is_static and not has_cf and all(op not in (0xB8, 0xB2, 0xB3, 0xB4, 0xB5, 0xB6, 0xB7, 0xB9) for _, op, _, _ in insns):
             st: List[str] = []
             out_j: List[str] = []
             for _pc, op, arg, _np in insns:
@@ -569,22 +604,41 @@ def _decode_jvm_class_to_java(cls: bytes) -> Optional[Tuple[str, str]]:
             if out_j:
                 return out_j
 
-        # Structured CFG state machine supporting OOP `this`, fields, locals, branches, and calls
+        # Detect explicit super(...) preamble inside subclass constructors
+        out: List[str] = []
+        skip_super_pc: Optional[int] = None
+        if is_ctor and super_cls_raw not in ("", "java/lang/Object"):
+            for idx_k, (pc_k, op_k, arg_k, _npk) in enumerate(insns[:16]):
+                if op_k == 0xB7:
+                    sc_cls, sc_m, sc_desc = _methodref_info(arg_k)
+                    if sc_cls == super_cls_raw and sc_m == "<init>":
+                        sc_ptypes, _ = _parse_jvm_params(sc_desc, is_static=False)
+                        n_sc = len(sc_ptypes)
+                        if n_sc > 0:
+                            super_args = ", ".join(
+                                f"({ty})p{ai}" for ai, (ty, _) in enumerate(sc_ptypes) if ai < len(ptypes)
+                            )
+                            out.append(f"        super({super_args});")
+                        else:
+                            out.append("        super();")
+                        skip_super_pc = pc_k
+                        break
+
+        # Structured CFG state machine supporting OOP `this`, inheritance, interfaces, and cross-class `new`
         slot_types: Dict[int, str] = {slot: ty for ty, slot in ptypes}
         slot_inits: Dict[int, str] = {slot: f"p{idx}" for idx, (_ty, slot) in enumerate(ptypes)}
         total_slots = max(max_locals, max(slot_types.keys(), default=0) + 1, 2)
-        out: List[str] = []
         for s_idx in range(total_slots):
             ty = slot_types.get(s_idx, "int")
             init_v = slot_inits.get(s_idx, "0")
-            if ty == "Object" or (not is_static and s_idx == 0):
+            if ty not in ("int", "long") or (not is_static and s_idx == 0):
                 continue
             out.append(f"        long l{s_idx} = (long)({init_v});")
         out.append(f"        Object[] _ol = new Object[{max(total_slots, 4)}];")
         if not is_static:
             out.append("        _ol[0] = this;")
         for idx_p, (ty, slot) in enumerate(ptypes):
-            if ty == "Object":
+            if ty not in ("int", "long"):
                 out.append(f"        _ol[{slot}] = p{idx_p};")
         out.extend([
             "        long[] _st = new long[64];",
@@ -693,48 +747,71 @@ def _decode_jvm_class_to_java(cls: bytes) -> Optional[Tuple[str, str]]:
             elif op == 0xB4:  # getfield
                 f_cls, f_nm, f_desc = _fieldref_info(arg)
                 safe_fn = re.sub(r"[^A-Za-z0-9_]", "_", f_nm)
-                if f_cls == this_cls_raw and _jvm_type_from_desc(f_desc) in ("int", "long"):
-                    out.append(f"                _st[_sp - 1] = (({cls_simple})_ost[_sp - 1]).{safe_fn};")
+                f_cls_d = f_cls.replace("/", ".")
+                if f_cls and not f_cls.startswith("java/") and _jvm_type_from_desc(f_desc) in ("int", "long"):
+                    out.append(f"                _st[_sp - 1] = (({f_cls_d})_ost[_sp - 1]).{safe_fn};")
                 else:
                     out.append("                _st[_sp - 1] = 0L;")
             elif op == 0xB5:  # putfield
                 f_cls, f_nm, f_desc = _fieldref_info(arg)
                 safe_fn = re.sub(r"[^A-Za-z0-9_]", "_", f_nm)
+                f_cls_d = f_cls.replace("/", ".")
                 fty = _jvm_type_from_desc(f_desc)
-                if f_cls == this_cls_raw and fty in ("int", "long"):
+                if f_cls and not f_cls.startswith("java/") and fty in ("int", "long"):
                     out.append(
-                        f"                {{ {fty} _fv = ({fty})_st[--_sp]; (({cls_simple})_ost[--_sp]).{safe_fn} = _fv; }}"
+                        f"                {{ {fty} _fv = ({fty})_st[--_sp]; (({f_cls_d})_ost[--_sp]).{safe_fn} = _fv; }}"
                     )
                 else:
                     out.append("                _sp = Math.max(0, _sp - 2);")
-            elif op in (0xB6, 0xB7, 0xB8):  # invokevirtual / invokespecial / invokestatic
+            elif op in (0xB6, 0xB7, 0xB8, 0xB9):  # invokevirtual / invokespecial / invokestatic / invokeinterface
                 c_cls, c_m, c_desc = _methodref_info(arg)
                 c_is_stat = (op == 0xB8)
                 c_ptypes, c_ret = _parse_jvm_params(c_desc, is_static=c_is_stat)
                 safe_cm = re.sub(r"[^A-Za-z0-9_]", "_", c_m)
                 n_cargs = len(c_ptypes)
                 if op == 0xB7 and c_m == "<init>":
-                    if n_cargs > 0:
-                        out.append(f"                _sp = Math.max(0, _sp - {n_cargs});")
-                    out.append("                _sp = Math.max(0, _sp - 1);")
-                elif c_cls == this_cls_raw or c_cls == "java/lang/Math":
+                    if pc == skip_super_pc or c_cls == "java/lang/Object":
+                        if n_cargs > 0:
+                            out.append(f"                _sp = Math.max(0, _sp - {n_cargs});")
+                        out.append("                _sp = Math.max(0, _sp - 1);")
+                    else:
+                        c_cls_d = c_cls.replace("/", ".")
+                        out.append("                {")
+                        arg_vars = []
+                        for ai in range(n_cargs - 1, -1, -1):
+                            aty, _ = c_ptypes[ai]
+                            if aty in ("int", "long"):
+                                out.append(f"                    {aty} _ca{ai} = ({aty})_st[--_sp];")
+                            else:
+                                out.append(f"                    {aty} _ca{ai} = ({aty})_ost[--_sp];")
+                            arg_vars.insert(0, f"_ca{ai}")
+                        out.append(f"                    {c_cls_d} _newobj = new {c_cls_d}({', '.join(arg_vars)});")
+                        out.append("                    _sp = Math.max(0, _sp - 1);")
+                        out.append("                    if (_sp > 0 && _ost[_sp - 1] == null) { _ost[_sp - 1] = _newobj; }")
+                        out.append("                }")
+                elif c_cls == "java/lang/Math" or (c_cls and not c_cls.startswith(("java/", "javax/"))):
+                    c_cls_d = c_cls.replace("/", ".")
                     out.append("                {")
                     arg_vars = []
                     for ai in range(n_cargs - 1, -1, -1):
                         aty, _ = c_ptypes[ai]
-                        cast_t = "long" if aty == "long" else "int"
-                        out.append(f"                    {cast_t} _ca{ai} = ({cast_t})_st[--_sp];")
+                        if aty in ("int", "long"):
+                            out.append(f"                    {aty} _ca{ai} = ({aty})_st[--_sp];")
+                        else:
+                            out.append(f"                    {aty} _ca{ai} = ({aty})_ost[--_sp];")
                         arg_vars.insert(0, f"_ca{ai}")
                     if c_is_stat:
-                        prefix = "Math." if c_cls == "java/lang/Math" else ""
+                        prefix = "Math." if c_cls == "java/lang/Math" else ("" if c_cls == this_cls_raw else f"{c_cls_d}.")
                         call_expr = f"{prefix}{safe_cm}({', '.join(arg_vars)})"
                     else:
-                        out.append(f"                    {cls_simple} _recv = ({cls_simple})_ost[--_sp];")
+                        out.append(f"                    {c_cls_d} _recv = ({c_cls_d})_ost[--_sp];")
                         call_expr = f"_recv.{safe_cm}({', '.join(arg_vars)})"
                     if c_ret == "void":
                         out.append(f"                    {call_expr};")
-                    else:
+                    elif c_ret in ("int", "long"):
                         out.append(f"                    _st[_sp++] = {call_expr};")
+                    else:
+                        out.append(f"                    _ost[_sp] = {call_expr}; _st[_sp++] = 0L;")
                     out.append("                }")
                 else:
                     pop_n = n_cargs + (0 if c_is_stat else 1)
@@ -748,10 +825,15 @@ def _decode_jvm_class_to_java(cls: bytes) -> Optional[Tuple[str, str]]:
                 out.append("                return (int)_st[--_sp];")
             elif op == 0xAD:  # lreturn
                 out.append("                return _st[--_sp];")
+            elif op == 0xB0:  # areturn
+                out.append(f"                return ({ret_t})_ost[--_sp];")
             elif op == 0xB1:  # return
                 out.append("                return;")
 
-        fallback_ret = "return;" if ret_t == "void" else ("return 0L;" if ret_t == "long" else "return 0;")
+        fallback_ret = (
+            "return;" if ret_t == "void"
+            else ("return 0L;" if ret_t == "long" else ("return 0;" if ret_t == "int" else "return null;"))
+        )
         out.extend([
             f"            default: {fallback_ret}",
             "            }",
@@ -780,15 +862,20 @@ def _decode_jvm_class_to_java(cls: bytes) -> Optional[Tuple[str, str]]:
         if m_name == "<clinit>":
             continue
         is_static = bool(m_acc & 0x0008)
+        is_abstract_m = bool(m_acc & 0x0400)
         if m_name == "main" and "[Ljava/lang/String;" in m_desc:
             lines.extend(["    public static void main(String[] args) {", "    }", ""])
             continue
         ptypes, ret_t = _parse_jvm_params(m_desc, is_static=is_static)
-        params_sig = ", ".join(f"{'long' if ty == 'long' else 'int'} p{idx}" for idx, (ty, _) in enumerate(ptypes))
+        params_sig = ", ".join(f"{ty} p{idx}" for idx, (ty, _) in enumerate(ptypes))
         if m_name == "<init>":
             lines.append(f"    public {cls_simple}({params_sig}) {{")
-            lines.extend(_lift_jvm_code(code_bc, ptypes, max_locals, "void", is_static=False))
+            lines.extend(_lift_jvm_code(code_bc, ptypes, max_locals, "void", is_static=False, is_ctor=True))
             lines.extend(["    }", ""])
+            continue
+        if is_abstract_m or (is_interface_cls and not code_bc):
+            lines.append(f"    public {ret_t} {re.sub(r'[^A-Za-z0-9_]', '_', m_name)}({params_sig});")
+            lines.append("")
             continue
         stat_kw = "static " if is_static else ""
         lines.append(f"    public {stat_kw}{ret_t} {re.sub(r'[^A-Za-z0-9_]', '_', m_name)}({params_sig}) {{")
@@ -1640,6 +1727,8 @@ def reconstruct_js_bundle_project(
     extracted_mods = _extract_js_bundle_modules(source_for_split)
     if extracted_mods:
         barrel_exports: List[str] = []
+        mjs_imports: List[str] = []
+        mjs_map_entries: List[str] = []
         seen_keys: Set[str] = set()
         ts_count = 0
         for idx_m, (m_key, m_params, m_body) in enumerate(extracted_mods[:200]):
@@ -1652,16 +1741,40 @@ def reconstruct_js_bundle_project(
             sig_p = ", ".join(p.strip() for p in m_params.split(",") if p.strip()) if m_params else ""
             wrapped = f"export function module_{clean_key}({sig_p}) {{\n{m_body}\n}}"
             deob = deobfuscate_javascript_snippet(wrapped)
+            js_clean = deob["deobfuscated_code"]
             m_file = mod_dir / f"{clean_key}.ts"
             m_file.write_text(
-                deob["deobfuscated_code"] + "\n" + "\n".join(deob.get("typescript_interfaces", [])),
+                js_clean + "\n" + "\n".join(deob.get("typescript_interfaces", [])),
                 encoding="utf-8",
             )
+            mjs_file = mod_dir / f"{clean_key}.mjs"
+            mjs_file.write_text(js_clean + "\n", encoding="utf-8")
             generated.append(f"src/modules/{m_file.name}")
+            generated.append(f"src/modules/{mjs_file.name}")
             barrel_exports.append(f'export * from "./modules/{clean_key}.js";')
+            mjs_imports.append(f'import {{ module_{clean_key} as _fn_{clean_key} }} from "./modules/{clean_key}.mjs";')
+            mjs_map_entries.append(f'  {json.dumps(m_key)}: _fn_{clean_key}, {json.dumps(clean_key)}: _fn_{clean_key}')
             ts_count += 1
         (out_root / "src" / "index.ts").write_text("\n".join(barrel_exports) + "\n", encoding="utf-8")
-        generated.append("src/index.ts")
+        loader_js = "\n".join([
+            *mjs_imports,
+            "export const bundleModules = {",
+            ",\n".join(mjs_map_entries),
+            "};",
+            "export function loadBundleModule(id, cache = new Map()) {",
+            "  if (cache.has(id)) return cache.get(id).exports;",
+            "  const factory = bundleModules[id];",
+            "  if (!factory) throw new Error('Missing reconstructed module: ' + id);",
+            "  const mod = { exports: {} };",
+            "  cache.set(id, mod);",
+            "  const req = (dep) => loadBundleModule(dep, cache);",
+            "  factory(mod, mod.exports, req);",
+            "  return mod.exports;",
+            "}",
+            "",
+        ])
+        (out_root / "src" / "runtime_loader.mjs").write_text(loader_js, encoding="utf-8")
+        generated.extend(["src/index.ts", "src/runtime_loader.mjs"])
         modules_extracted = max(modules_extracted, ts_count)
     elif modules_extracted == 0:
         deob = deobfuscate_javascript_snippet(js_text)
@@ -1676,7 +1789,7 @@ def reconstruct_js_bundle_project(
                 "name": re.sub(r"[^a-z0-9-]", "-", t_path.stem.lower()) or "reconstructed-js-app",
                 "version": "1.0.0",
                 "type": "module",
-                "main": "src/index.js" if "src/index.js" in generated else "src/index.ts",
+                "main": "src/runtime_loader.mjs" if "src/runtime_loader.mjs" in generated else ("src/index.js" if "src/index.js" in generated else "src/index.ts"),
             },
             indent=2,
         ) + "\n",
@@ -1694,4 +1807,39 @@ def reconstruct_js_bundle_project(
         "project_kind": "javascript_webpack_ts",
         "modules_extracted": modules_extracted,
         "generated_files": generated,
+    }
+
+
+def verify_reconstructed_js_bundle(project_dir: str | Path) -> Dict[str, Any]:
+    """Verifies runnable ES module loading of a reconstructed JS/TS bundle via Node.js."""
+    node_bin = shutil.which("node")
+    proj = Path(project_dir).resolve()
+    loader = proj / "src" / "runtime_loader.mjs"
+    if not node_bin:
+        return {"verified": False, "status": "node_not_installed"}
+    if not loader.is_file():
+        return {"verified": False, "status": "missing_runtime_loader"}
+    probe = (
+        f'import {{ bundleModules }} from {json.dumps(loader.as_uri())}; '
+        'console.log(JSON.stringify(Object.keys(bundleModules)));'
+    )
+    proc = subprocess.run(
+        [node_bin, "--input-type=module", "-e", probe],
+        cwd=str(proj),
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    ok = proc.returncode == 0
+    loaded_keys: List[str] = []
+    if ok and proc.stdout.strip():
+        try:
+            loaded_keys = json.loads(proc.stdout.strip().splitlines()[-1])
+        except Exception:
+            pass
+    return {
+        "verified": ok and len(loaded_keys) > 0,
+        "status": "verified" if ok else "node_error",
+        "modules_loaded": loaded_keys,
+        "stderr": proc.stderr.strip()[:500],
     }
