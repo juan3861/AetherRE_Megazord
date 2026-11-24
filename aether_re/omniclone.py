@@ -64,7 +64,13 @@ def clone_and_audit_project(
 
     reconstructed_components: List[Dict[str, Any]] = []
     if container_fmt in {"asar", "zip", "tar", "gzip", "nsis", "innosetup"} and not (
-        raw.startswith(b"PK\x03\x04") and (b"classes.dex" in raw or b"AndroidManifest.xml" in raw)
+        raw.startswith(b"PK\x03\x04")
+        and (
+            t_path.suffix.lower() in (".jar", ".apk")
+            or b"classes.dex" in raw
+            or b"AndroidManifest.xml" in raw
+            or b"META-INF/MANIFEST.MF" in raw
+        )
     ):
         unp_dir = out_root / "_unpacked"
         unpack_info = unpack_recursive_tree(

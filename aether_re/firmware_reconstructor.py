@@ -9,7 +9,7 @@ import lzma
 import struct
 import zlib
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from aether_re.firmware_forensics import analyze_firmware
 from aether_re.kernel_driver_audit import audit_pe_driver_bytes
@@ -56,32 +56,23 @@ def _extract_cpio_newc(blob: bytes, out_dir: Path) -> List[str]:
     return extracted
 
 
-def _parse_squashfs_v4(blob: bytes, out_dir: Path) -> Dict[str, Any]:
-    """Pure-Python SquashFS v4 (`hsqs`) superblock parser & compressed metadata block extractor."""
+def _parse_squashfs_v4(blob: bytes, out_dir: Path, rootfs_dir: Optional[Path] = None) -> Dict[str, Any]:
+    """Pure-Python SquashFS v4 (`hsqs`) superblock, metadata, directory tree & data extractor."""
     sq_off = blob.find(b"hsqs")
     if sq_off == -1 or sq_off + 96 > len(blob):
-        return {"found": False}
+        return {"found": False, "extracted_files": []}
     (
         magic, inodes, mkfs_time, block_size, frag_cnt, comp_id,
         block_log, flags, no_ids, s_major, s_minor, root_inode_ref,
         bytes_used, id_tbl, xattr_tbl, inode_tbl, dir_tbl, frag_tbl, export_tbl,
     ) = struct.unpack_from("<IIIIIHHHHHHQQQQQQQQ", blob, sq_off)
-    if magic != 0x73717368 or s_major != 4:
-        return {"found": False}
+    if magic != 0x73717368 or s_major != 4 or block_size == 0:
+        return {"found": False, "extracted_files": []}
 
     comp_names = {1: "gzip/zlib", 2: "lzma", 3: "lzo", 4: "xz", 5: "lz4", 6: "zstd"}
 
-    def _read_meta_block(rel_off: int) -> bytes:
-        abs_p = sq_off + rel_off
-        if abs_p + 2 > len(blob):
-            return b""
-        hdr_u16 = struct.unpack_from("<H", blob, abs_p)[0]
-        uncompressed = bool(hdr_u16 & 0x8000)
-        sz = hdr_u16 & 0x7FFF
-        if abs_p + 2 + sz > len(blob):
-            return b""
-        chunk = blob[abs_p + 2 : abs_p + 2 + sz]
-        if uncompressed:
+    def _decompress_chunk(chunk: bytes, is_uncompressed: bool) -> bytes:
+        if is_uncompressed:
             return chunk
         try:
             if comp_id == 1:
@@ -92,14 +83,61 @@ def _parse_squashfs_v4(blob: bytes, out_dir: Path) -> Dict[str, Any]:
             return b""
         return chunk
 
+    def _read_meta_chain(table_base_rel: int, start_block_rel: int, inner_off: int, min_bytes: int) -> bytes:
+        """Reads consecutive SquashFS metadata blocks (up to 8 KiB uncompressed each) starting at table_base_rel + start_block_rel."""
+        cur_rel = table_base_rel + start_block_rel
+        chunks: List[bytes] = []
+        total_len = 0
+        for _ in range(128):
+            abs_p = sq_off + cur_rel
+            if abs_p + 2 > len(blob):
+                break
+            hdr_u16 = struct.unpack_from("<H", blob, abs_p)[0]
+            uncomp = bool(hdr_u16 & 0x8000)
+            sz = hdr_u16 & 0x7FFF
+            if sz == 0 or abs_p + 2 + sz > len(blob):
+                break
+            dec = _decompress_chunk(blob[abs_p + 2 : abs_p + 2 + sz], uncomp)
+            if not dec:
+                break
+            chunks.append(dec)
+            total_len += len(dec)
+            cur_rel += 2 + sz
+            if total_len >= inner_off + min_bytes:
+                break
+        joined = b"".join(chunks)
+        return joined[inner_off:] if inner_off < len(joined) else b""
+
+    def _read_data_block(abs_rel_off: int, size_word: int) -> bytes:
+        sz = size_word & 0x00FFFFFF
+        uncomp = bool(size_word & 0x01000000)
+        if sz == 0:  # sparse zero block
+            return b"\x00" * block_size
+        abs_p = sq_off + abs_rel_off
+        if abs_p + sz > len(blob):
+            return b""
+        return _decompress_chunk(blob[abs_p : abs_p + sz], uncomp)
+
+    # Parse fragment entries if present
+    frag_entries: List[Tuple[int, int]] = []
+    if frag_cnt > 0 and frag_tbl != 0xFFFFFFFFFFFFFFFF and sq_off + frag_tbl + 8 <= len(blob):
+        n_frag_blks = (frag_cnt + 511) // 512
+        for fi in range(min(n_frag_blks, 32)):
+            ptr_off = sq_off + frag_tbl + fi * 8
+            if ptr_off + 8 > len(blob):
+                break
+            blk_rel = struct.unpack_from("<Q", blob, ptr_off)[0]
+            fmeta = _read_meta_chain(0, blk_rel, 0, min(512, frag_cnt - fi * 512) * 16)
+            for j in range(0, len(fmeta) - 15, 16):
+                f_start, f_sz, _ = struct.unpack_from("<QII", fmeta, j)
+                frag_entries.append((f_start, f_sz))
+
     meta_strings: List[str] = []
-    dir_meta = _read_meta_block(dir_tbl)
+    dir_meta = _read_meta_chain(dir_tbl, 0, 0, 8192)
     if dir_meta:
         (out_dir / "squashfs_dir_meta.bin").write_bytes(dir_meta)
-        # Extract printable entry names from directory table
         pos_d = 0
         while pos_d + 8 <= len(dir_meta):
-            b_ch = dir_meta[pos_d:]
             m_end = 0
             if 32 <= dir_meta[pos_d] < 127:
                 while pos_d + m_end < len(dir_meta) and 32 <= dir_meta[pos_d + m_end] < 127:
@@ -110,6 +148,100 @@ def _parse_squashfs_v4(blob: bytes, out_dir: Path) -> Dict[str, Any]:
                     continue
             pos_d += 1
 
+    extracted_files: List[str] = []
+    symlinks: Dict[str, str] = {}
+    if rootfs_dir is not None:
+        rootfs_res = rootfs_dir.resolve()
+        visited_inodes: Set[int] = set()
+
+        def _walk_inode(inode_ref: int, rel_path: Path, depth: int = 0) -> None:
+            if depth > 32 or inode_ref in visited_inodes:
+                return
+            visited_inodes.add(inode_ref)
+            blk_rel = (inode_ref >> 16) & 0xFFFFFFFFFFFF
+            inner_off = inode_ref & 0xFFFF
+            ibuf = _read_meta_chain(inode_tbl, blk_rel, inner_off, 1024)
+            if len(ibuf) < 16:
+                return
+            i_type, _mode, _uid, _gid, _mtime, _ino_num = struct.unpack_from("<HHIHHI", ibuf, 0)
+
+            if i_type in (1, 8):  # Basic / Extended Directory
+                if i_type == 1 and len(ibuf) >= 32:
+                    d_start, _nlink, d_fsize, d_off, _parent = struct.unpack_from("<IIHHI", ibuf, 16)
+                elif i_type == 8 and len(ibuf) >= 40:
+                    _nlink, d_fsize, d_start, _parent, _icnt, d_off, _xattr = struct.unpack_from("<IIIIHHI", ibuf, 16)
+                else:
+                    return
+                dir_bytes_len = max(0, int(d_fsize) - 3)
+                if dir_bytes_len == 0:
+                    return
+                dbuf = _read_meta_chain(dir_tbl, d_start, d_off, dir_bytes_len)[:dir_bytes_len]
+                dp = 0
+                while dp + 12 <= len(dbuf):
+                    cnt_m1, hdr_blk, _ino_base = struct.unpack_from("<III", dbuf, dp)
+                    dp += 12
+                    for _ in range(min(cnt_m1 + 1, 2048)):
+                        if dp + 8 > len(dbuf):
+                            return
+                        e_off, _e_delta, _e_type, e_nsz_m1 = struct.unpack_from("<HhHH", dbuf, dp)
+                        dp += 8
+                        nlen = e_nsz_m1 + 1
+                        if dp + nlen > len(dbuf):
+                            return
+                        ename = dbuf[dp : dp + nlen].decode("utf-8", errors="replace")
+                        dp += nlen
+                        if not ename or ename in (".", "..") or "/" in ename or "\\" in ename:
+                            continue
+                        child_ref = (hdr_blk << 16) | e_off
+                        _walk_inode(child_ref, rel_path / ename, depth + 1)
+
+            elif i_type in (2, 9):  # Basic / Extended Regular File
+                if i_type == 2 and len(ibuf) >= 32:
+                    b_start, frag_idx, f_off, f_size = struct.unpack_from("<IIII", ibuf, 16)
+                    list_off = 32
+                elif i_type == 9 and len(ibuf) >= 56:
+                    b_start, f_size, _sparse, _nlink, frag_idx, f_off, _xattr = struct.unpack_from("<QQQIIII", ibuf, 16)
+                    list_off = 56
+                else:
+                    return
+                has_frag = frag_idx != 0xFFFFFFFF
+                n_full_blks = (f_size // block_size) if has_frag else ((f_size + block_size - 1) // block_size)
+                # Clamp if inode spans beyond initial 1024-byte buffer
+                needed_bytes = list_off + n_full_blks * 4
+                if needed_bytes > len(ibuf):
+                    ibuf = _read_meta_chain(inode_tbl, blk_rel, inner_off, needed_bytes)
+                file_parts: List[bytes] = []
+                cur_data_rel = int(b_start)
+                for bi in range(n_full_blks):
+                    if list_off + (bi + 1) * 4 > len(ibuf):
+                        break
+                    sz_word = struct.unpack_from("<I", ibuf, list_off + bi * 4)[0]
+                    raw_blk = _read_data_block(cur_data_rel, sz_word)
+                    file_parts.append(raw_blk)
+                    cur_data_rel += sz_word & 0x00FFFFFF
+                if has_frag and frag_idx < len(frag_entries):
+                    rem = f_size % block_size
+                    if rem > 0 or f_size == 0:
+                        f_blk_rel, f_sz_word = frag_entries[frag_idx]
+                        frag_buf = _read_data_block(f_blk_rel, f_sz_word)
+                        file_parts.append(frag_buf[f_off : f_off + rem])
+                payload = b"".join(file_parts)[:f_size]
+                if rel_path.parts and ".." not in rel_path.parts:
+                    dest = (rootfs_dir / rel_path).resolve()
+                    if str(dest).startswith(str(rootfs_res)):
+                        dest.parent.mkdir(parents=True, exist_ok=True)
+                        dest.write_bytes(payload)
+                        extracted_files.append(rel_path.as_posix())
+
+            elif i_type in (3, 10) and len(ibuf) >= 24:  # Symlink
+                _nlink, sl_sz = struct.unpack_from("<II", ibuf, 16)
+                tgt = ibuf[24 : 24 + sl_sz].decode("utf-8", errors="replace")
+                if rel_path.parts:
+                    symlinks[rel_path.as_posix()] = tgt
+
+        if root_inode_ref:
+            _walk_inode(int(root_inode_ref), Path())
+
     return {
         "found": True,
         "offset_hex": hex(sq_off),
@@ -118,6 +250,8 @@ def _parse_squashfs_v4(blob: bytes, out_dir: Path) -> Dict[str, Any]:
         "compression": comp_names.get(comp_id, f"unknown_{comp_id}"),
         "bytes_used": int(bytes_used),
         "dir_entries_hints": meta_strings[:64],
+        "extracted_files": extracted_files,
+        "symlinks": symlinks,
     }
 
 
@@ -140,9 +274,14 @@ def reconstruct_firmware_project(
     for cf in cpio_files:
         generated.append(f"rootfs/{cf}")
 
-    sq_info = _parse_squashfs_v4(raw, out_root)
+    sq_info = _parse_squashfs_v4(raw, out_root, rootfs_dir=rootfs_dir)
     if (out_root / "squashfs_dir_meta.bin").is_file():
         generated.append("squashfs_dir_meta.bin")
+    sq_files = list(sq_info.get("extracted_files", []))
+    for sf in sq_files:
+        rel_sf = f"rootfs/{sf}"
+        if rel_sf not in generated:
+            generated.append(rel_sf)
 
     # Decompress embedded gzip streams if any contain ELF/CPIO
     gz_pos = raw.find(b"\x1f\x8b\x08")
@@ -167,12 +306,13 @@ def reconstruct_firmware_project(
             if len(mmio_addrs) >= 64:
                 break
 
+    total_rootfs_files = len(cpio_files) + len(sq_files)
     mmio_map = {
         "schema": SCHEMA,
         "firmware_findings": fw_report,
         "squashfs_v4": sq_info,
         "mmio_peripheral_pages": [hex(a) for a in sorted(mmio_addrs)],
-        "rootfs_files_extracted": len(cpio_files),
+        "rootfs_files_extracted": total_rootfs_files,
     }
     (out_root / "mmio_peripheral_map.json").write_text(json.dumps(mmio_map, indent=2), encoding="utf-8")
     generated.append("mmio_peripheral_map.json")
@@ -200,7 +340,7 @@ def reconstruct_firmware_project(
         "status": "complete",
         "project_kind": "firmware_rehosted_project",
         "mmio_pages_count": len(mmio_addrs),
-        "rootfs_files_count": len(cpio_files),
+        "rootfs_files_count": total_rootfs_files,
         "generated_files": generated,
     }
 

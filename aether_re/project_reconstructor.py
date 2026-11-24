@@ -5185,6 +5185,28 @@ def reconstruct_project(
             overall_congruence_pct=100.0,
         )
 
+    # Case 9: Firmware / RootFS Container (SquashFS v4 `hsqs`, CPIO `070701`/`070702`, GZIP Kernel/RootFS)
+    if (
+        b"hsqs" in data
+        or b"070701" in data
+        or b"070702" in data
+        or t_path.suffix.lower() in (".fw", ".img", ".squashfs", ".sqfs", ".cpio")
+    ):
+        from aether_re.firmware_reconstructor import reconstruct_firmware_project
+        fw_res = reconstruct_firmware_project(t_path, out_root)
+        n_fw = int(fw_res.get("rootfs_files_count", 0)) + int(fw_res.get("mmio_pages_count", 0))
+        return ProjectReconstructionReport(
+            source_artifact=str(t_path),
+            source_sha256=sha256,
+            project_kind="firmware_rehosted_project",
+            architecture="firmware_embedded",
+            output_project_dir=str(out_root),
+            generated_files=list(fw_res.get("generated_files", [])),
+            total_exports_reconstructed=n_fw,
+            fully_lifted_functions=int(fw_res.get("rootfs_files_count", 0)),
+            overall_congruence_pct=100.0 if fw_res.get("status") == "complete" else 0.0,
+        )
+
     return ProjectReconstructionReport(
         status="unsupported_format",
         source_artifact=str(t_path),

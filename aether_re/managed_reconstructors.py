@@ -382,6 +382,52 @@ def _decode_jvm_class_to_java(cls: bytes) -> Optional[Tuple[str, str]]:
             return _utf8(item[2])
         return "RecoveredClass"
 
+    def _methodref_info(idx: int) -> Tuple[str, str, str]:
+        item = cp.get(idx)
+        if item and item[0] == "pair":
+            cls_idx, nat_idx = item[2]
+            c_nm = _cls_name(cls_idx)
+            nat = cp.get(nat_idx)
+            if nat and nat[0] == "pair":
+                n_idx, d_idx = nat[2]
+                return c_nm, _utf8(n_idx), _utf8(d_idx)
+        return "", f"method_{idx}", "()I"
+
+    def _parse_jvm_params(desc: str) -> Tuple[List[Tuple[str, int]], str]:
+        inner = desc[desc.find("(") + 1 : desc.find(")")] if "(" in desc and ")" in desc else ""
+        ret_raw = desc[desc.find(")") + 1 :] if ")" in desc else "I"
+        ptypes: List[Tuple[str, int]] = []
+        slot = 0
+        pi = 0
+        while pi < len(inner):
+            ch = inner[pi]
+            if ch in ("I", "Z", "B", "C", "S"):
+                ptypes.append(("int", slot))
+                slot += 1
+                pi += 1
+            elif ch == "J":
+                ptypes.append(("long", slot))
+                slot += 2
+                pi += 1
+            elif ch == "L":
+                end_l = inner.find(";", pi)
+                pi = (end_l + 1) if end_l != -1 else len(inner)
+                ptypes.append(("Object", slot))
+                slot += 1
+            elif ch == "[":
+                pi += 1
+                if pi < len(inner) and inner[pi] == "L":
+                    end_l = inner.find(";", pi)
+                    pi = (end_l + 1) if end_l != -1 else len(inner)
+                elif pi < len(inner):
+                    pi += 1
+                ptypes.append(("Object", slot))
+                slot += 1
+            else:
+                pi += 1
+        ret_t = "void" if ret_raw == "V" else ("long" if ret_raw == "J" else "int")
+        return ptypes, ret_t
+
     if pos + 6 > len(cls):
         return None
     _acc, this_cls_idx, _super_idx = struct.unpack_from(">HHH", cls, pos)
@@ -404,7 +450,8 @@ def _decode_jvm_class_to_java(cls: bytes) -> Optional[Tuple[str, str]]:
     mth_cnt = struct.unpack_from(">H", cls, pos)[0]
     pos += 2
 
-    fqcn_raw = _cls_name(this_cls_idx).replace("/", ".")
+    this_cls_raw = _cls_name(this_cls_idx)
+    fqcn_raw = this_cls_raw.replace("/", ".")
     pkg, _, cls_simple = fqcn_raw.rpartition(".")
     cls_simple = re.sub(r"[^A-Za-z0-9_]", "_", cls_simple) or "RecoveredClass"
     rel_java = (pkg.replace(".", "/") + "/" if pkg else "") + f"{cls_simple}.java"
@@ -414,42 +461,216 @@ def _decode_jvm_class_to_java(cls: bytes) -> Optional[Tuple[str, str]]:
         lines.extend([f"package {pkg};", ""])
     lines.append(f"public class {cls_simple} {{")
 
-    def _lift_jvm_code(bc: bytes, n_params: int) -> List[str]:
-        st: List[str] = []
-        out_j: List[str] = []
+    _JVM_BR_OPS = {
+        0x99: ("zero", "=="), 0x9A: ("zero", "!="), 0x9B: ("zero", "<"),
+        0x9C: ("zero", ">="), 0x9D: ("zero", ">"), 0x9E: ("zero", "<="),
+        0x9F: ("icmp", "=="), 0xA0: ("icmp", "!="), 0xA1: ("icmp", "<"),
+        0xA2: ("icmp", ">="), 0xA3: ("icmp", ">"), 0xA4: ("icmp", "<="),
+        0xA7: ("goto", ""),
+    }
+
+    def _decode_jvm_insns(bc: bytes) -> Tuple[List[Tuple[int, int, int, int]], Set[int], bool]:
+        insns: List[Tuple[int, int, int, int]] = []
+        targets: Set[int] = set()
+        has_cf = False
         p = 0
         while p < len(bc):
+            pc = p
             op = bc[p]
             p += 1
-            if op == 0x1A:
-                st.append("p0")
-            elif op == 0x1B:
-                st.append("p1")
-            elif op == 0x1C:
-                st.append("p2")
-            elif op == 0x1D:
-                st.append("p3")
-            elif op == 0x15 and p < len(bc):  # iload idx
-                st.append(f"p{bc[p]}")
-                p += 1
-            elif 0x02 <= op <= 0x08:  # iconst_m1 .. iconst_5
-                st.append(str(op - 3))
-            elif op == 0x10 and p < len(bc):  # bipush
-                st.append(str(struct.unpack("<b", bytes([bc[p]]))[0]))
-                p += 1
-            elif op == 0x11 and p + 1 < len(bc):  # sipush
-                st.append(str(struct.unpack_from(">h", bc, p)[0]))
-                p += 2
-            elif op in (0x60, 0x64, 0x68, 0x6C, 0x70, 0x7E, 0x80, 0x82) and len(st) >= 2:
-                b_e, a_e = st.pop(), st.pop()
-                mop = {0x60: "+", 0x64: "-", 0x68: "*", 0x6C: "/", 0x70: "%", 0x7E: "&", 0x80: "|", 0x82: "^"}[op]
-                st.append(f"({a_e} {mop} {b_e})")
+            arg = 0
+            if op in (0x10, 0x12, 0x15, 0x16, 0x36, 0x37):  # u1/s1
+                if p < len(bc):
+                    arg = struct.unpack("<b", bytes([bc[p]]))[0] if op == 0x10 else bc[p]
+                    p += 1
+                if op in (0x36, 0x37):
+                    has_cf = True
+            elif op in (0x11, 0x13, 0x14, 0xB8):  # u2/s2
+                if p + 1 < len(bc):
+                    arg = struct.unpack_from(">h" if op == 0x11 else ">H", bc, p)[0]
+                    p += 2
+            elif op == 0x84:  # iinc idx const
+                if p + 1 < len(bc):
+                    idx_i = bc[p]
+                    c_i = struct.unpack("<b", bytes([bc[p + 1]]))[0]
+                    arg = (idx_i << 16) | (c_i & 0xFFFF)
+                    p += 2
+                    has_cf = True
+            elif op in _JVM_BR_OPS:
+                if p + 1 < len(bc):
+                    off_b = struct.unpack_from(">h", bc, p)[0]
+                    arg = pc + off_b
+                    targets.add(arg)
+                    has_cf = True
+                    p += 2
+            elif op in (0x3B, 0x3C, 0x3D, 0x3E, 0x3F, 0x40, 0x41, 0x42):  # istore_n / lstore_n
+                has_cf = True
+            elif op in (0xB6, 0xB7, 0xB9, 0xB2, 0xB3, 0xB4, 0xB5, 0xBB):  # 2-byte CP ref
+                if p + 1 < len(bc):
+                    arg = struct.unpack_from(">H", bc, p)[0]
+                    p += 2
+            insns.append((pc, op, arg, p))
+        return insns, targets, has_cf
+
+    def _lift_jvm_code(bc: bytes, ptypes: List[Tuple[str, int]], max_locals: int, ret_t: str) -> List[str]:
+        insns, targets, has_cf = _decode_jvm_insns(bc)
+        if not insns:
+            return ["        return;" if ret_t == "void" else "        return 0;"]
+
+        # Fast-path linear expression lifter when there are no branches/stores
+        if not has_cf and all(op != 0xB8 for _, op, _, _ in insns):
+            st: List[str] = []
+            out_j: List[str] = []
+            for _pc, op, arg, _np in insns:
+                if 0x1A <= op <= 0x1D:
+                    st.append(f"p{op - 0x1A}")
+                elif op == 0x15:
+                    st.append(f"p{arg}")
+                elif 0x02 <= op <= 0x08:
+                    st.append(str(op - 3))
+                elif op in (0x10, 0x11):
+                    st.append(str(arg))
+                elif op in (0x60, 0x64, 0x68, 0x6C, 0x70, 0x7E, 0x80, 0x82) and len(st) >= 2:
+                    b_e, a_e = st.pop(), st.pop()
+                    mop = {0x60: "+", 0x64: "-", 0x68: "*", 0x6C: "/", 0x70: "%", 0x7E: "&", 0x80: "|", 0x82: "^"}[op]
+                    st.append(f"({a_e} {mop} {b_e})")
+                elif op == 0xAC:
+                    out_j.append(f"        return {st.pop() if st else '0'};")
+                elif op == 0xB1:
+                    out_j.append("        return;")
+            if out_j:
+                return out_j
+
+        # Structured CFG state machine for arbitrary loops, branches, locals, and invokestatic
+        slot_types: Dict[int, str] = {slot: ty for ty, slot in ptypes}
+        slot_inits: Dict[int, str] = {slot: f"p{idx}" for idx, (_ty, slot) in enumerate(ptypes)}
+        total_slots = max(max_locals, max(slot_types.keys(), default=-1) + 1)
+        out: List[str] = []
+        for s_idx in range(total_slots):
+            ty = slot_types.get(s_idx, "int")
+            init_v = slot_inits.get(s_idx, "0")
+            if ty == "Object":
+                continue
+            out.append(f"        long l{s_idx} = (long)({init_v});")
+        out.extend([
+            "        long[] _st = new long[64];",
+            "        int _sp = 0;",
+            "        int _pc = 0;",
+            "        while (true) {",
+            "            switch (_pc) {",
+        ])
+
+        for idx_i, (pc, op, arg, _np) in enumerate(insns):
+            if idx_i == 0 or pc in targets:
+                out.append(f"            case {pc}:")
+            if op == 0x00:
+                pass
+            elif 0x02 <= op <= 0x08:  # iconst_m1..5
+                out.append(f"                _st[_sp++] = {op - 3}L;")
+            elif op in (0x09, 0x0A):  # lconst_0..1
+                out.append(f"                _st[_sp++] = {op - 9}L;")
+            elif op in (0x10, 0x11):  # bipush/sipush
+                out.append(f"                _st[_sp++] = {arg}L;")
+            elif op in (0x12, 0x13, 0x14):  # ldc/ldc_w/ldc2_w
+                cp_ent = cp.get(arg)
+                if cp_ent and cp_ent[0] in ("num", "num64") and isinstance(cp_ent[1], int):
+                    out.append(f"                _st[_sp++] = {cp_ent[1]}L;")
+                else:
+                    out.append("                _st[_sp++] = 0L;")
+            elif 0x1A <= op <= 0x1D:  # iload_0..3
+                out.append(f"                _st[_sp++] = (int)l{op - 0x1A};")
+            elif 0x1E <= op <= 0x21:  # lload_0..3
+                out.append(f"                _st[_sp++] = l{op - 0x1E};")
+            elif op == 0x15:  # iload
+                out.append(f"                _st[_sp++] = (int)l{arg};")
+            elif op == 0x16:  # lload
+                out.append(f"                _st[_sp++] = l{arg};")
+            elif 0x3B <= op <= 0x3E:  # istore_0..3
+                out.append(f"                l{op - 0x3B} = (int)_st[--_sp];")
+            elif 0x3F <= op <= 0x42:  # lstore_0..3
+                out.append(f"                l{op - 0x3F} = _st[--_sp];")
+            elif op == 0x36:  # istore
+                out.append(f"                l{arg} = (int)_st[--_sp];")
+            elif op == 0x37:  # lstore
+                out.append(f"                l{arg} = _st[--_sp];")
+            elif op == 0x84:  # iinc
+                i_slot = (arg >> 16) & 0xFF
+                i_const = struct.unpack("<h", struct.pack("<H", arg & 0xFFFF))[0]
+                out.append(f"                l{i_slot} = (int)((int)l{i_slot} + ({i_const}));")
+            elif op == 0x57:  # pop
+                out.append("                _sp--;")
+            elif op == 0x59:  # dup
+                out.append("                _st[_sp] = _st[_sp - 1]; _sp++;")
+            elif op == 0x74:  # ineg
+                out.append("                _st[_sp - 1] = (int)(-(int)_st[_sp - 1]);")
+            elif op == 0x75:  # lneg
+                out.append("                _st[_sp - 1] = -_st[_sp - 1];")
+            elif op == 0x85:  # i2l
+                out.append("                _st[_sp - 1] = (long)(int)_st[_sp - 1];")
+            elif op == 0x88:  # l2i
+                out.append("                _st[_sp - 1] = (long)(int)_st[_sp - 1];")
+            elif op in (0x60, 0x64, 0x68, 0x6C, 0x70, 0x78, 0x7A, 0x7C, 0x7E, 0x80, 0x82):
+                iop = {
+                    0x60: "+", 0x64: "-", 0x68: "*", 0x6C: "/", 0x70: "%",
+                    0x78: "<<", 0x7A: ">>", 0x7C: ">>>", 0x7E: "&", 0x80: "|", 0x82: "^",
+                }[op]
+                out.append(
+                    f"                {{ int _b = (int)_st[--_sp]; int _a = (int)_st[--_sp]; _st[_sp++] = (int)(_a {iop} _b); }}"
+                )
+            elif op in (0x61, 0x65, 0x69, 0x6D, 0x71):  # ladd/lsub/lmul/ldiv/lrem
+                lop = {0x61: "+", 0x65: "-", 0x69: "*", 0x6D: "/", 0x71: "%"}[op]
+                out.append(
+                    f"                {{ long _b = _st[--_sp]; long _a = _st[--_sp]; _st[_sp++] = (_a {lop} _b); }}"
+                )
+            elif op == 0x94:  # lcmp
+                out.append("                { long _b = _st[--_sp]; long _a = _st[--_sp]; _st[_sp++] = Long.compare(_a, _b); }")
+            elif op in _JVM_BR_OPS:
+                kind_b, cmp_b = _JVM_BR_OPS[op]
+                if kind_b == "goto":
+                    out.append(f"                {{ _pc = {arg}; continue; }}")
+                elif kind_b == "zero":
+                    out.append(f"                {{ int _a = (int)_st[--_sp]; if (_a {cmp_b} 0) {{ _pc = {arg}; continue; }} }}")
+                else:
+                    out.append(f"                {{ int _b = (int)_st[--_sp]; int _a = (int)_st[--_sp]; if (_a {cmp_b} _b) {{ _pc = {arg}; continue; }} }}")
+            elif op == 0xB8:  # invokestatic
+                c_cls, c_m, c_desc = _methodref_info(arg)
+                c_ptypes, c_ret = _parse_jvm_params(c_desc)
+                safe_cm = re.sub(r"[^A-Za-z0-9_]", "_", c_m)
+                n_cargs = len(c_ptypes)
+                if c_cls == this_cls_raw or c_cls == "java/lang/Math":
+                    prefix = "Math." if c_cls == "java/lang/Math" else ""
+                    arg_vars = []
+                    out.append("                {")
+                    for ai in range(n_cargs - 1, -1, -1):
+                        aty, _ = c_ptypes[ai]
+                        cast_t = "long" if aty == "long" else "int"
+                        out.append(f"                    {cast_t} _ca{ai} = ({cast_t})_st[--_sp];")
+                        arg_vars.insert(0, f"_ca{ai}")
+                    call_expr = f"{prefix}{safe_cm}({', '.join(arg_vars)})"
+                    if c_ret == "void":
+                        out.append(f"                    {call_expr};")
+                    else:
+                        out.append(f"                    _st[_sp++] = {call_expr};")
+                    out.append("                }")
+                else:
+                    if n_cargs > 0:
+                        out.append(f"                _sp = Math.max(0, _sp - {n_cargs});")
+                    if c_ret != "void":
+                        out.append("                _st[_sp++] = 0L;")
             elif op == 0xAC:  # ireturn
-                rv = st.pop() if st else "0"
-                out_j.append(f"        return {rv};")
-            elif op == 0xB1:  # return (void)
-                out_j.append("        return;")
-        return out_j or ["        return 0;"]
+                out.append("                return (int)_st[--_sp];")
+            elif op == 0xAD:  # lreturn
+                out.append("                return _st[--_sp];")
+            elif op == 0xB1:  # return
+                out.append("                return;")
+
+        fallback_ret = "return;" if ret_t == "void" else ("return 0L;" if ret_t == "long" else "return 0;")
+        out.extend([
+            f"            default: {fallback_ret}",
+            "            }",
+            "        }",
+        ])
+        return out
 
     for _ in range(mth_cnt):
         if pos + 8 > len(cls):
@@ -459,10 +680,12 @@ def _decode_jvm_class_to_java(cls: bytes) -> Optional[Tuple[str, str]]:
         m_name = _utf8(m_name_idx)
         m_desc = _utf8(m_desc_idx)
         code_bc = b""
+        max_locals = 16
         for _ in range(m_attr_cnt):
             aname_idx, alen = struct.unpack_from(">HI", cls, pos)
             pos += 6
             if _utf8(aname_idx) == "Code" and alen >= 8:
+                max_locals = max(1, struct.unpack_from(">H", cls, pos + 2)[0])
                 code_len = struct.unpack_from(">I", cls, pos + 4)[0]
                 code_bc = cls[pos + 8 : pos + 8 + code_len]
             pos += alen
@@ -470,18 +693,15 @@ def _decode_jvm_class_to_java(cls: bytes) -> Optional[Tuple[str, str]]:
         if m_name in ("<init>", "<clinit>"):
             continue
         is_static = bool(m_acc & 0x0008)
-        arg_part = m_desc[m_desc.find("(") + 1 : m_desc.find(")")] if "(" in m_desc and ")" in m_desc else ""
-        n_int_args = arg_part.count("I")
-        ret_void = m_desc.endswith(")V")
         if not is_static:
             continue
-        params_sig = ", ".join(f"int p{idx}" for idx in range(n_int_args))
-        ret_t = "void" if ret_void else "int"
         if m_name == "main" and "[Ljava/lang/String;" in m_desc:
             lines.extend(["    public static void main(String[] args) {", "    }", ""])
             continue
+        ptypes, ret_t = _parse_jvm_params(m_desc)
+        params_sig = ", ".join(f"{'long' if ty == 'long' else 'int'} p{idx}" for idx, (ty, _) in enumerate(ptypes))
         lines.append(f"    public static {ret_t} {re.sub(r'[^A-Za-z0-9_]', '_', m_name)}({params_sig}) {{")
-        lines.extend(_lift_jvm_code(code_bc, n_int_args))
+        lines.extend(_lift_jvm_code(code_bc, ptypes, max_locals, ret_t))
         lines.extend(["    }", ""])
 
     lines.append("}")
@@ -827,7 +1047,7 @@ def reconstruct_wasm_project(
     target_path: str | Path,
     output_dir: str | Path,
 ) -> Dict[str, Any]:
-    """Decodes WebAssembly binary sections (Type, Import, Function, Export, Code) into compilable C99 + CMake."""
+    """Decodes WebAssembly binary sections (Type, Import, Function, Global, Export, Code, Data) into compilable C99 + CMake."""
     t_path = Path(target_path).resolve()
     out_root = Path(output_dir).resolve()
     raw = t_path.read_bytes()
@@ -839,8 +1059,27 @@ def reconstruct_wasm_project(
     types_sig: List[Tuple[List[int], List[int]]] = []
     func_type_indices: List[int] = []
     imported_funcs = 0
+    globals_init: List[int] = []
     exports_map: Dict[int, str] = {}
     code_bodies: List[bytes] = []
+    data_segments: List[Tuple[int, bytes]] = []
+
+    def _read_const_expr(buf: bytes, idx: int) -> Tuple[int, int]:
+        val = 0
+        while idx < len(buf):
+            op_c = buf[idx]
+            idx += 1
+            if op_c == 0x0B:
+                break
+            if op_c in (0x41, 0x42):
+                val, idx = _read_sleb128(buf, idx)
+            elif op_c == 0x23:
+                _gi, idx = _read_uleb128(buf, idx)
+            elif op_c == 0x43 and idx + 4 <= len(buf):
+                idx += 4
+            elif op_c == 0x44 and idx + 8 <= len(buf):
+                idx += 8
+        return val, idx
 
     while pos < len(raw):
         sec_id = raw[pos]
@@ -891,6 +1130,15 @@ def reconstruct_wasm_project(
             for _ in range(cnt):
                 ti, p = _read_uleb128(sec, p)
                 func_type_indices.append(ti)
+        elif sec_id == 6:  # Global
+            cnt, p = _read_uleb128(sec, p)
+            for _ in range(cnt):
+                if p + 2 > len(sec):
+                    break
+                _vt, _mut = sec[p], sec[p + 1]
+                p += 2
+                g_val, p = _read_const_expr(sec, p)
+                globals_init.append(int(g_val))
         elif sec_id == 7:  # Export
             cnt, p = _read_uleb128(sec, p)
             for _ in range(cnt):
@@ -906,6 +1154,24 @@ def reconstruct_wasm_project(
                 bsz, p = _read_uleb128(sec, p)
                 code_bodies.append(sec[p : p + bsz])
                 p += bsz
+        elif sec_id == 11:  # Data
+            cnt, p = _read_uleb128(sec, p)
+            for _ in range(cnt):
+                mode, p = _read_uleb128(sec, p)
+                if mode == 0:
+                    off_v, p = _read_const_expr(sec, p)
+                    dsz, p = _read_uleb128(sec, p)
+                    data_segments.append((int(off_v), sec[p : p + dsz]))
+                    p += dsz
+                elif mode == 1:
+                    dsz, p = _read_uleb128(sec, p)
+                    p += dsz
+                elif mode == 2:
+                    _midx, p = _read_uleb128(sec, p)
+                    off_v, p = _read_const_expr(sec, p)
+                    dsz, p = _read_uleb128(sec, p)
+                    data_segments.append((int(off_v), sec[p : p + dsz]))
+                    p += dsz
         pos = sec_end
 
     src_dir = out_root / "src"
@@ -914,17 +1180,31 @@ def reconstruct_wasm_project(
     inc_dir.mkdir(parents=True, exist_ok=True)
 
     c_lines = [
-        "/* Auto-Lifted WebAssembly -> C99 Project by AetherRE Megazord v8.1 */",
+        "/* Auto-Lifted WebAssembly -> C99 Project by AetherRE Megazord v8.2 */",
         "#include <stdint.h>",
         "#include <stddef.h>",
+        "#include <string.h>",
         "#ifdef _WIN32",
         "#define W2C_EXP __declspec(dllexport)",
         "#else",
         "#define W2C_EXP",
         "#endif",
         "static uint8_t wasm_mem[65536];",
-        "",
+        f"static int64_t wasm_globals[{max(1, len(globals_init))}] = {{"
+        + (", ".join(f"{g}LL" for g in globals_init) if globals_init else "0LL")
+        + "};",
+        "static int _wasm_mem_inited = 0;",
+        "static void _wasm_init_mem(void) {",
+        "    if (_wasm_mem_inited) return;",
+        "    _wasm_mem_inited = 1;",
     ]
+    for seg_i, (seg_off, seg_bytes) in enumerate(data_segments):
+        if seg_bytes and 0 <= seg_off < 65536:
+            bounded = seg_bytes[: 65536 - seg_off]
+            hex_arr = ", ".join(f"0x{b:02x}" for b in bounded)
+            c_lines.append(f"    static const uint8_t _seg_{seg_i}[{len(bounded)}] = {{{hex_arr}}};")
+            c_lines.append(f"    memcpy(wasm_mem + {seg_off}U, _seg_{seg_i}, sizeof(_seg_{seg_i}));")
+    c_lines.extend(["}", ""])
     def_lines = ["LIBRARY wasm_reconstructed", "EXPORTS"]
 
     # Emit forward declarations so intra-module WASM `call` works seamlessly
@@ -947,6 +1227,7 @@ def reconstruct_wasm_project(
         c_nm = re.sub(r"[^A-Za-z0-9_]", "_", raw_nm)
         params = ", ".join(f"int64_t l{i}" for i in range(len(ptypes))) or "void"
         c_lines.append(f"W2C_EXP int64_t {c_nm}({params}) {{")
+        c_lines.append("    _wasm_init_mem();")
 
         bp = 0
         n_loc_groups, bp = _read_uleb128(body, bp)
@@ -959,43 +1240,76 @@ def reconstruct_wasm_project(
             c_lines.append(f"    int64_t l{li} = 0;")
 
         stack: List[str] = []
-        ctrl_stack: List[str] = []
+        # (kind, branch_target_lbl, end_lbl, res_var_or_none)
+        ctrl_stack: List[Tuple[str, str, str, Optional[str]]] = []
+        blk_seq = 0
         while bp < len(body):
             op = body[bp]
             bp += 1
             if op == 0x0B:  # end
                 if not ctrl_stack:
                     break
-                kind = ctrl_stack.pop()
+                kind, _br_lbl, end_lbl, res_var = ctrl_stack.pop()
+                if res_var is not None and stack:
+                    c_lines.append(f"    {res_var} = {stack.pop()};")
                 if kind in ("if", "else"):
                     c_lines.append("    }")
-                elif kind == "loop":
-                    c_lines.append("    }")
+                c_lines.append(f"{end_lbl}:;")
+                if res_var is not None:
+                    stack.append(res_var)
             elif op == 0x02:  # block
-                _bt, bp = _read_sleb128(body, bp)
-                ctrl_stack.append("block")
+                bt, bp = _read_sleb128(body, bp)
+                blk_seq += 1
+                end_lbl = f"_wb_{local_idx}_{blk_seq}_end"
+                res_var = None
+                if bt != -64:
+                    res_var = f"_bres_{local_idx}_{blk_seq}"
+                    c_lines.append(f"    int64_t {res_var} = 0;")
+                ctrl_stack.append(("block", end_lbl, end_lbl, res_var))
             elif op == 0x03:  # loop
                 _bt, bp = _read_sleb128(body, bp)
-                ctrl_stack.append("loop")
-                c_lines.append("    while (1) {")
+                blk_seq += 1
+                start_lbl = f"_wb_{local_idx}_{blk_seq}_start"
+                end_lbl = f"_wb_{local_idx}_{blk_seq}_end"
+                c_lines.append(f"{start_lbl}:;")
+                ctrl_stack.append(("loop", start_lbl, end_lbl, None))
             elif op == 0x04:  # if
-                _bt, bp = _read_sleb128(body, bp)
+                bt, bp = _read_sleb128(body, bp)
                 cond = stack.pop() if stack else "0"
-                ctrl_stack.append("if")
+                blk_seq += 1
+                end_lbl = f"_wb_{local_idx}_{blk_seq}_end"
+                res_var = None
+                if bt != -64:
+                    res_var = f"_bres_{local_idx}_{blk_seq}"
+                    c_lines.append(f"    int64_t {res_var} = 0;")
+                ctrl_stack.append(("if", end_lbl, end_lbl, res_var))
                 c_lines.append(f"    if ({cond}) {{")
             elif op == 0x05:  # else
-                if ctrl_stack and ctrl_stack[-1] == "if":
-                    ctrl_stack[-1] = "else"
+                if ctrl_stack and ctrl_stack[-1][0] == "if":
+                    _k, br_lbl, end_lbl, res_var = ctrl_stack[-1]
+                    if res_var is not None and stack:
+                        c_lines.append(f"    {res_var} = {stack.pop()};")
+                    ctrl_stack[-1] = ("else", br_lbl, end_lbl, res_var)
                     c_lines.append("    } else {")
             elif op == 0x0C:  # br
                 depth, bp = _read_uleb128(body, bp)
-                _ = depth
-                c_lines.append("    break;")
+                if 0 <= depth < len(ctrl_stack):
+                    tgt_entry = ctrl_stack[-1 - depth]
+                    if tgt_entry[3] is not None and stack:
+                        c_lines.append(f"    {tgt_entry[3]} = {stack.pop()};")
+                    c_lines.append(f"    goto {tgt_entry[1]};")
+                else:
+                    rv = stack.pop() if (stack and rtypes) else "0LL"
+                    c_lines.append(f"    return {rv};")
             elif op == 0x0D:  # br_if
                 depth, bp = _read_uleb128(body, bp)
-                _ = depth
                 cond = stack.pop() if stack else "0"
-                c_lines.append(f"    if ({cond}) break;")
+                if 0 <= depth < len(ctrl_stack):
+                    tgt_entry = ctrl_stack[-1 - depth]
+                    c_lines.append(f"    if ({cond}) goto {tgt_entry[1]};")
+                else:
+                    rv = stack.pop() if (stack and rtypes) else "0LL"
+                    c_lines.append(f"    if ({cond}) return {rv};")
             elif op == 0x10:  # call
                 f_idx, bp = _read_uleb128(body, bp)
                 loc_f = f_idx - imported_funcs
@@ -1007,6 +1321,11 @@ def reconstruct_wasm_project(
             elif op == 0x1A:  # drop
                 if stack:
                     stack.pop()
+            elif op == 0x1B:  # select
+                c_sel = stack.pop() if stack else "0"
+                v2_sel = stack.pop() if stack else "0"
+                v1_sel = stack.pop() if stack else "0"
+                stack.append(f"(({c_sel}) ? ({v1_sel}) : ({v2_sel}))")
             elif op == 0x20:  # local.get
                 li, bp = _read_uleb128(body, bp)
                 stack.append(f"l{li}")
@@ -1014,17 +1333,43 @@ def reconstruct_wasm_project(
                 li, bp = _read_uleb128(body, bp)
                 val = stack.pop() if stack else "0"
                 c_lines.append(f"    l{li} = {val};")
+            elif op == 0x22:  # local.tee
+                li, bp = _read_uleb128(body, bp)
+                val = stack.pop() if stack else "0"
+                c_lines.append(f"    l{li} = {val};")
+                stack.append(f"l{li}")
+            elif op == 0x23:  # global.get
+                gi, bp = _read_uleb128(body, bp)
+                safe_gi = gi if 0 <= gi < max(1, len(globals_init)) else 0
+                stack.append(f"wasm_globals[{safe_gi}]")
+            elif op == 0x24:  # global.set
+                gi, bp = _read_uleb128(body, bp)
+                val = stack.pop() if stack else "0"
+                safe_gi = gi if 0 <= gi < max(1, len(globals_init)) else 0
+                c_lines.append(f"    wasm_globals[{safe_gi}] = {val};")
             elif op == 0x28:  # i32.load
                 _fl, bp = _read_uleb128(body, bp)
                 off_m, bp = _read_uleb128(body, bp)
                 base_a = stack.pop() if stack else "0"
                 stack.append(f"((int64_t)(*(const int32_t*)(wasm_mem + (((uint32_t)({base_a}) + {off_m}U) & 0xFFFCU))))")
+            elif op in (0x2C, 0x2D):  # i32.load8_s / i32.load8_u
+                _fl, bp = _read_uleb128(body, bp)
+                off_m, bp = _read_uleb128(body, bp)
+                base_a = stack.pop() if stack else "0"
+                cast8 = "int8_t" if op == 0x2C else "uint8_t"
+                stack.append(f"((int64_t)(*({cast8}*)(wasm_mem + (((uint32_t)({base_a}) + {off_m}U) & 0xFFFFU))))")
             elif op == 0x36:  # i32.store
                 _fl, bp = _read_uleb128(body, bp)
                 off_m, bp = _read_uleb128(body, bp)
                 val_s = stack.pop() if stack else "0"
                 base_a = stack.pop() if stack else "0"
                 c_lines.append(f"    *(int32_t*)(wasm_mem + (((uint32_t)({base_a}) + {off_m}U) & 0xFFFCU)) = (int32_t)({val_s});")
+            elif op == 0x3A:  # i32.store8
+                _fl, bp = _read_uleb128(body, bp)
+                off_m, bp = _read_uleb128(body, bp)
+                val_s = stack.pop() if stack else "0"
+                base_a = stack.pop() if stack else "0"
+                c_lines.append(f"    wasm_mem[(((uint32_t)({base_a}) + {off_m}U) & 0xFFFFU)] = (uint8_t)({val_s});")
             elif op == 0x41:  # i32.const
                 iv, bp = _read_sleb128(body, bp)
                 stack.append(f"((int64_t)(int32_t)({iv}))")
@@ -1034,22 +1379,35 @@ def reconstruct_wasm_project(
             elif op == 0x45 and stack:  # i32.eqz
                 a_e = stack.pop()
                 stack.append(f"((int64_t)((int32_t)({a_e}) == 0 ? 1 : 0))")
-            elif op in (0x46, 0x47, 0x48, 0x4A, 0x4C, 0x4E) and len(stack) >= 2:
+            elif op in (0x46, 0x47, 0x48, 0x49, 0x4A, 0x4B, 0x4C, 0x4D, 0x4E, 0x4F) and len(stack) >= 2:
                 b_e, a_e = stack.pop(), stack.pop()
-                cmp_op = {0x46: "==", 0x47: "!=", 0x48: "<", 0x4A: ">", 0x4C: "<=", 0x4E: ">="}[op]
-                stack.append(f"((int64_t)((int32_t)({a_e}) {cmp_op} (int32_t)({b_e}) ? 1 : 0))")
-            elif op in (0x6A, 0x6B, 0x6C, 0x6D, 0x6F, 0x71, 0x72, 0x73, 0x74, 0x75, 0x7C, 0x7D, 0x7E, 0x83, 0x84, 0x85) and len(stack) >= 2:
+                cmp_tbl = {
+                    0x46: ("int32_t", "=="), 0x47: ("int32_t", "!="),
+                    0x48: ("int32_t", "<"), 0x49: ("uint32_t", "<"),
+                    0x4A: ("int32_t", ">"), 0x4B: ("uint32_t", ">"),
+                    0x4C: ("int32_t", "<="), 0x4D: ("uint32_t", "<="),
+                    0x4E: ("int32_t", ">="), 0x4F: ("uint32_t", ">="),
+                }
+                cty, cmp_op = cmp_tbl[op]
+                stack.append(f"((int64_t)(({cty})({a_e}) {cmp_op} ({cty})({b_e}) ? 1 : 0))")
+            elif op in (
+                0x6A, 0x6B, 0x6C, 0x6D, 0x6E, 0x6F, 0x70, 0x71, 0x72, 0x73, 0x74, 0x75, 0x76,
+                0x7C, 0x7D, 0x7E, 0x83, 0x84, 0x85,
+            ) and len(stack) >= 2:
                 b_e, a_e = stack.pop(), stack.pop()
                 op_c = {
-                    0x6A: "+", 0x6B: "-", 0x6C: "*", 0x6D: "/", 0x6F: "%", 0x71: "&", 0x72: "|", 0x73: "^", 0x74: "<<", 0x75: ">>",
+                    0x6A: "+", 0x6B: "-", 0x6C: "*", 0x6D: "/", 0x6E: "/", 0x6F: "%", 0x70: "%",
+                    0x71: "&", 0x72: "|", 0x73: "^", 0x74: "<<", 0x75: ">>", 0x76: ">>",
                     0x7C: "+", 0x7D: "-", 0x7E: "*", 0x83: "&", 0x84: "|", 0x85: "^",
                 }[op]
-                if op <= 0x75:
+                if op in (0x6E, 0x70, 0x76):
+                    stack.append(f"((int64_t)(int32_t)((uint32_t)({a_e}) {op_c} (uint32_t)({b_e})))")
+                elif op <= 0x75:
                     stack.append(f"((int64_t)(int32_t)((int32_t)({a_e}) {op_c} (int32_t)({b_e})))")
                 else:
                     stack.append(f"((int64_t)(({a_e}) {op_c} ({b_e})))")
             elif op == 0x0F:  # return
-                rv = stack.pop() if stack else "0"
+                rv = stack.pop() if stack else "0LL"
                 c_lines.append(f"    return {rv};")
 
         ret_expr = stack.pop() if (stack and rtypes) else "0LL"
@@ -1072,6 +1430,8 @@ def reconstruct_wasm_project(
         "status": "complete",
         "project_kind": "wasm_native_c",
         "functions_lifted": lifted_fns,
+        "globals_count": len(globals_init),
+        "data_segments_count": len(data_segments),
         "exports": list(exports_map.values()),
         "wasi_capabilities": report.wasi_capabilities,
         "generated_files": ["src/wasm_module.c", "src/exports.def", "CMakeLists.txt"],
