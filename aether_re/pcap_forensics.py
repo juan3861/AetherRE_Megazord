@@ -210,7 +210,75 @@ def _parse_tls_client_hello_ja3(payload: bytes) -> dict[str, Any] | None:
     return {"sni": sni, "ja3_string": ja3_str, "ja3_md5": ja3_md5}
 
 
-def analyze_pcap_capture(pcap_bytes: bytes) -> dict[str, Any]:
+def decrypt_tls_with_ram_secrets(
+    pcap_bytes: bytes | Any,
+    tls_secrets: list[dict[str, str]],
+) -> list[dict[str, Any]]:
+    """Decrypt TLS Application Data (0x17) AES-GCM packets using matched 16/32B session secrets."""
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+    key_map: dict[bytes, bytes] = {}
+    for entry in tls_secrets:
+        cr = bytes.fromhex(entry["client_random"])
+        sec = bytes.fromhex(entry["secret_hex"])
+        key_map[cr] = sec
+
+    pkts = _iter_pcapng_packets(pcap_bytes) if pcap_bytes[:4] == b"\x0a\x0d\x0d\x0a" else _iter_pcap_packets(pcap_bytes)
+    active_key: bytes | None = None
+    decrypted: list[dict[str, Any]] = []
+    for ts, lt, frame in pkts:
+        l3_off = 14 if lt == 1 else 0
+        if len(frame) < l3_off + 20:
+            continue
+        ip = frame[l3_off:]
+        if ip[9] != 6:
+            continue
+        ihl = (ip[0] & 0xF) * 4
+        l4 = ip[ihl:]
+        if len(l4) < 20:
+            continue
+        doff = ((struct.unpack_from("!H", l4, 12)[0] >> 12) & 0xF) * 4
+        payload = l4[doff:]
+        if len(payload) >= 43 and payload[0] == 0x16 and payload[5] == 0x01:
+            crand = bytes(payload[11:43])
+            if crand in key_map:
+                active_key = key_map[crand]
+        elif active_key is not None and len(payload) >= 18 and payload[0] == 0x17:
+            # Explicit 12-byte nonce + AES-GCM ciphertext + 16-byte tag inside ApplicationData body
+            body = bytes(payload[5:])
+            if len(body) > 28:
+                nonce, ct = body[:12], body[12:]
+                try:
+                    pt = AESGCM(active_key[:32] if len(active_key) >= 32 else active_key[:16]).decrypt(nonce, ct, None)
+                    decrypted.append({
+                        "timestamp_utc": _ts_to_iso(ts),
+                        "plaintext_utf8": pt.decode("utf-8", errors="replace"),
+                    })
+                except Exception:
+                    pass
+    return decrypted
+
+
+def analyze_pcap_file(
+    pcap_path: str,
+    *,
+    tls_secrets: list[dict[str, str]] | None = None,
+) -> dict[str, Any]:
+    """Zero-copy `mmap` PCAP/PCAPNG analyzer with optional RAM-extracted TLS secret decryption."""
+    import mmap as _mmap
+    from pathlib import Path as _Path
+
+    p = _Path(pcap_path).resolve()
+    with p.open("rb") as fh:
+        with _mmap.mmap(fh.fileno(), 0, access=_mmap.ACCESS_READ) as mm:
+            rep = analyze_pcap_capture(mm)
+            rep["zero_copy_mmap"] = True
+            if tls_secrets:
+                rep["decrypted_tls_records"] = decrypt_tls_with_ram_secrets(mm, tls_secrets)
+            return rep
+
+
+def analyze_pcap_capture(pcap_bytes: bytes | Any) -> dict[str, Any]:
     """Dissect PCAP or PCAPNG captures into streams, DNS, HTTP, TLS JA3, and C2 beacons."""
     if pcap_bytes[:4] == b"\x0a\x0d\x0d\x0a":
         raw_pkts = _iter_pcapng_packets(pcap_bytes)

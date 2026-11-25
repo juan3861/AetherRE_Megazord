@@ -183,6 +183,48 @@ def _lift_cil_body_to_csharp(
     if not il:
         return ["            return 0;" if ret_type != "void" else "            return;"]
 
+    # Parse ECMA-335 Fat Header Exception Handling (try/catch/finally/fault) sections
+    eh_clauses: List[Tuple[str, int, int, int, int]] = []
+    if (b0 & 0x03) == 0x03 and (b0 & 0x08):  # Fat header with MoreSects
+        sect_pos = (il_start + code_sz + 3) & ~3
+        while sect_pos + 4 <= len(raw):
+            kind = raw[sect_pos]
+            if (kind & 0x3F) == 0x01:  # CorILMethod_Sect_EHTable
+                is_fat_eh = bool(kind & 0x40)
+                if not is_fat_eh:
+                    data_sz = raw[sect_pos + 1]
+                    n_clauses = max(0, (data_sz - 4) // 12)
+                    cpos = sect_pos + 4
+                    for _ in range(n_clauses):
+                        if cpos + 12 > len(raw):
+                            break
+                        cflags, try_off, try_len, h_off, h_len, _tok = struct.unpack_from("<HHBHB I".replace(" ", ""), raw, cpos)
+                        eh_kind = {0: "catch", 2: "finally", 4: "fault"}.get(cflags & 0x7, "catch")
+                        eh_clauses.append((eh_kind, try_off, try_off + try_len, h_off, h_off + h_len))
+                        cpos += 12
+                else:
+                    data_sz = struct.unpack_from("<I", raw, sect_pos)[0] >> 8
+                    n_clauses = max(0, (data_sz - 4) // 24)
+                    cpos = sect_pos + 4
+                    for _ in range(n_clauses):
+                        if cpos + 24 > len(raw):
+                            break
+                        cflags, try_off, try_len, h_off, h_len, _tok = struct.unpack_from("<IIIIII", raw, cpos)
+                        eh_kind = {0: "catch", 2: "finally", 4: "fault"}.get(cflags & 0x7, "catch")
+                        eh_clauses.append((eh_kind, try_off, try_off + try_len, h_off, h_off + h_len))
+                        cpos += 24
+            if not (kind & 0x80):
+                break
+            step_sz = (struct.unpack_from("<I", raw, sect_pos)[0] >> 8) if (kind & 0x40) else raw[sect_pos + 1]
+            if step_sz <= 0:
+                break
+            sect_pos = (sect_pos + step_sz + 3) & ~3
+
+    try_starts = {c[1] for c in eh_clauses}
+    try_ends = {c[2]: c[0] for c in eh_clauses}
+    handler_starts = {c[3]: c[0] for c in eh_clauses}
+    handler_ends = {c[4] for c in eh_clauses}
+
     # Map offset -> branch target labels
     targets: set[int] = set()
     p = 0
@@ -224,6 +266,21 @@ def _lift_cil_body_to_csharp(
 
     p = 0
     while p < len(il):
+        if p in try_starts:
+            out.append("            try {")
+        if p in try_ends:
+            ek = try_ends[p]
+            out.append("            }")
+            if ek == "finally":
+                out.append("            finally {")
+            elif ek == "fault":
+                out.append("            catch (System.Exception) { /* fault */")
+            else:
+                out.append("            catch (System.Exception) {")
+        elif p in handler_starts and p not in try_ends.values():
+            pass
+        if p in handler_ends:
+            out.append("            }")
         if p in targets:
             out.append(f"        IL_{p:04X}:;")
         op = il[p]

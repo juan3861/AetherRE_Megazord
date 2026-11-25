@@ -966,6 +966,67 @@ TOOLS = [
             "required": ["manifest_path"]
         }
     },
+    {
+        "name": "aether_behavioral_flirt",
+        "description": "Identifica funções de bibliotecas OSS (zlib/CRC32, FNV1a, CRT) via CFG + SimHash + micro-emulação Unicorn.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "target": {"type": "string", "description": "Caminho do binário PE/ELF"},
+            },
+            "required": ["target"]
+        }
+    },
+    {
+        "name": "aether_cpp_class_recover",
+        "description": "Reconstrói hierarquia de classes C++, RTTI, vtables, thunks de herança múltipla e WinRT .winmd em header `.hpp`.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "target": {"type": "string", "description": "Caminho do binário C++ ou .winmd"},
+                "out_dir": {"type": "string", "description": "Diretório opcional de saída do recovered_classes.hpp"},
+            },
+            "required": ["target"]
+        }
+    },
+    {
+        "name": "aether_backend_twin",
+        "description": "Sintetiza especificação OpenAPI e servidor HTTP Python local a partir de fluxos observados em PCAP.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "pcap_path": {"type": "string", "description": "Caminho opcional de arquivo PCAP/PCAPNG"},
+                "out_dir": {"type": "string", "description": "Diretório de saída do servidor gêmeo"},
+            },
+            "required": ["out_dir"]
+        }
+    },
+    {
+        "name": "aether_forensic_container",
+        "description": "Analisa contêineres forenses (.E01, .VHDX, .VMDK, GPT/MBR, ext4, APFS, BitLocker) via mmap zero-copy.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "target": {"type": "string", "description": "Caminho da imagem forense"},
+                "fvek_hex": {"type": "string", "description": "Chave FVEK hexadecimal opcional para BitLocker"},
+            },
+            "required": ["target"]
+        }
+    },
+    {
+        "name": "aether_differential_certify",
+        "description": "Certifica paridade comportamental em CPU real entre DLL original e twin reconstruída com auto-reparo CEGIS.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "orig_dll": {"type": "string"},
+                "twin_project_dir": {"type": "string"},
+                "functions": {"type": "array", "items": {"type": "string"}},
+                "auto_repair": {"type": "boolean", "default": True},
+            },
+            "required": ["orig_dll", "twin_project_dir", "functions"]
+        }
+    },
 ]
 
 
@@ -1751,6 +1812,45 @@ class AetherMcpDispatcher:
         key = bytes.fromhex(hmac_key_hex) if hmac_key_hex else None
         return verify_custody_snapshot(manifest_path, signing_key=key, verify_files_on_disk=verify_files_on_disk)
 
+    @staticmethod
+    def handle_behavioral_flirt(target: str) -> dict[str, Any]:
+        from aether_re.behavioral_flirt import identify_library_functions_behavioral
+        p = Path(target)
+        if not p.is_file():
+            raise FileNotFoundError(f"Arquivo não encontrado: {target}")
+        return identify_library_functions_behavioral(p.read_bytes())
+
+    @staticmethod
+    def handle_cpp_class_recover(target: str, out_dir: str | None = None) -> dict[str, Any]:
+        from aether_re.cpp_class_reconstructor import reconstruct_cpp_class_hierarchy
+        p = Path(target)
+        if not p.is_file():
+            raise FileNotFoundError(f"Arquivo não encontrado: {target}")
+        return reconstruct_cpp_class_hierarchy(p.read_bytes(), output_dir=out_dir)
+
+    @staticmethod
+    def handle_backend_twin(out_dir: str, pcap_path: str | None = None) -> dict[str, Any]:
+        from aether_re.backend_twin_synthesizer import synthesize_backend_twin
+        from aether_re.pcap_forensics import analyze_pcap_capture
+        pcap_rep = analyze_pcap_capture(Path(pcap_path).read_bytes()) if pcap_path else None
+        return synthesize_backend_twin(pcap_report=pcap_rep, output_dir=out_dir)
+
+    @staticmethod
+    def handle_forensic_container(target: str, fvek_hex: str | None = None) -> dict[str, Any]:
+        from aether_re.forensic_containers import analyze_forensic_image
+        key = bytes.fromhex(fvek_hex) if fvek_hex else None
+        return analyze_forensic_image(target, fvek_key=key)
+
+    @staticmethod
+    def handle_differential_certify(
+        orig_dll: str,
+        twin_project_dir: str,
+        functions: list[str],
+        auto_repair: bool = True,
+    ) -> dict[str, Any]:
+        from aether_re.differential_certifier import certify_differential_parity
+        return certify_differential_parity(orig_dll, twin_project_dir, functions, auto_repair=auto_repair)
+
 
 def run_mcp_server() -> int:
     """Executa o loop stdio oficial do servidor MCP (JSON-RPC 2.0)."""
@@ -2028,6 +2128,21 @@ def run_mcp_server() -> int:
                             args["manifest_path"],
                             hmac_key_hex=args.get("hmac_key_hex"),
                             verify_files_on_disk=bool(args.get("verify_files_on_disk", True)),
+                        )
+                    elif tool_name == "aether_behavioral_flirt":
+                        data = dispatcher.handle_behavioral_flirt(args["target"])
+                    elif tool_name == "aether_cpp_class_recover":
+                        data = dispatcher.handle_cpp_class_recover(args["target"], out_dir=args.get("out_dir"))
+                    elif tool_name == "aether_backend_twin":
+                        data = dispatcher.handle_backend_twin(args["out_dir"], pcap_path=args.get("pcap_path"))
+                    elif tool_name == "aether_forensic_container":
+                        data = dispatcher.handle_forensic_container(args["target"], fvek_hex=args.get("fvek_hex"))
+                    elif tool_name == "aether_differential_certify":
+                        data = dispatcher.handle_differential_certify(
+                            args["orig_dll"],
+                            args["twin_project_dir"],
+                            list(args["functions"]),
+                            auto_repair=bool(args.get("auto_repair", True)),
                         )
                     else:
                         raise ValueError(f"Ferramenta desconhecida: {tool_name}")

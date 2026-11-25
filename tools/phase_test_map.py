@@ -112,16 +112,20 @@ MODULE_PHASE: dict[str, str] = {
     "semantic_deobfuscator": "F05", "smt_solver": "F09",
     "ground_truth_eval": "F10", "c_equivalence": "F09",
     # Motores v7.0 / v8.0 / v8.1 (F05/F06/F07/F09)
+    "behavioral_flirt": "F05",
     "cff_devirtualizer": "F05",
     "cil_decompiler": "F06",
     "concolic_fuzzer": "F09",
+    "cpp_class_reconstructor": "F06",
     "cxx_eh_rtti": "F05",
+    "differential_certifier": "F10",
     "disk_registry_evtx": "F08",
     "driver_ioctl_fuzzer": "F07",
     "dynamic_unpacker": "F08",
     "exploit_prover": "F07",
     "firmware_reconstructor": "F06",
     "flirt_cfg": "F05",
+    "forensic_containers": "F08",
     "ir_optimizer": "F05",
     "lifted_c_vm": "F06",
     "llvm_backend": "F06",
@@ -139,6 +143,7 @@ MODULE_PHASE: dict[str, str] = {
     "webcrack_bridge": "F05",
     "win64_unwind": "F05",
     "ast_deobfuscator_acorn": "F05",
+    "backend_twin_synthesizer": "F06",
     "batch_deobfuscator": "F05",
 }
 

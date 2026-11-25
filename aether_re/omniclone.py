@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import re
 from typing import Any, Dict, List
 
 from aether_re.exploit_prover import audit_reconstructed_project_exploits
@@ -36,6 +37,43 @@ _RECONSTRUCTIBLE_EXTS = {
 }
 
 
+def _collect_pe_elf_imports(bin_path: Path) -> list[str]:
+    """Return lowercase imported DLL/.so/.dylib names for dependency closure resolution."""
+    try:
+        raw = bin_path.read_bytes()
+    except OSError:
+        return []
+    if raw.startswith(b"MZ"):
+        try:
+            import pefile
+            pe = pefile.PE(data=raw, fast_load=True)
+            pe.parse_data_directories(directories=[pefile.DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_IMPORT"]])
+            deps = []
+            for entry in getattr(pe, "DIRECTORY_ENTRY_IMPORT", []):
+                dll = entry.dll.decode("utf-8", errors="ignore").lower()
+                if dll:
+                    deps.append(dll)
+            return deps
+        except Exception:
+            return []
+    if raw.startswith(b"\x7fELF"):
+        try:
+            from io import BytesIO
+            from elftools.elf.elffile import ELFFile
+            from elftools.elf.dynamic import DynamicSection
+            ef = ELFFile(BytesIO(raw))
+            deps = []
+            for sec in ef.iter_sections():
+                if isinstance(sec, DynamicSection):
+                    for tag in sec.iter_tags():
+                        if tag.entry.d_tag == "DT_NEEDED":
+                            deps.append(str(tag.needed).lower())
+            return deps
+        except Exception:
+            return []
+    return []
+
+
 def clone_and_audit_project(
     target_path: str | Path,
     output_dir: str | Path,
@@ -43,9 +81,12 @@ def clone_and_audit_project(
     allow_live_process_trace: bool = False,
     run_symbolic: bool = True,
     run_exploit_audit: bool = True,
-    max_subcomponents: int = 24,
+    max_subcomponents: int | None = None,
 ) -> Dict[str, Any]:
     """Full end-to-end universal reverse-engineering, project cloning, and security audit."""
+    from aether_re.behavioral_flirt import identify_library_functions_behavioral
+    from aether_re.cpp_class_reconstructor import reconstruct_cpp_class_hierarchy
+
     t_path = Path(target_path).resolve()
     out_root = Path(output_dir).resolve()
     if not t_path.is_file():
@@ -63,7 +104,8 @@ def clone_and_audit_project(
     container_fmt = detect_container_format(t_path)
 
     reconstructed_components: List[Dict[str, Any]] = []
-    if container_fmt in {"asar", "zip", "tar", "gzip", "nsis", "innosetup"} and not (
+    dependency_graph: Dict[str, List[str]] = {}
+    if container_fmt in {"asar", "zip", "msix", "ipa", "aab", "tar", "gzip", "deb", "rpm", "msi_ole2", "nsis", "innosetup"} and not (
         raw.startswith(b"PK\x03\x04")
         and (
             t_path.suffix.lower() in (".jar", ".apk")
@@ -90,25 +132,49 @@ def clone_and_audit_project(
                 "total_reconstructed": prim.get("total_exports_reconstructed", 0),
                 "congruence_pct": prim.get("overall_congruence_pct", 0.0),
             })
-        # Walk unpacked sub-artifacts for hybrid components (.node, .dll, .wasm, .pyc, .js, etc.)
+        # Walk unpacked sub-artifacts for hybrid components & full import dependency closure
         comp_root = out_root / "components"
         comp_idx = 0
         for sub_f in sorted(unp_dir.rglob("*")):
-            if comp_idx >= max_subcomponents:
+            if max_subcomponents is not None and comp_idx >= max_subcomponents:
                 break
             if not sub_f.is_file() or sub_f.suffix.lower() not in _RECONSTRUCTIBLE_EXTS:
                 continue
             comp_idx += 1
             c_dir = comp_root / f"{comp_idx:02d}_{sub_f.stem}"
             sub_rep = reconstruct_project(sub_f, c_dir).to_dict()
+            deps = _collect_pe_elf_imports(sub_f)
+            if deps:
+                dependency_graph[sub_f.name.lower()] = deps
             reconstructed_components.append({
                 "role": "nested_component",
+                "filename": sub_f.name.lower(),
                 "source": sub_f.relative_to(unp_dir).as_posix(),
+                "imports": deps,
                 "project_kind": sub_rep.get("project_kind"),
                 "output_dir": str(c_dir),
                 "total_reconstructed": sub_rep.get("total_exports_reconstructed", 0),
                 "congruence_pct": sub_rep.get("overall_congruence_pct", 0.0),
             })
+
+        # Emit unified multi-target CMakeLists.txt linking sibling C/C++ rebuilt components
+        ws_dir = out_root / "workspace_cmake"
+        ws_dir.mkdir(parents=True, exist_ok=True)
+        ws_lines = ["cmake_minimum_required(VERSION 3.16)", f"project({t_path.stem}_workspace C CXX)", ""]
+        native_names = {c.get("filename"): c for c in reconstructed_components if c.get("filename", "").endswith((".dll", ".so", ".dylib", ".exe")) and Path(c["output_dir"], "src", "reconstructed_project.c").is_file()}
+        for fname, comp in native_names.items():
+            tgt = re.sub(r"[^A-Za-z0-9_]", "_", Path(fname).stem)
+            src_c = Path(comp["output_dir"], "src", "reconstructed_project.c").as_posix()
+            if fname.endswith(".exe"):
+                ws_lines.append(f'add_executable({tgt} "{src_c}")')
+            else:
+                ws_lines.append(f'add_library({tgt} SHARED "{src_c}")')
+        for fname, comp in native_names.items():
+            tgt = re.sub(r"[^A-Za-z0-9_]", "_", Path(fname).stem)
+            linked = [re.sub(r"[^A-Za-z0-9_]", "_", Path(d).stem) for d in comp.get("imports", []) if d in native_names and d != fname]
+            if linked:
+                ws_lines.append(f"target_link_libraries({tgt} PRIVATE {' '.join(linked)})")
+        (ws_dir / "CMakeLists.txt").write_text("\n".join(ws_lines) + "\n", encoding="utf-8")
     else:
         # Check packed PE first
         if len(raw) >= 64 and raw[:2] == b"MZ":
@@ -225,6 +291,18 @@ def clone_and_audit_project(
             "sarif_path": str(sarif_out),
         }
 
+    cpp_classes_summary: Dict[str, Any] = {}
+    flirt_summary: Dict[str, Any] = {}
+    if raw[:2] == b"MZ" or raw[:4] == b"\x7fELF":
+        try:
+            cpp_classes_summary = reconstruct_cpp_class_hierarchy(raw, out_root / "primary_project")
+        except Exception:
+            cpp_classes_summary = {}
+        try:
+            flirt_summary = identify_library_functions_behavioral(raw)
+        except Exception:
+            flirt_summary = {}
+
     manifest = {
         "schema": SCHEMA,
         "status": "complete",
@@ -233,6 +311,9 @@ def clone_and_audit_project(
         "unpack_info": unpack_info,
         "components_count": len(reconstructed_components),
         "components": reconstructed_components,
+        "dependency_graph": dependency_graph,
+        "cpp_classes_summary": {k: v for k, v in cpp_classes_summary.items() if k != "hpp_source"},
+        "behavioral_flirt": flirt_summary,
         "symbolic_summary": symbolic_summary,
         "exploit_audit": exploit_audit,
         "omni_highlights": omni_rep.get("highlights", []),

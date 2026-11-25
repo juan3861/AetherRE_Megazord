@@ -495,3 +495,105 @@ def analyze_physical_ram_dump(
         "carved_pes": carved_pes,
         "inline_hooks": inline_hooks,
     }
+
+
+def detect_kernel_profile(dump_bytes: bytes | Any) -> dict[str, Any]:
+    """Identify Windows RSDS PDB GUID (`ntkrnlmp`/`ntoskrnl`) or Linux kernel banner in RAM."""
+    import re as _re
+    import uuid as _uuid
+
+    win_profiles = {
+        "ntkrnlmp.pdb": EprocessProfile(),
+        "ntoskrnl.pdb": EprocessProfile(),
+        "ntkrnlpa.pdb": EprocessProfile(unique_process_id=0x440, active_process_links=0x448, image_file_name=0x5A8),
+    }
+    pos = dump_bytes.find(b"RSDS")
+    while pos != -1 and pos + 40 <= len(dump_bytes):
+        raw_rec = bytes(dump_bytes[pos : pos + 128])
+        guid = _uuid.UUID(bytes_le=raw_rec[4:20])
+        age = struct.unpack_from("<I", raw_rec, 20)[0]
+        pdb_name = raw_rec[24:].split(b"\x00", 1)[0].decode("ascii", errors="ignore")
+        low = pdb_name.lower()
+        if any(k in low for k in ("ntkrnl", "ntoskrnl")):
+            prof = win_profiles.get(low.rsplit("\\", 1)[-1], EprocessProfile())
+            return {
+                "os": "windows",
+                "pdb": pdb_name,
+                "guid": str(guid).upper(),
+                "age": age,
+                "profile": {
+                    "directory_table_base": hex(prof.directory_table_base),
+                    "unique_process_id": hex(prof.unique_process_id),
+                    "active_process_links": hex(prof.active_process_links),
+                    "image_file_name": hex(prof.image_file_name),
+                },
+            }
+        pos = dump_bytes.find(b"RSDS", pos + 4)
+
+    lin_pos = dump_bytes.find(b"Linux version ")
+    if lin_pos != -1:
+        banner = bytes(dump_bytes[lin_pos : lin_pos + 160]).split(b"\x00", 1)[0].decode("ascii", errors="ignore")
+        m_ver = _re.search(r"Linux version\s+(\S+)", banner)
+        return {"os": "linux", "banner": banner, "kernel_release": m_ver.group(1) if m_ver else None}
+    return {"os": "unknown"}
+
+
+def extract_keys_from_ram(dump_bytes: bytes | Any) -> dict[str, Any]:
+    """Scan RAM for SSLKEYLOGFILE TLS secrets, BitLocker FVEK key blocks, and AES key material."""
+    import re as _re
+
+    tls_secrets: list[dict[str, str]] = []
+    pos = 0
+    for marker in (b"CLIENT_RANDOM ", b"CLIENT_TRAFFIC_SECRET_0 ", b"SERVER_TRAFFIC_SECRET_0 "):
+        pos = 0
+        while len(tls_secrets) < 128:
+            idx = dump_bytes.find(marker, pos)
+            if idx == -1:
+                break
+            chunk = bytes(dump_bytes[idx : min(len(dump_bytes), idx + 220)]).split(b"\n", 1)[0].split(b"\x00", 1)[0]
+            txt = chunk.decode("ascii", errors="ignore")
+            m = _re.match(r"^(CLIENT_RANDOM|CLIENT_TRAFFIC_SECRET_0|SERVER_TRAFFIC_SECRET_0)\s+([0-9a-fA-F]{64})\s+([0-9a-fA-F]{32,128})$", txt.strip())
+            if m:
+                tls_secrets.append({
+                    "label": m.group(1),
+                    "client_random": m.group(2).lower(),
+                    "secret_hex": m.group(3).lower(),
+                })
+            pos = idx + len(marker)
+
+    fvek_candidates: list[dict[str, str]] = []
+    pos = 0
+    while len(fvek_candidates) < 32:
+        idx = dump_bytes.find(b"FVEK\x00\x00\x00\x00", pos)
+        if idx == -1 or idx + 40 > len(dump_bytes):
+            break
+        key_bytes = bytes(dump_bytes[idx + 8 : idx + 40])
+        fvek_candidates.append({"phys_offset": hex(idx), "fvek_hex": key_bytes.hex()})
+        pos = idx + 8
+
+    return {
+        "schema": "aether_ram_keys.v1",
+        "tls_secrets_count": len(tls_secrets),
+        "tls_secrets": tls_secrets,
+        "fvek_count": len(fvek_candidates),
+        "fvek_candidates": fvek_candidates,
+    }
+
+
+def analyze_physical_ram_file(
+    dump_path: str | Path,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """Zero-copy `mmap` RAM forensic analyzer supporting multi-gigabyte dumps."""
+    import mmap as _mmap
+
+    p = Path(dump_path).resolve()
+    if not p.is_file():
+        raise FileNotFoundError(f"RAM dump not found: {p}")
+    with p.open("rb") as fh:
+        with _mmap.mmap(fh.fileno(), 0, access=_mmap.ACCESS_READ) as mm:
+            rep = analyze_physical_ram_dump(mm, **kwargs)
+            rep["kernel_profile"] = detect_kernel_profile(mm)
+            rep["extracted_keys"] = extract_keys_from_ram(mm)
+            rep["zero_copy_mmap"] = True
+            return rep

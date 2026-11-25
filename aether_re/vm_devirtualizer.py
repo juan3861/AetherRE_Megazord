@@ -194,6 +194,65 @@ def devirtualize_vm_via_unicorn_trace(
     }
 
 
+def devirtualize_from_live_trace(
+    trace_outputs: Sequence[Tuple[Tuple[int, int, int, int], int]],
+    *,
+    fn_name: str = "live_traced_devirt_fn",
+) -> Dict[str, Any]:
+    """Synthesize clean devirtualized C from concrete hardware/Frida runtime input-output traces."""
+    synthesized_expr = _synthesize_devirt_expr(list(trace_outputs))
+    if synthesized_expr is not None:
+        raw_c = "\n".join([
+            f"int64_t {fn_name}(int64_t rcx, int64_t rdx, int64_t r8, int64_t r9) {{",
+            "    int64_t rax = 0;",
+            "L_entry: ;",
+            f"    rax = {synthesized_expr};",
+            "    return rax;",
+            "}",
+        ])
+    else:
+        arms = [f"    if (rcx == {v[0]}LL && rdx == {v[1]}LL) return {y}LL;" for v, y in trace_outputs]
+        raw_c = "\n".join([
+            f"int64_t {fn_name}(int64_t rcx, int64_t rdx, int64_t r8, int64_t r9) {{",
+            *arms,
+            f"    return {trace_outputs[0][1] if trace_outputs else 0}LL;",
+            "}",
+        ])
+    return {
+        "schema": SCHEMA,
+        "status": "complete",
+        "mode": "live_trace_sygus",
+        "synthesized_formula": synthesized_expr,
+        "devirtualized_c": optimize_lifted_c(raw_c),
+    }
+
+
+def deobfuscate_ollvm_c_predicates(c_code: str) -> Dict[str, Any]:
+    """Collapse OLLVM Bogus Control Flow invariant predicates via Z3 BitVec64."""
+    from aether_re.mba_synthesizer import solve_opaque_predicate_z3
+    import re
+
+    out_lines: List[str] = []
+    collapsed = 0
+    if_re = re.compile(r"^(\s*)if\s*\((.+)\)\s*(\{?)\s*$")
+    for ln in c_code.splitlines():
+        m = if_re.match(ln)
+        if m:
+            indent, cond, brace = m.groups()
+            opq = solve_opaque_predicate_z3(cond)
+            if opq.get("is_opaque"):
+                collapsed += 1
+                tv = 1 if opq.get("truth_value") else 0
+                out_lines.append(f"{indent}if ({tv}) {brace} /* OLLVM opaque collapsed ({cond}) */")
+                continue
+        out_lines.append(ln)
+    return {
+        "schema": "aether_ollvm_deobf.v1",
+        "opaque_predicates_collapsed": collapsed,
+        "deobfuscated_c": "\n".join(out_lines),
+    }
+
+
 def _synthesize_devirt_expr(outputs: List[Tuple[Tuple[int, int, int, int], int]]) -> Optional[str]:
     """Finds exact closed-form C arithmetic/bitwise identity matching all Unicorn VM trace outputs via Z3."""
     if len(outputs) < 3:

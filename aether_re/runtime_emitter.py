@@ -86,6 +86,30 @@ def _find_msvc_x64_toolchain() -> Optional[Tuple[Path, Dict[str, str], str, Opti
     return vc, cached_env, cl_in_env, link_in_env
 
 
+def _compile_rc_if_present(proj: Path, env: Dict[str, str]) -> Optional[Path]:
+    """Compile `resources/reconstructed.rc` into `resources/reconstructed.res` via SDK `rc.exe`."""
+    rc_src = proj / "resources" / "reconstructed.rc"
+    if not rc_src.is_file():
+        return None
+    rc_exe = shutil.which("rc", path=env.get("PATH", ""))
+    if not rc_exe:
+        return None
+    res_out = rc_src.with_suffix(".res")
+    proc = subprocess.run(
+        [rc_exe, "/nologo", "/fo", str(res_out), str(rc_src.name)],
+        cwd=str(rc_src.parent),
+        env=env,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=60,
+    )
+    if proc.returncode == 0 and res_out.is_file() and res_out.stat().st_size > 0:
+        return res_out
+    return None
+
+
 def compile_reconstructed_project(
     project_dir: str | Path,
     output_dll_name: str = "reconstructed_twin.dll",
@@ -107,16 +131,21 @@ def compile_reconstructed_project(
         c_sources = [c_src]
 
     vc_info = _find_msvc_x64_toolchain()
+    res_embedded = False
     if vc_info is not None:
         vc, cached_env, cl_in_env, _ = vc_info
         src_strs = [str(p) for p in c_sources]
         if cached_env and cl_in_env:
+            res_file = _compile_rc_if_present(proj, cached_env)
             cmd_args = [cl_in_env, "/nologo", "/LD", "/O2"]
             if len(c_sources) > 1:
                 obj_dir = proj / "build_tu"
                 obj_dir.mkdir(parents=True, exist_ok=True)
                 cmd_args.append(f"/Fo{obj_dir}{chr(92)}")
             cmd_args.extend(src_strs)
+            if res_file is not None:
+                cmd_args.append(str(res_file))
+                res_embedded = True
             cmd_args.append(f"/Fe:{out_dll}")
             if def_file.is_file():
                 cmd_args.extend(["/link", f"/DEF:{def_file}"])
@@ -159,6 +188,7 @@ def compile_reconstructed_project(
             "status": "compiled" if ok else "compile_failed",
             "compiler": "msvc_cl_x64",
             "translation_units": len(c_sources),
+            "resources_embedded": res_embedded,
             "dll_path": str(out_dll) if ok else None,
             "dll_size_bytes": out_dll.stat().st_size if ok else 0,
             "dll_sha256": hashlib.sha256(out_dll.read_bytes()).hexdigest() if ok else None,
@@ -204,8 +234,13 @@ def compile_reconstructed_executable(
     if vc_info is not None:
         vc, cached_env, cl_in_env, _ = vc_info
         if cached_env and cl_in_env:
+            res_file = _compile_rc_if_present(proj, cached_env)
+            cmd_exe = [cl_in_env, "/nologo", "/O2", str(c_src)]
+            if res_file is not None:
+                cmd_exe.append(str(res_file))
+            cmd_exe.append(f"/Fe:{out_exe}")
             proc = subprocess.run(
-                [cl_in_env, "/nologo", "/O2", str(c_src), f"/Fe:{out_exe}"],
+                cmd_exe,
                 cwd=str(proj),
                 env=cached_env,
                 capture_output=True,
@@ -219,6 +254,7 @@ def compile_reconstructed_executable(
                 "compiled": ok,
                 "status": "compiled" if ok else "compile_failed",
                 "compiler": "msvc_cl_x64",
+                "resources_embedded": res_file is not None,
                 "exe_path": str(out_exe) if ok else None,
                 "exe_size_bytes": out_exe.stat().st_size if ok else 0,
                 "exe_sha256": hashlib.sha256(out_exe.read_bytes()).hexdigest() if ok else None,

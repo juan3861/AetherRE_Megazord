@@ -2044,3 +2044,108 @@ def verify_reconstructed_js_bundle(project_dir: str | Path) -> Dict[str, Any]:
         "modules_loaded": loaded_keys,
         "stderr": proc.stderr.strip()[:500],
     }
+
+
+# ---------------------------------------------------------------------------
+# 6. Mobile Native-Compiled / Bytecode Targets (IL2CPP, Flutter AOT, Hermes .hbc)
+# ---------------------------------------------------------------------------
+
+
+def recover_il2cpp_metadata(metadata_bytes: bytes, output_dir: str | Path | None = None) -> Dict[str, Any]:
+    """Parses Unity `global-metadata.dat` (`0xFAB11BAF`) to recover C# strings/types/methods."""
+    if len(metadata_bytes) < 64 or metadata_bytes[:4] != b"\xaf\x1b\xb1\xfa":
+        return {"schema": "aether_il2cpp.v1", "valid": False, "types": [], "strings": []}
+    version = struct.unpack_from("<i", metadata_bytes, 4)[0]
+    str_off, str_sz = struct.unpack_from("<II", metadata_bytes, 16)
+    type_off, type_sz = struct.unpack_from("<II", metadata_bytes, 160) if len(metadata_bytes) >= 168 else (0, 0)
+    raw_strs = metadata_bytes[str_off : min(len(metadata_bytes), str_off + str_sz)] if (0 < str_off < len(metadata_bytes)) else b""
+    strings = [s.decode("utf-8", errors="ignore") for s in raw_strs.split(b"\x00") if len(s) >= 2][:2048]
+    if not strings:
+        strings = sorted({m.group(0).decode("ascii", errors="ignore") for m in re.finditer(rb"[A-Za-z_][A-Za-z0-9_.]{3,64}", metadata_bytes)})[:512]
+    type_hints = [s for s in strings if "." in s or s[:1].isupper()][:256]
+
+    cs_out = "\n".join([
+        f"// Recovered Unity IL2CPP Metadata v{version}",
+        "namespace RecoveredIL2CPP {",
+        *[f"    public partial class {re.sub(r'[^A-Za-z0-9_]', '_', t)} {{ }}" for t in type_hints[:32] if t[0].isalpha()],
+        "}",
+        "",
+    ])
+    written: str | None = None
+    if output_dir is not None:
+        out = Path(output_dir)
+        out.mkdir(parents=True, exist_ok=True)
+        p = out / "IL2CPP_METADATA.cs"
+        p.write_text(cs_out, encoding="utf-8")
+        written = str(p)
+    return {
+        "schema": "aether_il2cpp.v1",
+        "valid": True,
+        "version": version,
+        "string_table_offset": str_off,
+        "type_def_offset": type_off,
+        "type_def_size": type_sz,
+        "strings_count": len(strings),
+        "type_hints": type_hints[:64],
+        "cs_path": written,
+    }
+
+
+def recover_flutter_snapshot(libapp_bytes: bytes, output_dir: str | Path | None = None) -> Dict[str, Any]:
+    """Extracts Dart package URIs & snapshot cluster markers from Flutter `libapp.so`."""
+    has_vm = b"_kDartVmSnapshotData" in libapp_bytes or b"_kDartIsolateSnapshotData" in libapp_bytes or b"package:" in libapp_bytes
+    if not has_vm:
+        return {"schema": "aether_flutter.v1", "detected": False, "packages": [], "symbols": []}
+    packages = sorted({m.group(0).decode("ascii", errors="ignore") for m in re.finditer(rb"package:[A-Za-z0-9_./-]{3,128}\.dart", libapp_bytes)})
+    dart_libs = sorted({m.group(0).decode("ascii", errors="ignore") for m in re.finditer(rb"dart:[a-z_]{2,32}", libapp_bytes)})
+    written: str | None = None
+    rep = {
+        "schema": "aether_flutter.v1",
+        "detected": True,
+        "packages_count": len(packages),
+        "packages": packages[:256],
+        "dart_libs": dart_libs,
+    }
+    if output_dir is not None:
+        out = Path(output_dir)
+        out.mkdir(parents=True, exist_ok=True)
+        p = out / "flutter_recovered_libs.json"
+        p.write_text(json.dumps(rep, indent=2), encoding="utf-8")
+        written = str(p)
+        rep["json_path"] = written
+    return rep
+
+
+def decode_hermes_bytecode(hbc_bytes: bytes, output_dir: str | Path | None = None) -> Dict[str, Any]:
+    """Parses React Native Hermes `.hbc` header & extracts strings/function outline."""
+    hermes_magic = b"\xc6\x1f\xbc\x03\xc1\x03\x19\x1f"
+    if len(hbc_bytes) < 64 or not hbc_bytes.startswith(hermes_magic):
+        return {"schema": "aether_hermes.v1", "valid": False, "version": 0, "strings": []}
+    version = struct.unpack_from("<I", hbc_bytes, 8)[0]
+    file_len = struct.unpack_from("<I", hbc_bytes, 32)[0]
+    fn_count = struct.unpack_from("<I", hbc_bytes, 40)[0]
+    str_count = struct.unpack_from("<I", hbc_bytes, 44)[0]
+    strings = sorted({m.group(0).decode("ascii", errors="ignore") for m in re.finditer(rb"[\x20-\x7e]{4,96}", hbc_bytes[64:])})[:512]
+    js_stub = "\n".join([
+        f"// Recovered Hermes HBC v{version} (functions={fn_count}, strings={str_count})",
+        *[f"// str: {s}" for s in strings[:16]],
+        "export const hermesRecovered = true;",
+        "",
+    ])
+    written: str | None = None
+    if output_dir is not None:
+        out = Path(output_dir)
+        out.mkdir(parents=True, exist_ok=True)
+        p = out / "hermes_recovered.js"
+        p.write_text(js_stub, encoding="utf-8")
+        written = str(p)
+    return {
+        "schema": "aether_hermes.v1",
+        "valid": True,
+        "version": version,
+        "declared_file_length": file_len,
+        "function_count": fn_count,
+        "string_count": str_count,
+        "strings": strings[:128],
+        "js_path": written,
+    }

@@ -106,15 +106,31 @@ def detect_container_format(target: Path) -> str:
             pass
     if target.suffix.casefold() == ".asar":
         return "asar"
+    if header.startswith(b"!<arch>\n"):
+        return "deb"
+    if header.startswith(b"\xed\xab\xee\xdb"):
+        return "rpm"
+    if header.startswith(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"):
+        return "msi_ole2"
     if header.startswith((b"PK\x03\x04", b"PK\x05\x06")):
+        # Inspect ZIP entries/extension without full decompression for MSIX/IPA/AAB vs generic ZIP
+        suf = target.suffix.casefold()
+        if suf in {".msix", ".appx"}:
+            return "msix"
+        if suf == ".ipa":
+            return "ipa"
+        if suf == ".aab":
+            return "aab"
         return "zip"
     if len(header) >= 265 and header[257:263] in {b"ustar\x00", b"ustar "}:
         return "tar"
     if header.startswith(b"\x1f\x8b\x08"):
         return "gzip"
 
-    # Verificação de PyInstaller, NSIS, InnoSetup ou Firmware em binários PE/ELF
+    # Verificação de DMG koly trailer, PyInstaller, NSIS, InnoSetup ou Firmware em binários
     raw = target.read_bytes()
+    if len(raw) >= 512 and raw[-512:-508] == b"koly":
+        return "dmg"
     if PYINSTALLER_COOKIE in raw or PYZ_COOKIE in raw:
         return "pyinstaller"
     for sig in NSIS_SIGNATURES:
@@ -496,6 +512,125 @@ def _assert_no_links(path: Path) -> None:
             raise UnpackError("path_contains_link_or_junction")
 
 
+def _unpack_deb(
+    target: Path,
+    out_dir: Path,
+    *,
+    max_files: int,
+    max_bytes: int,
+    max_file_bytes: int,
+) -> list[dict[str, Any]]:
+    """Extrai membros de pacotes Debian `.deb` (`ar` format `!<arch>\\n`) em Python puro."""
+    data = target.read_bytes()
+    if not data.startswith(b"!<arch>\n"):
+        raise UnpackError("deb_magic_invalid")
+    pos = 8
+    total_b = 0
+    extracted: list[dict[str, Any]] = []
+    while pos + 60 <= len(data) and len(extracted) < max_files:
+        hdr = data[pos : pos + 60]
+        if hdr[58:60] != b"`\n":
+            break
+        raw_name = hdr[0:16].decode("latin-1", errors="replace").strip().rstrip("/")
+        size_s = hdr[48:58].decode("ascii", errors="replace").strip()
+        try:
+            fsize = int(size_s)
+        except ValueError:
+            break
+        pos += 60
+        if pos + fsize > len(data) or fsize > max_file_bytes or total_b + fsize > max_bytes:
+            raise UnpackError("deb_member_budget_exceeded")
+        payload = data[pos : pos + fsize]
+        pos += fsize + (fsize & 1)
+        rel = _sanitize_path(raw_name or f"member_{len(extracted)}")
+        dest = out_dir / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(payload)
+        total_b += len(payload)
+        extracted.append({
+            "relative_path": rel,
+            "size_bytes": len(payload),
+            "sha256": _sha256_bytes(payload),
+            "type": "deb_ar_member",
+        })
+    return extracted
+
+
+def _unpack_rpm(
+    target: Path,
+    out_dir: Path,
+    *,
+    max_files: int,
+    max_bytes: int,
+    max_file_bytes: int,
+) -> list[dict[str, Any]]:
+    """Extrai payload comprimido (gzip/xz/zstd cpio) de pacote RPM (`\\xed\\xab\\xee\\xdb`)."""
+    data = target.read_bytes()
+    if not data.startswith(b"\xed\xab\xee\xdb"):
+        raise UnpackError("rpm_magic_invalid")
+    # Locate compressed CPIO payload stream after lead (96B) + signature/header
+    extracted: list[dict[str, Any]] = []
+    for sig, name in ((b"\x1f\x8b\x08", "payload.cpio.gz"), (b"\xfd7zXZ\x00", "payload.cpio.xz"), (b"\x28\xb5\x2f\xfd", "payload.cpio.zst"), (b"070701", "payload.cpio")):
+        off = data.find(sig, 96)
+        if off != -1:
+            blob = data[off:]
+            if len(blob) > min(max_file_bytes, max_bytes):
+                raise UnpackError("rpm_payload_budget_exceeded")
+            dest = out_dir / name
+            dest.write_bytes(blob)
+            extracted.append({
+                "relative_path": name,
+                "size_bytes": len(blob),
+                "sha256": _sha256_bytes(blob),
+                "type": "rpm_payload",
+            })
+            break
+    return extracted
+
+
+def _unpack_msi_ole2(
+    target: Path,
+    out_dir: Path,
+    *,
+    max_files: int,
+    max_bytes: int,
+    max_file_bytes: int,
+) -> list[dict[str, Any]]:
+    """Carva streams CAB (MSCF) e registros OLE2 de pacotes Windows Installer `.msi`."""
+    data = target.read_bytes()
+    if not data.startswith(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"):
+        raise UnpackError("ole2_magic_invalid")
+    extracted: list[dict[str, Any]] = []
+    total_b = 0
+    idx = 0
+    while len(extracted) < max_files:
+        idx = data.find(b"MSCF\x00\x00\x00\x00", idx)
+        if idx == -1 or idx + 36 > len(data):
+            break
+        cab_size = struct.unpack_from("<I", data, idx + 8)[0]
+        if 36 <= cab_size <= max_file_bytes and idx + cab_size <= len(data) and total_b + cab_size <= max_bytes:
+            blob = data[idx : idx + cab_size]
+            rel = f"embedded_{len(extracted)}.cab"
+            (out_dir / rel).write_bytes(blob)
+            total_b += len(blob)
+            extracted.append({
+                "relative_path": rel,
+                "size_bytes": len(blob),
+                "sha256": _sha256_bytes(blob),
+                "type": "msi_cab_stream",
+            })
+            idx += cab_size
+            continue
+        idx += 4
+    if not extracted:
+        # Preserve whole OLE2 raw fallback stream marker when no embedded CAB was found
+        marker = out_dir / "msi_ole2_header.json"
+        payload = json.dumps({"ole2_size": len(data), "sha256": _sha256_bytes(data)}, indent=2).encode("utf-8")
+        marker.write_bytes(payload)
+        extracted.append({"relative_path": "msi_ole2_header.json", "size_bytes": len(payload), "sha256": _sha256_bytes(payload), "type": "msi_metadata"})
+    return extracted
+
+
 def unpack_container(
     target: Path,
     out_dir: Path,
@@ -540,9 +675,18 @@ def unpack_container(
             stage.mkdir()
             fmt = detect_container_format(snapshot)
             handlers = {
-                "asar": _unpack_asar, "zip": _unpack_zip,
-                "tar": _unpack_tar, "gzip": _unpack_tar,
-                "nsis": _unpack_nsis, "innosetup": _unpack_innosetup,
+                "asar": _unpack_asar,
+                "zip": _unpack_zip,
+                "msix": _unpack_zip,
+                "ipa": _unpack_zip,
+                "aab": _unpack_zip,
+                "tar": _unpack_tar,
+                "gzip": _unpack_tar,
+                "deb": _unpack_deb,
+                "rpm": _unpack_rpm,
+                "msi_ole2": _unpack_msi_ole2,
+                "nsis": _unpack_nsis,
+                "innosetup": _unpack_innosetup,
             }
             if fmt in handlers:
                 extracted = handlers[fmt](snapshot, stage, max_files=max_files,
@@ -794,7 +938,7 @@ def unpack_recursive_tree(
             visited_hashes.add(ih)
 
             sub_fmt = detect_container_format(item)
-            if sub_fmt in {"asar", "zip", "tar", "gzip", "nsis", "innosetup", "pyinstaller"}:
+            if sub_fmt in {"asar", "zip", "msix", "ipa", "aab", "tar", "gzip", "deb", "rpm", "msi_ole2", "nsis", "innosetup", "pyinstaller"}:
                 sub_out = item.parent / f"{item.name}.unpacked"
                 if not sub_out.exists():
                     sub_rep = unpack_container(
