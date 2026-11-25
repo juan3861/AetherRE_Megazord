@@ -32,27 +32,41 @@ def synthesize_branch_inputs_angr(
     max_states: int = 64,
     max_steps: int = 80,
     sysv_abi: bool = False,
+    image_bytes: Optional[bytes] = None,
 ) -> Dict[str, Any]:
-    """Runs bounded symbolic exploration via angr to synthesize concrete inputs covering discovered paths."""
-    if not code_bytes:
+    """Runs bounded symbolic exploration via angr across x86/x64/ARM32/ARM64/MIPS/RISC-V to synthesize branch inputs."""
+    if not code_bytes and not image_bytes:
         return {"schema": SCHEMA, "status": "empty_code", "inputs": [], "states_explored": 0}
 
-    arch_map = {"x86_64": "amd64", "amd64": "amd64", "x86_32": "x86", "aarch64": "aarch64"}
+    arch_map = {
+        "x86_64": "amd64", "amd64": "amd64",
+        "x86_32": "x86", "x86": "x86",
+        "aarch64": "aarch64", "arm64": "aarch64",
+        "arm32": "armel", "armel": "armel",
+        "mips32": "mipsel", "mipsel": "mipsel",
+        "riscv64": "riscv64",
+    }
     angr_arch = arch_map.get(arch, "amd64")
 
-    proj = angr.Project(
-        io.BytesIO(code_bytes),
-        main_opts={"backend": "blob", "arch": angr_arch, "base_addr": base_addr, "entry_point": base_addr},
-        auto_load_libs=False,
-    )
+    if image_bytes and (image_bytes.startswith(b"\x7fELF") or image_bytes.startswith(b"MZ")):
+        proj = angr.Project(io.BytesIO(image_bytes), auto_load_libs=False)
+        entry_va = proj.entry if proj.entry else base_addr
+    else:
+        proj = angr.Project(
+            io.BytesIO(code_bytes),
+            main_opts={"backend": "blob", "arch": angr_arch, "base_addr": base_addr, "entry_point": base_addr},
+            auto_load_libs=False,
+        )
+        entry_va = base_addr
 
-    arg0 = claripy.BVS("arg0", 64)
-    arg1 = claripy.BVS("arg1", 64)
-    arg2 = claripy.BVS("arg2", 64)
-    arg3 = claripy.BVS("arg3", 64)
+    width = 32 if angr_arch in ("x86", "armel", "mipsel") else 64
+    arg0 = claripy.BVS("arg0", width)
+    arg1 = claripy.BVS("arg1", width)
+    arg2 = claripy.BVS("arg2", width)
+    arg3 = claripy.BVS("arg3", width)
 
     init_state = proj.factory.blank_state(
-        addr=base_addr,
+        addr=entry_va,
         add_options={angr.options.ZERO_FILL_UNCONSTRAINED_MEMORY, angr.options.ZERO_FILL_UNCONSTRAINED_REGISTERS},
     )
     _RET_SENTINEL = 0xDEAD0000
@@ -63,10 +77,27 @@ def synthesize_branch_inputs_angr(
             init_state.regs.rcx, init_state.regs.rdx, init_state.regs.r8, init_state.regs.r9 = arg0, arg1, arg2, arg3
         init_state.regs.rsp = 0x7FFF0000
         init_state.memory.store(init_state.regs.rsp, claripy.BVV(_RET_SENTINEL, 64), endness=proj.arch.memory_endness)
+    elif angr_arch == "x86":
+        init_state.regs.esp = 0x7FFF0000
+        init_state.memory.store(0x7FFF0000, claripy.BVV(_RET_SENTINEL, 32), endness=proj.arch.memory_endness)
+        for off_idx, a_sym in enumerate((arg0, arg1, arg2, arg3), start=1):
+            init_state.memory.store(0x7FFF0000 + off_idx * 4, a_sym, endness=proj.arch.memory_endness)
     elif angr_arch == "aarch64":
         init_state.regs.x0, init_state.regs.x1, init_state.regs.x2, init_state.regs.x3 = arg0, arg1, arg2, arg3
         init_state.regs.sp = 0x7FFF0000
         init_state.regs.x30 = _RET_SENTINEL
+    elif angr_arch == "armel":
+        init_state.regs.r0, init_state.regs.r1, init_state.regs.r2, init_state.regs.r3 = arg0, arg1, arg2, arg3
+        init_state.regs.sp = 0x7FFF0000
+        init_state.regs.lr = _RET_SENTINEL
+    elif angr_arch == "mipsel":
+        init_state.regs.a0, init_state.regs.a1, init_state.regs.a2, init_state.regs.a3 = arg0, arg1, arg2, arg3
+        init_state.regs.sp = 0x7FFF0000
+        init_state.regs.ra = _RET_SENTINEL
+    elif angr_arch == "riscv64":
+        init_state.regs.a0, init_state.regs.a1, init_state.regs.a2, init_state.regs.a3 = arg0, arg1, arg2, arg3
+        init_state.regs.sp = 0x7FFF0000
+        init_state.regs.ra = _RET_SENTINEL
 
     simgr = proj.factory.simulation_manager(init_state)
     finished_states: List[Any] = []

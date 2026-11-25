@@ -25,6 +25,7 @@ from aether_re.ir_optimizer import (
     _parse_int_const,
     _subst_vars,
 )
+from aether_re.mba_synthesizer import eval_c_expr_to_z3, simplify_mba_expr
 from aether_re.smt_solver import _c_expr_to_smt_expr
 
 SCHEMA = "re-megazord-cff-devirtualizer.v1"
@@ -77,7 +78,7 @@ def _extract_state_cmp(cond: str) -> Optional[Tuple[str, int]]:
             if rhs_val is not None:
                 try:
                     env: Dict[str, z3.BitVecRef] = {}
-                    lhs_bv = _c_expr_to_smt_expr(lhs_s.strip(), env)
+                    lhs_bv = eval_c_expr_to_z3(lhs_s.strip(), env, bitwidth=64)
                     slv = z3.Solver()
                     slv.set("timeout", 120)
                     slv.add(lhs_bv == z3.BitVecVal(rhs_val & 0xFFFFFFFFFFFFFFFF, 64))
@@ -103,7 +104,7 @@ def _eval_bv64_expr(expr: str, known_vals: Dict[str, int], timeout_ms: int = 120
         return lit2 & 0xFFFFFFFFFFFFFFFF
     try:
         env: Dict[str, z3.BitVecRef] = {}
-        bv = _c_expr_to_smt_expr(expr_sub, env)
+        bv = eval_c_expr_to_z3(expr_sub, env, bitwidth=64)
         if not env:
             slv = z3.Solver()
             slv.set("timeout", timeout_ms)
@@ -157,13 +158,25 @@ def unflatten_cff_function(
 
         cur_name: Optional[str] = root_blk.name
         seen_cascade: Set[str] = set()
+        cascade_env: Dict[str, str] = {}
         while cur_name and cur_name not in seen_cascade:
             seen_cascade.add(cur_name)
             cb = blocks[name_to_idx[cur_name]]
             if cb.stmts:
-                break
+                if len(cb.stmts) > 4:
+                    break
+                all_temp_assigns = True
+                for st in cb.stmts:
+                    m_st = _ASSIGN_RE.match(st.strip())
+                    if not m_st:
+                        all_temp_assigns = False
+                        break
+                    cascade_env[m_st.group(1)] = _subst_vars(m_st.group(2).strip(), cascade_env)
+                if not all_temp_assigns:
+                    break
             if cb.term_kind == "cbranch":
-                cmp_res = _extract_state_cmp(cb.term_cond)
+                eff_cond = _subst_vars(cb.term_cond, cascade_env) if cascade_env else cb.term_cond
+                cmp_res = _extract_state_cmp(eff_cond)
                 if cmp_res is None:
                     break
                 sv_name, sv_val = cmp_res
@@ -201,6 +214,12 @@ def unflatten_cff_function(
                 continue
             pb = blocks[name_to_idx[pred_name]]
             known: Dict[str, int] = {}
+            if pb.name == blocks[0].name:
+                for hl in header_lines:
+                    for m_init in re.finditer(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(-?(?:0[xX][0-9a-fA-F]+|\d+))\b", hl):
+                        iv = _parse_int_const(m_init.group(2))
+                        if iv is not None:
+                            known[m_init.group(1)] = iv & 0xFFFFFFFFFFFFFFFF
             cond_branch: Optional[Tuple[str, int, int]] = None
             new_stmts: List[str] = []
 
@@ -291,6 +310,11 @@ def unflatten_cff_function(
             tag = "switch case" if b.pinned_label else "bb"
             out_lines.append(f"{b.label}: ; /* {tag} */")
         for st in b.stmts:
+            m_as = _ASSIGN_RE.match(st.strip())
+            if m_as and any(op in m_as.group(2) for op in ("^", "&", "|", "+", "*")) and "(" in m_as.group(2):
+                mba_r = simplify_mba_expr(m_as.group(2))
+                if mba_r.get("proven") and len(mba_r["simplified"]) < len(m_as.group(2)):
+                    st = f"{m_as.group(1)} = {mba_r['simplified']}"
             out_lines.append(f"    {st};" if not st.endswith((";", "}")) else f"    {st}")
         if b.term_kind == "return":
             out_lines.append(f"    return {b.term_ret};")

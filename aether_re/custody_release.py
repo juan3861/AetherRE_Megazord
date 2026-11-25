@@ -8,6 +8,7 @@ trying to infer whether a value is actually sensitive.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import os
 import re
@@ -152,7 +153,17 @@ def _canonical_sha256(value: Any) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
-def capture_custody_snapshot(root: Path, output_dir: Path) -> dict[str, Any]:
+def _canonical_sha512(value: Any) -> str:
+    payload = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha512(payload).hexdigest()
+
+
+def capture_custody_snapshot(
+    root: Path,
+    output_dir: Path,
+    *,
+    signing_key: bytes | None = None,
+) -> dict[str, Any]:
     """Create a hash manifest in a new external directory without copying inputs.
 
     The caller must select a non-existent output directory outside ``root``.  This
@@ -219,7 +230,15 @@ def capture_custody_snapshot(root: Path, output_dir: Path) -> dict[str, Any]:
             "arquivos excluídos são apenas registrados; nenhum arquivo de origem é removido",
         ],
     }
-    report["inventory_sha256"] = _canonical_sha256({"files": files, "excluded": excluded, "git": git})
+    inventory_payload = {"files": files, "excluded": excluded, "git": git}
+    report["inventory_sha256"] = _canonical_sha256(inventory_payload)
+    report["inventory_sha512"] = _canonical_sha512(inventory_payload)
+    if signing_key is not None:
+        canonical = json.dumps(inventory_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        report["attestation"] = {
+            "algorithm": "HMAC-SHA512",
+            "signature_hex": hmac.new(signing_key, canonical, hashlib.sha512).hexdigest(),
+        }
     output_dir.mkdir(parents=True, exist_ok=False)
     destination = output_dir / MANIFEST_NAME
     try:
@@ -237,5 +256,60 @@ def capture_custody_snapshot(root: Path, output_dir: Path) -> dict[str, Any]:
             pass
         raise
     return report
+
+
+def verify_custody_snapshot(
+    manifest_path: Path | str,
+    *,
+    signing_key: bytes | None = None,
+    verify_files_on_disk: bool = True,
+) -> dict[str, Any]:
+    """Verify integrity, SHA-256/SHA-512 canonical digests, and optional HMAC-SHA512 attestation."""
+    mp = Path(manifest_path)
+    if not mp.is_file():
+        raise FileNotFoundError(f"Custody manifest not found: {mp}")
+    data = json.loads(mp.read_text(encoding="utf-8"))
+    inventory_payload = {
+        "files": data.get("files", []),
+        "excluded": data.get("excluded", []),
+        "git": data.get("git", {}),
+    }
+    expected_256 = _canonical_sha256(inventory_payload)
+    expected_512 = _canonical_sha512(inventory_payload)
+    sha256_ok = data.get("inventory_sha256") == expected_256
+    sha512_ok = (data.get("inventory_sha512") is None) or (data.get("inventory_sha512") == expected_512)
+
+    hmac_ok: bool | None = None
+    att = data.get("attestation")
+    if signing_key is not None and isinstance(att, dict):
+        canonical = json.dumps(inventory_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        expected_sig = hmac.new(signing_key, canonical, hashlib.sha512).hexdigest()
+        hmac_ok = hmac.compare_digest(expected_sig, str(att.get("signature_hex", "")))
+
+    tampered_files: list[str] = []
+    missing_files: list[str] = []
+    if verify_files_on_disk and data.get("source_root"):
+        root = Path(data["source_root"])
+        for entry in data.get("files", []):
+            fp = root / entry["path"]
+            if not fp.is_file():
+                missing_files.append(entry["path"])
+                continue
+            digest, size = _stable_sha256(fp)
+            if digest != entry.get("sha256") or size != entry.get("size"):
+                tampered_files.append(entry["path"])
+
+    verified = bool(sha256_ok and sha512_ok and (hmac_ok is not False) and not tampered_files and not missing_files)
+    return {
+        "schema": "custody-verify.v1",
+        "manifest_path": str(mp.resolve()),
+        "verified": verified,
+        "inventory_sha256_ok": sha256_ok,
+        "inventory_sha512_ok": sha512_ok,
+        "hmac_attestation_ok": hmac_ok,
+        "file_count_checked": len(data.get("files", [])),
+        "tampered_files": tampered_files,
+        "missing_files": missing_files,
+    }
 
 

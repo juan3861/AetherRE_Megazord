@@ -122,6 +122,84 @@ def _parse_code_signature(blob: bytes, cs_off: int, cs_size: int) -> dict[str, A
     return result
 
 
+def _va_to_file_offset(va: int, segments: list[dict[str, Any]], base_offset: int) -> int | None:
+    for seg in segments:
+        sva = int(seg["vmaddr"], 16)
+        vsz = int(seg.get("vmsize", 0) or 0)
+        foff = int(seg.get("fileoff", 0) or 0)
+        if sva <= va < sva + vsz:
+            return base_offset + foff + (va - sva)
+    return None
+
+
+def _extract_objc_swift_metadata(
+    blob: bytes,
+    base_offset: int,
+    endian: str,
+    is_64: bool,
+    segments: list[dict[str, Any]],
+    sections: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Parses structured Objective-C classes (`__objc_classlist`) and Swift 5 descriptors (`__swift5_types`)."""
+    objc_structured: list[dict[str, Any]] = []
+    swift_descriptors: list[dict[str, Any]] = []
+    ptr_fmt = f"{endian}{'Q' if is_64 else 'I'}"
+
+    sec_by_name = {s["section"]: s for s in sections}
+    cls_sec = sec_by_name.get("__objc_classlist")
+    if cls_sec and is_64 and cls_sec["size"] >= 8:
+        abs_off = base_offset + int(cls_sec["offset"])
+        n_ptrs = min(cls_sec["size"] // 8, 256)
+        for idx in range(n_ptrs):
+            if abs_off + (idx + 1) * 8 > len(blob):
+                break
+            cls_va = struct.unpack_from(ptr_fmt, blob, abs_off + idx * 8)[0] & 0x0000FFFFFFFFFFFF
+            cls_off = _va_to_file_offset(cls_va, segments, base_offset)
+            if cls_off is None or cls_off + 40 > len(blob):
+                continue
+            ro_va = struct.unpack_from(ptr_fmt, blob, cls_off + 32)[0] & 0x00007FFFFFFFFFF8
+            ro_off = _va_to_file_offset(ro_va, segments, base_offset)
+            if ro_off is None or ro_off + 40 > len(blob):
+                continue
+            name_va, methods_va = struct.unpack_from(f"{endian}QQ", blob, ro_off + 24)
+            name_off = _va_to_file_offset(name_va & 0x0000FFFFFFFFFFFF, segments, base_offset)
+            cls_name = _cstr(blob, name_off, 128) if name_off is not None else ""
+            if cls_name:
+                m_cnt = 0
+                if methods_va:
+                    moff = _va_to_file_offset(methods_va & 0x0000FFFFFFFFFFFF, segments, base_offset)
+                    if moff is not None and moff + 8 <= len(blob):
+                        _, m_cnt = struct.unpack_from(f"{endian}II", blob, moff)
+                objc_structured.append({"class_name": cls_name, "vmaddr": hex(cls_va), "method_count": min(int(m_cnt), 4096)})
+
+    sw_sec = sec_by_name.get("__swift5_types")
+    if sw_sec and sw_sec["size"] >= 4:
+        abs_off = base_offset + int(sw_sec["offset"])
+        s_va = int(sw_sec["addr"], 16)
+        n_ents = min(sw_sec["size"] // 4, 256)
+        kind_names = {16: "class", 17: "struct", 18: "enum"}
+        for idx in range(n_ents):
+            if abs_off + (idx + 1) * 4 > len(blob):
+                break
+            rel32 = struct.unpack_from(f"{endian}i", blob, abs_off + idx * 4)[0]
+            desc_va = s_va + idx * 4 + rel32
+            desc_off = _va_to_file_offset(desc_va, segments, base_offset)
+            if desc_off is None or desc_off + 16 > len(blob):
+                continue
+            flags, _parent_rel, name_rel = struct.unpack_from(f"{endian}Iii", blob, desc_off)
+            kind_id = flags & 0x1F
+            name_off = desc_off + 8 + name_rel
+            if 0 <= name_off < len(blob):
+                t_name = _cstr(blob, name_off, 128)
+                if t_name:
+                    swift_descriptors.append({
+                        "name": t_name,
+                        "kind": kind_names.get(kind_id, f"kind_{kind_id}"),
+                        "vmaddr": hex(desc_va),
+                    })
+    return objc_structured, swift_descriptors
+
+
 def _parse_single_macho(blob: bytes, base_offset: int = 0) -> dict[str, Any]:
     if base_offset + 28 > len(blob):
         return {"status": "invalid", "code": "macho_header_truncated"}
@@ -229,6 +307,7 @@ def _parse_single_macho(blob: bytes, base_offset: int = 0) -> dict[str, Any]:
 
         cursor += cmdsize
 
+    objc_structured, swift_descriptors = _extract_objc_swift_metadata(blob, base_offset, endian, is_64, segments, sections)
     return {
         "status": "complete",
         "is_64bit": is_64,
@@ -250,7 +329,9 @@ def _parse_single_macho(blob: bytes, base_offset: int = 0) -> dict[str, Any]:
         "symbols": symbols[:500],
         "objc_classes": objc_classes,
         "objc_methods": objc_methods,
+        "objc_structured_classes": objc_structured,
         "swift_symbols": swift_symbols[:200],
+        "swift_type_descriptors": swift_descriptors,
         "code_signature": code_sig,
     }
 

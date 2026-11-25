@@ -4513,7 +4513,7 @@ def reconstruct_project(
                             any(lo <= tgt_rva < hi for lo, hi in exec_ranges)
                             and tgt_rva not in crt_alloc_map
                             and tgt_rva not in seen_rvas
-                            and internal_helpers_added < 128
+                            and internal_helpers_added < max_internal_subroutines
                         ):
                             seen_rvas.add(tgt_rva)
                             sub_name = f"sub_{tgt_rva:x}"
@@ -5033,6 +5033,17 @@ def reconstruct_project(
         ])
         cmake_content = "\n".join(cmake_lines)
 
+        from aether_re.cxx_eh_rtti import analyze_pe_cxx_eh_and_thunks, annotate_c_with_cxx_eh
+        from aether_re.graph_store import BinaryKnowledgeStore
+        from aether_re.signature_type_bank import merge_type_information
+
+        type_bank_res = merge_type_information(
+            existing_prototypes=report.recovered_prototypes,
+            rva_to_symbol=rva_to_symbol,
+        )
+        report.recovered_prototypes = type_bank_res["prototypes"]
+        cxx_eh_report = analyze_pe_cxx_eh_and_thunks(data)
+
         interproc_structs = propagate_interprocedural_structs(
             records_list,
             struct_res.get("structs", []),
@@ -5048,10 +5059,23 @@ def reconstruct_project(
             function_param_structs=interproc_structs,
             function_prototypes=report.recovered_prototypes,
         )
+        typed_decompiled = annotate_c_with_cxx_eh(typed_decompiled, cxx_eh_report)
         (inc_dir / "reconstructed_api.h").write_text("\n".join(header_lines), encoding="utf-8")
         (src_dir / "reconstructed_project.c").write_text("\n".join(c_source_lines), encoding="utf-8")
         (src_dir / "reconstructed_structured.c").write_text(structured_annotated, encoding="utf-8")
         (src_dir / "reconstructed_typed.c").write_text(typed_decompiled, encoding="utf-8")
+        try:
+            bk = BinaryKnowledgeStore(out_root / "knowledge_graph.sqlite")
+            bk.upsert_functions_batch(sha256, records_list)
+            xref_rows = [
+                (int(r["rva"]), int(crva), "call", int(r["rva"]))
+                for r in records_list
+                for crva in r.get("internal_callees", [])
+            ]
+            bk.upsert_xrefs_batch(sha256, xref_rows)
+            bk.upsert_types_batch(sha256, struct_res.get("structs", []))
+        except Exception:
+            pass
         (src_dir / "llvm_runtime_shim.c").write_text(
             "/* Auto-Generated Runtime Shim for Standalone LLVM O3 COFF Linkage */\n"
             "#define AETHER_RT_LINK\n"

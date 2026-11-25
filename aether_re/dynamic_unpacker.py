@@ -34,6 +34,8 @@ from unicorn.x86_const import (
     UC_X86_REG_EIP,
     UC_X86_REG_ESI,
     UC_X86_REG_ESP,
+    UC_X86_REG_FS_BASE,
+    UC_X86_REG_GS_BASE,
     UC_X86_REG_R8,
     UC_X86_REG_R9,
     UC_X86_REG_RAX,
@@ -57,6 +59,9 @@ _TRAMP_BASE = 0x50000000
 _TRAMP_SIZE = 0x00010000
 _MOD_BASE_START = 0x51000000
 _MOD_STRIDE = 0x00010000
+_TEB_BASE = 0x60000000
+_PEB_BASE = 0x60010000
+_LDR_BASE = 0x60020000
 
 
 def _align_up(val: int, align: int = 0x1000) -> int:
@@ -278,6 +283,29 @@ def unpack_pe_in_sandbox(
     uc.mem_map(_STACK_BASE, _STACK_SIZE, UC_PROT_ALL)
     uc.mem_map(_HEAP_BASE, _HEAP_SIZE, UC_PROT_ALL)
     uc.mem_map(_TRAMP_BASE, _TRAMP_SIZE, UC_PROT_ALL)
+    uc.mem_map(_TEB_BASE, 0x30000, UC_PROT_ALL)
+
+    # Populate clean anti-debug-resistant TEB / PEB / LDR structures
+    if is_64:
+        uc.mem_write(_TEB_BASE + 0x08, struct.pack("<Q", _STACK_BASE + _STACK_SIZE))
+        uc.mem_write(_TEB_BASE + 0x10, struct.pack("<Q", _STACK_BASE))
+        uc.mem_write(_TEB_BASE + 0x30, struct.pack("<Q", _TEB_BASE))
+        uc.mem_write(_TEB_BASE + 0x60, struct.pack("<Q", _PEB_BASE))
+        uc.mem_write(_PEB_BASE + 0x02, b"\x00")  # BeingDebugged = 0
+        uc.mem_write(_PEB_BASE + 0x10, struct.pack("<Q", image_base))
+        uc.mem_write(_PEB_BASE + 0x18, struct.pack("<Q", _LDR_BASE))
+        uc.mem_write(_PEB_BASE + 0xBC, struct.pack("<I", 0))  # NtGlobalFlag = 0
+        uc.reg_write(UC_X86_REG_GS_BASE, _TEB_BASE)
+    else:
+        uc.mem_write(_TEB_BASE + 0x04, struct.pack("<I", _STACK_BASE + _STACK_SIZE))
+        uc.mem_write(_TEB_BASE + 0x08, struct.pack("<I", _STACK_BASE))
+        uc.mem_write(_TEB_BASE + 0x18, struct.pack("<I", _TEB_BASE))
+        uc.mem_write(_TEB_BASE + 0x30, struct.pack("<I", _PEB_BASE))
+        uc.mem_write(_PEB_BASE + 0x02, b"\x00")
+        uc.mem_write(_PEB_BASE + 0x08, struct.pack("<I", image_base))
+        uc.mem_write(_PEB_BASE + 0x0C, struct.pack("<I", _LDR_BASE))
+        uc.mem_write(_PEB_BASE + 0x68, struct.pack("<I", 0))
+        uc.reg_write(UC_X86_REG_FS_BASE, _TEB_BASE)
 
     # Fill trampoline page with RET (0xC3) stubs
     uc.mem_write(_TRAMP_BASE, b"\xC3" * _TRAMP_SIZE)
@@ -426,6 +454,33 @@ def unpack_pe_in_sandbox(
                 ret_val = _register_api(mod, target_api)
                 if (mod, target_api) not in state["resolved_apis"]:
                     state["resolved_apis"].append((mod, target_api))
+            elif api_low == "ntallocatevirtualmemory":
+                ptr_out = a1
+                sz_ptr = a3
+                sz_req = 0x1000
+                if sz_ptr:
+                    try:
+                        sz_req = struct.unpack("<Q" if is_64 else "<I", bytes(uc_inst.mem_read(sz_ptr, 8 if is_64 else 4)))[0]
+                    except Exception:
+                        sz_req = 0x1000
+                alloc_addr = _alloc(int(sz_req or 0x1000))
+                if ptr_out:
+                    try:
+                        uc_inst.mem_write(ptr_out, struct.pack("<Q" if is_64 else "<I", alloc_addr))
+                    except Exception:
+                        pass
+                ret_val = 0 if alloc_addr else 0xC0000017
+            elif api_low in ("isdebuggerpresent", "ntqueryinformationprocess"):
+                ret_val = 0
+            elif api_low == "checkremotedebuggerpresent":
+                if a1:
+                    try:
+                        uc_inst.mem_write(a1, struct.pack("<I", 0))
+                    except Exception:
+                        pass
+                ret_val = 1
+            elif api_low in ("gettickcount", "gettickcount64"):
+                ret_val = 1000 + state["insn_count"]
             elif api_low in ("exitprocess", "ntterminateprocess"):
                 state["exit_called"] = True
                 uc_inst.emu_stop()
@@ -485,6 +540,26 @@ def unpack_pe_in_sandbox(
         uc.mem_write(sp_init, struct.pack("<IIII", exit_sentinel, image_base, 1, 0))
         uc.reg_write(UC_X86_REG_ESP, sp_init)
         uc.reg_write(UC_X86_REG_EBP, sp_init)
+
+    # Execute PE TLS Callbacks (if any) before EntryPoint
+    tls_callbacks_executed = 0
+    if hasattr(pe, "DIRECTORY_ENTRY_TLS") and getattr(pe.DIRECTORY_ENTRY_TLS, "struct", None) is not None:
+        cb_va = int(getattr(pe.DIRECTORY_ENTRY_TLS.struct, "AddressOfCallBacks", 0) or 0)
+        ptr_fmt = "<Q" if is_64 else "<I"
+        ptr_sz = 8 if is_64 else 4
+        if cb_va >= image_base and cb_va < image_base + image_size:
+            for ci in range(8):
+                try:
+                    fn_va = struct.unpack(ptr_fmt, bytes(uc.mem_read(cb_va + ci * ptr_sz, ptr_sz)))[0]
+                except Exception:
+                    break
+                if fn_va == 0 or not (image_base <= fn_va < image_base + image_size):
+                    break
+                try:
+                    uc.emu_start(fn_va, _TRAMP_BASE, count=min(25_000, max_instructions // 4))
+                    tls_callbacks_executed += 1
+                except Exception:
+                    break
 
     start_ip = image_base + entry_rva
     end_ip = _TRAMP_BASE
@@ -546,6 +621,8 @@ def unpack_pe_in_sandbox(
         "original_ep_rva": hex(entry_rva),
         "oep_rva": hex(oep_rva),
         "oep_detected": oep_va is not None or embedded_heap_pe is not None,
+        "tls_callbacks_executed": tls_callbacks_executed,
+        "peb_address": hex(_PEB_BASE),
         "instructions_executed": state["insn_count"],
         "memory_write_events": state["total_writes"],
         "written_pages_count": len(state["written_pages"]),
@@ -578,3 +655,94 @@ def unpack_file_in_sandbox(
         max_instructions=max_instructions,
         allow_live_process_trace=allow_live_process_trace,
     )
+
+
+def unpack_elf_in_sandbox(
+    elf_bytes: bytes,
+    *,
+    max_instructions: int = 250_000,
+) -> Dict[str, Any]:
+    """Emulates a self-unpacking ELF32/ELF64 (x86/x86_64) binary in Unicorn to detect OEP & dump unpacked bytes."""
+    if len(elf_bytes) < 52 or elf_bytes[:4] != b"\x7fELF":
+        return {"schema": SCHEMA, "status": "invalid", "code": "not_elf"}
+    import io
+    from elftools.elf.elffile import ELFFile
+
+    ef = ELFFile(io.BytesIO(elf_bytes))
+    is_64 = ef.elfclass == 64
+    em = str(ef.header["e_machine"])
+    if "X86_64" not in em and "386" not in em:
+        return {"schema": SCHEMA, "status": "unsupported_arch", "machine": em}
+
+    uc = Uc(UC_ARCH_X86, UC_MODE_64 if is_64 else UC_MODE_32)
+    entry_va = int(ef.header["e_entry"])
+    mapped_ranges: List[Tuple[int, int]] = []
+    min_va = None
+    max_va = 0
+    for seg in ef.iter_segments():
+        if seg["p_type"] != "PT_LOAD":
+            continue
+        va = int(seg["p_vaddr"])
+        msz = max(int(seg["p_memsz"]), int(seg["p_filesz"]), 0x1000)
+        lo = va & ~0xFFF
+        hi = _align_up(va + msz, 0x1000)
+        uc.mem_map(lo, hi - lo, UC_PROT_ALL)
+        data = seg.data()
+        if data:
+            uc.mem_write(va, data)
+        mapped_ranges.append((lo, hi))
+        min_va = lo if min_va is None else min(min_va, lo)
+        max_va = max(max_va, hi)
+
+    if not mapped_ranges or min_va is None:
+        return {"schema": SCHEMA, "status": "invalid", "code": "no_pt_load"}
+
+    uc.mem_map(_STACK_BASE, _STACK_SIZE, UC_PROT_ALL)
+    uc.mem_map(_TRAMP_BASE, _TRAMP_SIZE, UC_PROT_ALL)
+    uc.mem_write(_TRAMP_BASE, b"\xC3" * _TRAMP_SIZE)
+    sp = _STACK_BASE + _STACK_SIZE - 0x2000
+    uc.mem_write(sp, struct.pack("<Q" if is_64 else "<I", _TRAMP_BASE))
+    uc.reg_write(UC_X86_REG_RSP if is_64 else UC_X86_REG_ESP, sp)
+
+    st_elf: Dict[str, Any] = {"writes": 0, "written_pages": set(), "oep_va": None, "insn_count": 0}
+
+    def _on_w(u: Uc, acc: int, addr: int, sz: int, val: int, ud: Any) -> None:
+        if _STACK_BASE <= addr < _STACK_BASE + _STACK_SIZE:
+            return
+        st_elf["writes"] += 1
+        st_elf["written_pages"].add(addr & ~0xFFF)
+
+    def _on_c(u: Uc, addr: int, sz: int, ud: Any) -> None:
+        st_elf["insn_count"] += 1
+        if st_elf["insn_count"] >= max_instructions or addr == _TRAMP_BASE:
+            u.emu_stop()
+            return
+        if st_elf["writes"] >= 1 and (addr & ~0xFFF) in st_elf["written_pages"] and abs(addr - entry_va) > 16:
+            st_elf["oep_va"] = addr
+            u.emu_stop()
+
+    uc.hook_add(UC_HOOK_MEM_WRITE, _on_w)
+    uc.hook_add(UC_HOOK_CODE, _on_c)
+    try:
+        uc.emu_start(entry_va, _TRAMP_BASE, count=max_instructions)
+    except Exception:
+        pass
+
+    oep_va = st_elf["oep_va"]
+    dumped_region = b""
+    if oep_va is not None:
+        for lo, hi in mapped_ranges:
+            if lo <= oep_va < hi:
+                dumped_region = bytes(uc.mem_read(lo, min(hi - lo, 1024 * 1024)))
+                break
+    return {
+        "schema": SCHEMA,
+        "status": "unpacked" if (oep_va is not None or st_elf["writes"] > 0) else "no_unpack_detected",
+        "architecture": "elf64_x86_64" if is_64 else "elf32_x86",
+        "original_ep_va": hex(entry_va),
+        "oep_va": hex(oep_va) if oep_va is not None else None,
+        "oep_detected": oep_va is not None,
+        "memory_write_events": st_elf["writes"],
+        "unpacked_region_sha256": hashlib.sha256(dumped_region).hexdigest() if dumped_region else None,
+        "unpacked_sample": dumped_region[:64].hex() if dumped_region else "",
+    }

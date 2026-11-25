@@ -304,3 +304,339 @@ def get_node(db_path: Path, node_id: str) -> dict[str, Any]:
 def write_graph_report(report: dict[str, Any], path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(report, indent=2, ensure_ascii=False, sort_keys=True) + "\n", encoding="utf-8", newline="\n")
+
+
+# ---------------------------------------------------------------------------
+# Pillar 1 (v9.0): Persistent SQLite WAL Binary Knowledge Store (50k+ Fns)
+# ---------------------------------------------------------------------------
+
+class BinaryKnowledgeStore:
+    """High-throughput incremental SQLite WAL graph store for multi-megabyte binaries.
+
+    Stores per-binary CFG functions, xrefs, recovered types/structs, and
+    content-addressed IR/C decompilation cache without altering existing
+    `graph-store.v1` report behavior.
+    """
+
+    def __init__(self, db_path: str | Path) -> None:
+        resolved, errs = _validate_db_path(Path(db_path), create_parent=True)
+        if errs or resolved is None:
+            raise ValueError(f"Invalid knowledge store path: {errs}")
+        self.db_path = resolved
+        self._init_schema()
+
+    def _open(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(str(self.db_path), timeout=30.0)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute("PRAGMA temp_store=MEMORY")
+        conn.execute("PRAGMA foreign_keys=ON")
+        return conn
+
+    def _init_schema(self) -> None:
+        conn = self._open()
+        try:
+            conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS bk_binaries (
+                    binary_sha256 TEXT PRIMARY KEY,
+                    source_path TEXT NOT NULL,
+                    project_kind TEXT NOT NULL,
+                    architecture TEXT NOT NULL,
+                    function_count INTEGER NOT NULL DEFAULT 0,
+                    overall_congruence_pct REAL NOT NULL DEFAULT 0.0,
+                    metadata_json TEXT NOT NULL,
+                    updated_at REAL NOT NULL DEFAULT (unixepoch('now'))
+                );
+                CREATE TABLE IF NOT EXISTS bk_functions (
+                    binary_sha256 TEXT NOT NULL,
+                    rva INTEGER NOT NULL,
+                    fn_name TEXT NOT NULL,
+                    c_ident TEXT NOT NULL,
+                    ordinal INTEGER NOT NULL DEFAULT 0,
+                    is_exported INTEGER NOT NULL DEFAULT 0,
+                    own_lifted INTEGER NOT NULL DEFAULT 0,
+                    code_sha256 TEXT NOT NULL DEFAULT '',
+                    prototype_json TEXT NOT NULL DEFAULT '{}',
+                    c_code TEXT NOT NULL DEFAULT '',
+                    typed_c_code TEXT NOT NULL DEFAULT '',
+                    PRIMARY KEY (binary_sha256, rva)
+                );
+                CREATE INDEX IF NOT EXISTS idx_bk_fn_name ON bk_functions(binary_sha256, fn_name);
+                CREATE TABLE IF NOT EXISTS bk_xrefs (
+                    binary_sha256 TEXT NOT NULL,
+                    src_rva INTEGER NOT NULL,
+                    dst_rva INTEGER NOT NULL,
+                    kind TEXT NOT NULL,
+                    site_rva INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (binary_sha256, src_rva, dst_rva, kind, site_rva)
+                );
+                CREATE INDEX IF NOT EXISTS idx_bk_xrefs_dst ON bk_xrefs(binary_sha256, dst_rva);
+                CREATE TABLE IF NOT EXISTS bk_types (
+                    binary_sha256 TEXT NOT NULL,
+                    type_name TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    size_bytes INTEGER NOT NULL DEFAULT 0,
+                    source TEXT NOT NULL DEFAULT 'inferred',
+                    fields_json TEXT NOT NULL DEFAULT '{}',
+                    PRIMARY KEY (binary_sha256, type_name)
+                );
+                CREATE TABLE IF NOT EXISTS bk_ir_cache (
+                    code_sha256 TEXT PRIMARY KEY,
+                    arch TEXT NOT NULL,
+                    lifted_c TEXT NOT NULL,
+                    structured_c TEXT NOT NULL DEFAULT '',
+                    llvm_ir TEXT NOT NULL DEFAULT ''
+                );
+                """
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def upsert_binary(
+        self,
+        binary_sha256: str,
+        *,
+        source_path: str,
+        project_kind: str,
+        architecture: str,
+        function_count: int = 0,
+        overall_congruence_pct: float = 0.0,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        conn = self._open()
+        try:
+            with conn:
+                conn.execute(
+                    """
+                    INSERT INTO bk_binaries(
+                        binary_sha256, source_path, project_kind, architecture,
+                        function_count, overall_congruence_pct, metadata_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(binary_sha256) DO UPDATE SET
+                        source_path=excluded.source_path,
+                        project_kind=excluded.project_kind,
+                        architecture=excluded.architecture,
+                        function_count=excluded.function_count,
+                        overall_congruence_pct=excluded.overall_congruence_pct,
+                        metadata_json=excluded.metadata_json,
+                        updated_at=unixepoch('now')
+                    """,
+                    (
+                        binary_sha256,
+                        source_path,
+                        project_kind,
+                        architecture,
+                        int(function_count),
+                        float(overall_congruence_pct),
+                        _canonical(metadata or {}),
+                    ),
+                )
+        finally:
+            conn.close()
+
+    def upsert_functions_batch(self, binary_sha256: str, records: list[dict[str, Any]]) -> int:
+        if not records:
+            return 0
+        rows = []
+        for rec in records:
+            raw_bytes = rec.get("code_slice", b"")
+            c_sha = (
+                hashlib.sha256(raw_bytes).hexdigest()
+                if isinstance(raw_bytes, (bytes, bytearray)) and raw_bytes
+                else str(rec.get("code_sha256", ""))
+            )
+            rows.append(
+                (
+                    binary_sha256,
+                    int(rec.get("rva", 0)),
+                    str(rec.get("fn_name", "")),
+                    str(rec.get("c_ident", "")),
+                    int(rec.get("ordinal", 0)),
+                    1 if rec.get("is_exported") else 0,
+                    1 if rec.get("own_lifted") else 0,
+                    c_sha,
+                    _canonical(rec.get("prototype", {})),
+                    str(rec.get("c_code", "")),
+                    str(rec.get("typed_c_code", "")),
+                )
+            )
+        conn = self._open()
+        try:
+            with conn:
+                conn.executemany(
+                    """
+                    INSERT INTO bk_functions(
+                        binary_sha256, rva, fn_name, c_ident, ordinal, is_exported,
+                        own_lifted, code_sha256, prototype_json, c_code, typed_c_code
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(binary_sha256, rva) DO UPDATE SET
+                        fn_name=excluded.fn_name,
+                        c_ident=excluded.c_ident,
+                        ordinal=excluded.ordinal,
+                        is_exported=excluded.is_exported,
+                        own_lifted=excluded.own_lifted,
+                        code_sha256=excluded.code_sha256,
+                        prototype_json=excluded.prototype_json,
+                        c_code=excluded.c_code,
+                        typed_c_code=excluded.typed_c_code
+                    """,
+                    rows,
+                )
+            return len(rows)
+        finally:
+            conn.close()
+
+    def upsert_xrefs_batch(self, binary_sha256: str, xrefs: list[tuple[int, int, str, int]]) -> int:
+        if not xrefs:
+            return 0
+        rows = [(binary_sha256, int(s), int(d), str(k), int(site)) for (s, d, k, site) in xrefs]
+        conn = self._open()
+        try:
+            with conn:
+                conn.executemany(
+                    "INSERT OR IGNORE INTO bk_xrefs(binary_sha256, src_rva, dst_rva, kind, site_rva) VALUES (?, ?, ?, ?, ?)",
+                    rows,
+                )
+            return len(rows)
+        finally:
+            conn.close()
+
+    def upsert_types_batch(self, binary_sha256: str, types_list: list[dict[str, Any]]) -> int:
+        if not types_list:
+            return 0
+        rows = [
+            (
+                binary_sha256,
+                str(t.get("name", "")),
+                str(t.get("kind", "struct")),
+                int(t.get("size_bytes", 0)),
+                str(t.get("source", "inferred")),
+                _canonical(t.get("fields", {})),
+            )
+            for t in types_list
+            if t.get("name")
+        ]
+        if not rows:
+            return 0
+        conn = self._open()
+        try:
+            with conn:
+                conn.executemany(
+                    """
+                    INSERT INTO bk_types(binary_sha256, type_name, kind, size_bytes, source, fields_json)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(binary_sha256, type_name) DO UPDATE SET
+                        kind=excluded.kind,
+                        size_bytes=excluded.size_bytes,
+                        source=excluded.source,
+                        fields_json=excluded.fields_json
+                    """,
+                    rows,
+                )
+            return len(rows)
+        finally:
+            conn.close()
+
+    def put_ir_cache(self, code_sha256: str, *, arch: str, lifted_c: str, structured_c: str = "", llvm_ir: str = "") -> None:
+        if not code_sha256:
+            return
+        conn = self._open()
+        try:
+            with conn:
+                conn.execute(
+                    """
+                    INSERT INTO bk_ir_cache(code_sha256, arch, lifted_c, structured_c, llvm_ir)
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(code_sha256) DO UPDATE SET
+                        arch=excluded.arch,
+                        lifted_c=excluded.lifted_c,
+                        structured_c=CASE WHEN excluded.structured_c != '' THEN excluded.structured_c ELSE bk_ir_cache.structured_c END,
+                        llvm_ir=CASE WHEN excluded.llvm_ir != '' THEN excluded.llvm_ir ELSE bk_ir_cache.llvm_ir END
+                    """,
+                    (code_sha256, arch, lifted_c, structured_c, llvm_ir),
+                )
+        finally:
+            conn.close()
+
+    def get_ir_cache(self, code_sha256: str) -> dict[str, Any] | None:
+        conn = self._open()
+        try:
+            row = conn.execute(
+                "SELECT code_sha256, arch, lifted_c, structured_c, llvm_ir FROM bk_ir_cache WHERE code_sha256 = ?",
+                (code_sha256,),
+            ).fetchone()
+            return dict(row) if row is not None else None
+        finally:
+            conn.close()
+
+    def query_functions(
+        self,
+        binary_sha256: str,
+        *,
+        name_like: str | None = None,
+        only_exported: bool = False,
+        limit: int = 1000,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        clauses = ["binary_sha256 = ?"]
+        params: list[Any] = [binary_sha256]
+        if only_exported:
+            clauses.append("is_exported = 1")
+        if name_like:
+            clauses.append("(fn_name LIKE ? OR c_ident LIKE ?)")
+            pat = f"%{name_like}%"
+            params.extend([pat, pat])
+        params.extend([int(limit), int(offset)])
+        conn = self._open()
+        try:
+            rows = conn.execute(
+                f"SELECT rva, fn_name, c_ident, ordinal, is_exported, own_lifted, code_sha256, prototype_json, c_code, typed_c_code "
+                f"FROM bk_functions WHERE {' AND '.join(clauses)} ORDER BY rva ASC LIMIT ? OFFSET ?",
+                params,
+            ).fetchall()
+            out = []
+            for r in rows:
+                d = dict(r)
+                d["prototype"] = json.loads(d.pop("prototype_json") or "{}")
+                out.append(d)
+            return out
+        finally:
+            conn.close()
+
+    def query_callers(self, binary_sha256: str, dst_rva: int) -> list[dict[str, Any]]:
+        conn = self._open()
+        try:
+            rows = conn.execute(
+                """
+                SELECT x.src_rva, x.kind, x.site_rva, f.fn_name, f.c_ident
+                FROM bk_xrefs x
+                LEFT JOIN bk_functions f ON f.binary_sha256 = x.binary_sha256 AND f.rva = x.src_rva
+                WHERE x.binary_sha256 = ? AND x.dst_rva = ?
+                ORDER BY x.src_rva ASC
+                """,
+                (binary_sha256, int(dst_rva)),
+            ).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+    def get_binary_summary(self, binary_sha256: str) -> dict[str, Any] | None:
+        conn = self._open()
+        try:
+            b = conn.execute("SELECT * FROM bk_binaries WHERE binary_sha256 = ?", (binary_sha256,)).fetchone()
+            if b is None:
+                return None
+            fn_cnt = int(conn.execute("SELECT COUNT(*) FROM bk_functions WHERE binary_sha256 = ?", (binary_sha256,)).fetchone()[0])
+            xr_cnt = int(conn.execute("SELECT COUNT(*) FROM bk_xrefs WHERE binary_sha256 = ?", (binary_sha256,)).fetchone()[0])
+            ty_cnt = int(conn.execute("SELECT COUNT(*) FROM bk_types WHERE binary_sha256 = ?", (binary_sha256,)).fetchone()[0])
+            d = dict(b)
+            d["metadata"] = json.loads(d.pop("metadata_json") or "{}")
+            d["stored_functions"] = fn_cnt
+            d["stored_xrefs"] = xr_cnt
+            d["stored_types"] = ty_cnt
+            return d
+        finally:
+            conn.close()

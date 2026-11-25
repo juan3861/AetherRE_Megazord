@@ -376,3 +376,42 @@ def diff_binaries(
             "heurística de matching de funções foca em chamadas e símbolos sem executar os alvos",
         ],
     }
+
+
+def audit_1day_patch_semantics(unpatched_c: str, patched_c: str) -> dict[str, Any]:
+    """Semantic AST/guard diff identifying newly added security bounds checks (1-day CVE patch detection)."""
+    import re
+    from aether_re.exploit_prover import _extract_c_functions_blocks
+
+    f_old = _extract_c_functions_blocks(unpatched_c)
+    f_new = _extract_c_functions_blocks(patched_c)
+
+    guard_re = re.compile(r"^\s*if\s*\(([^)]+)\)")
+    alerts: list[dict[str, Any]] = []
+    for fn_nm in sorted(set(f_old.keys()) & set(f_new.keys())):
+        _, lines_old = f_old[fn_nm]
+        _, lines_new = f_new[fn_nm]
+        g_old = {guard_re.match(ln.strip()).group(1).strip() for ln in lines_old if guard_re.match(ln.strip())}
+        g_new = {guard_re.match(ln.strip()).group(1).strip() for ln in lines_new if guard_re.match(ln.strip())}
+        added_guards = sorted(g_new - g_old)
+        removed_guards = sorted(g_old - g_new)
+        sec_indicators = [
+            g for g in added_guards
+            if any(k in g for k in (">", "<", "==", "!=", "SIZE_MAX", "NULL", "0", "max", "len", "size"))
+        ]
+        if added_guards:
+            alerts.append({
+                "function": fn_nm,
+                "added_guards": added_guards,
+                "removed_guards": removed_guards,
+                "security_bounds_added": sec_indicators,
+                "is_likely_security_patch": bool(sec_indicators),
+            })
+
+    return {
+        "schema": SCHEMA,
+        "status": "complete",
+        "functions_compared": len(set(f_old.keys()) & set(f_new.keys())),
+        "patch_candidates_count": len(alerts),
+        "alerts": alerts,
+    }

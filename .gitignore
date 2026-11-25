@@ -17,6 +17,7 @@ tools/*
 !tools/benchmark_cpp_poly_ground_truth.py
 !tools/benchmark_ground_truth_twin_reconstruction.py
 !tools/benchmark_multi_poly_ground_truth.py
+!tools/benchmark_world_sota_corpus.py
 !tools/build_discovery_100_catalog.py
 !tools/build_component_scorecard.py
 !tools/e2e_full_sota_summit.py

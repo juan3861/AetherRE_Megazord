@@ -83,7 +83,8 @@ def reconstruct_dotnet_project(
             decompile_err = str(exc)[:400]
 
     if not used_ilspy:
-        # Pure-Python BSJB metadata C# skeleton fallback
+        from aether_re.cil_decompiler import decompile_dotnet_ecma335
+
         asm_name = re.sub(r"[^A-Za-z0-9_]", "_", t_path.stem) or "ReconstructedAsm"
         csproj = "\n".join([
             '<Project Sdk="Microsoft.NET.Sdk">',
@@ -96,18 +97,26 @@ def reconstruct_dotnet_project(
             "",
         ])
         (out_root / f"{asm_name}.csproj").write_text(csproj, encoding="utf-8")
-        str_comments = "\n".join(f"// #US: {u!r}" for u in (meta.get("user_strings") or [])[:40])
-        cs_src = "\n".join([
-            f"// Fallback BSJB Metadata Reconstruction ({meta.get('runtime_version')})",
-            str_comments,
-            f"namespace {asm_name};",
-            "public static class RecoveredEntry {",
-            "    public static int Run() => 0;",
-            "}",
-            "",
-        ])
-        (out_root / "RecoveredEntry.cs").write_text(cs_src, encoding="utf-8")
-        generated = [f"{asm_name}.csproj", "RecoveredEntry.cs"]
+        generated = [f"{asm_name}.csproj"]
+
+        cil_res = decompile_dotnet_ecma335(raw, assembly_name=asm_name)
+        if cil_res.get("cs_files"):
+            for cs_fname, cs_src in cil_res["cs_files"].items():
+                (out_root / cs_fname).write_text(cs_src, encoding="utf-8")
+                generated.append(cs_fname)
+        else:
+            str_comments = "\n".join(f"// #US: {u!r}" for u in (meta.get("user_strings") or [])[:40])
+            cs_src = "\n".join([
+                f"// Fallback BSJB Metadata Reconstruction ({meta.get('runtime_version')})",
+                str_comments,
+                f"namespace {asm_name};",
+                "public static class RecoveredEntry {",
+                "    public static int Run() => 0;",
+                "}",
+                "",
+            ])
+            (out_root / "RecoveredEntry.cs").write_text(cs_src, encoding="utf-8")
+            generated.append("RecoveredEntry.cs")
 
     dotnet_build_passed: Optional[bool] = None
     dotnet_build_log = ""
@@ -145,39 +154,87 @@ def reconstruct_dotnet_project(
 # ---------------------------------------------------------------------------
 
 def decode_axml_binary(axml_bytes: bytes) -> str:
-    """Minimal pure-Python decoder extracting strings/elements from Android Binary XML (AXML)."""
+    """Decodes Android Binary XML (AXML) StringPool + START_ELEMENT / ATTRIBUTE / END_ELEMENT chunks."""
     if len(axml_bytes) < 16 or struct.unpack_from("<H", axml_bytes, 0)[0] != 0x0003:
         return axml_bytes.decode("utf-8", errors="replace") if axml_bytes.lstrip().startswith(b"<") else ""
-    # Parse StringPool chunk right after ResXMLTree_header (8 bytes)
+
     strings: List[str] = []
-    if len(axml_bytes) >= 36 and struct.unpack_from("<H", axml_bytes, 8)[0] == 0x0001:
-        sp_size = struct.unpack_from("<I", axml_bytes, 12)[0]
-        scount = struct.unpack_from("<I", axml_bytes, 16)[0]
-        flags = struct.unpack_from("<I", axml_bytes, 24)[0]
-        str_start = 8 + struct.unpack_from("<I", axml_bytes, 28)[0]
-        is_utf8 = bool(flags & (1 << 8))
-        offsets_base = 36
-        for i in range(min(scount, 4096)):
-            if offsets_base + (i + 1) * 4 > len(axml_bytes):
-                break
-            off = str_start + struct.unpack_from("<I", axml_bytes, offsets_base + i * 4)[0]
-            if off >= len(axml_bytes):
-                strings.append("")
-                continue
-            if is_utf8:
-                _u16l = axml_bytes[off]
-                p = off + (2 if (_u16l & 0x80) else 1)
-                blen = axml_bytes[p] if p < len(axml_bytes) else 0
-                p += (2 if (blen & 0x80) else 1)
-                strings.append(axml_bytes[p : p + blen].split(b"\x00", 1)[0].decode("utf-8", errors="replace"))
-            else:
-                if off + 2 <= len(axml_bytes):
+    pos = 8
+    while pos + 8 <= len(axml_bytes):
+        c_type, c_hdr_sz, c_size = struct.unpack_from("<HHI", axml_bytes, pos)
+        if c_size < 8 or pos + c_size > len(axml_bytes):
+            break
+        if c_type == 0x0001 and pos + 28 <= len(axml_bytes):
+            scount = struct.unpack_from("<I", axml_bytes, pos + 8)[0]
+            flags = struct.unpack_from("<I", axml_bytes, pos + 16)[0]
+            str_start = pos + struct.unpack_from("<I", axml_bytes, pos + 20)[0]
+            is_utf8 = bool(flags & (1 << 8))
+            offsets_base = pos + max(28, c_hdr_sz)
+            for i in range(min(scount, 4096)):
+                if offsets_base + (i + 1) * 4 > len(axml_bytes):
+                    break
+                off = str_start + struct.unpack_from("<I", axml_bytes, offsets_base + i * 4)[0]
+                if off >= len(axml_bytes):
+                    strings.append("")
+                    continue
+                if is_utf8:
+                    _u16l = axml_bytes[off]
+                    p_u = off + (2 if (_u16l & 0x80) else 1)
+                    blen = axml_bytes[p_u] if p_u < len(axml_bytes) else 0
+                    p_u += (2 if (blen & 0x80) else 1)
+                    strings.append(axml_bytes[p_u : p_u + blen].split(b"\x00", 1)[0].decode("utf-8", errors="replace"))
+                elif off + 2 <= len(axml_bytes):
                     clen = struct.unpack_from("<H", axml_bytes, off)[0]
                     raw_u16 = axml_bytes[off + 2 : off + 2 + clen * 2]
                     strings.append(raw_u16.decode("utf-16-le", errors="replace"))
-        pos = 8 + sp_size
-    else:
-        pos = len(axml_bytes)
+            pos += c_size
+            break
+        pos += c_size
+
+    # Parse structured XML tree chunks (0x0102 START_ELEMENT, 0x0103 END_ELEMENT)
+    xml_lines: List[str] = ['<?xml version="1.0" encoding="utf-8"?>']
+    depth = 0
+    saw_elements = False
+    while pos + 8 <= len(axml_bytes):
+        c_type, c_hdr_sz, c_size = struct.unpack_from("<HHI", axml_bytes, pos)
+        if c_size < 8 or pos + c_size > len(axml_bytes):
+            break
+        if c_type == 0x0102 and pos + 36 <= len(axml_bytes):
+            saw_elements = True
+            _ns_i, name_i, _attr_start, attr_sz, attr_cnt = struct.unpack_from("<IIHHH", axml_bytes, pos + 16)
+            attr_sz = max(attr_sz, 20)
+            tag_name = strings[name_i] if 0 <= name_i < len(strings) else "node"
+            attrs_list: List[str] = []
+            if depth == 0 and tag_name == "manifest":
+                attrs_list.append('xmlns:android="http://schemas.android.com/apk/res/android"')
+            ap = pos + 36
+            for _ in range(min(attr_cnt, 64)):
+                if ap + 20 > pos + c_size:
+                    break
+                a_ns, a_name_i, a_val_i, a_res_sz, a_res0, a_type, a_data = struct.unpack_from("<IIIHBBI", axml_bytes, ap)
+                aname = strings[a_name_i] if 0 <= a_name_i < len(strings) else "attr"
+                prefix = "android:" if (a_ns != 0xFFFFFFFF or aname in ("label", "exported")) else ""
+                if a_val_i != 0xFFFFFFFF and 0 <= a_val_i < len(strings):
+                    aval = strings[a_val_i]
+                elif a_type == 0x12:
+                    aval = "true" if a_data else "false"
+                else:
+                    aval = hex(a_data) if a_type == 0x10 and a_data > 9 else str(a_data)
+                attrs_list.append(f'{prefix}{aname}="{aval}"')
+                ap += attr_sz
+            pad_s = "    " * depth
+            attr_str = (" " + " ".join(attrs_list)) if attrs_list else ""
+            xml_lines.append(f"{pad_s}<{tag_name}{attr_str}>")
+            depth += 1
+        elif c_type == 0x0103 and pos + 24 <= len(axml_bytes):
+            _ns_i, name_i = struct.unpack_from("<II", axml_bytes, pos + 16)
+            tag_name = strings[name_i] if 0 <= name_i < len(strings) else "node"
+            depth = max(0, depth - 1)
+            xml_lines.append(f"{'    ' * depth}</{tag_name}>")
+        pos += c_size
+
+    if saw_elements:
+        return "\n".join(xml_lines) + "\n"
 
     pkg_guess = next((s for s in strings if "." in s and "android" not in s.lower() and " " not in s and len(s) > 3), "com.reconstructed.app")
     attrs_notes = "\n".join(f"<!-- AXML token: {s} -->" for s in strings[:40] if s and len(s) < 120)
@@ -189,6 +246,49 @@ def decode_axml_binary(axml_bytes: bytes) -> str:
         "</manifest>",
         "",
     ])
+
+
+def extract_apk_jni_bridges(apk_bytes: bytes) -> Dict[str, Any]:
+    """Links native ELF `Java_*` / `JNI_OnLoad` exports inside `lib/<abi>/*.so` of an APK."""
+    bridges: List[Dict[str, Any]] = []
+    if not apk_bytes.startswith(b"PK\x03\x04"):
+        return {"so_files": [], "jni_symbols": bridges}
+    from elftools.elf.elffile import ELFFile
+    from elftools.elf.sections import SymbolTableSection
+
+    so_files: List[str] = []
+    with zipfile.ZipFile(io.BytesIO(apk_bytes), "r") as zf:
+        for nm in zf.namelist():
+            if nm.startswith("lib/") and nm.endswith(".so"):
+                so_files.append(nm)
+                so_bytes = zf.read(nm)
+                if not so_bytes.startswith(b"\x7fELF"):
+                    continue
+                try:
+                    ef = ELFFile(io.BytesIO(so_bytes))
+                    for sec in ef.iter_sections():
+                        if isinstance(sec, SymbolTableSection):
+                            for sym in sec.iter_symbols():
+                                sname = sym.name or ""
+                                if sname.startswith("Java_") or sname == "JNI_OnLoad":
+                                    java_class = ""
+                                    java_method = sname
+                                    if sname.startswith("Java_"):
+                                        parts = sname[5:].split("_")
+                                        if len(parts) >= 2:
+                                            java_method = parts[-1]
+                                            java_class = ".".join(parts[:-1])
+                                    bridges.append({
+                                        "so_path": nm,
+                                        "abi": nm.split("/")[1] if "/" in nm else "unknown",
+                                        "elf_symbol": sname,
+                                        "vaddr": hex(int(sym["st_value"])),
+                                        "java_class": java_class,
+                                        "java_method": java_method,
+                                    })
+                except Exception:
+                    continue
+    return {"so_files": so_files, "jni_symbols": bridges}
 
 
 def _disasm_dalvik_code_item(dex: bytes, code_off: int, strings: List[str], methods: List[str]) -> List[str]:
@@ -948,6 +1048,11 @@ def reconstruct_dex_apk_project(
     (out_root / "build.gradle").write_text(gradle_txt, encoding="utf-8")
     generated.append("build.gradle")
 
+    jni_bridges = extract_apk_jni_bridges(raw) if raw.startswith(b"PK\x03\x04") else {"so_files": [], "jni_symbols": []}
+    if jni_bridges["jni_symbols"] or jni_bridges["so_files"]:
+        (out_root / "jni_native_bridge_map.json").write_text(json.dumps(jni_bridges, indent=2) + "\n", encoding="utf-8")
+        generated.append("jni_native_bridge_map.json")
+
     javac_passed: Optional[bool] = None
     javac_bin = shutil.which("javac")
     if javac_bin and java_paths:
@@ -1239,6 +1344,7 @@ def reconstruct_wasm_project(
     imported_funcs = 0
     globals_init: List[int] = []
     exports_map: Dict[int, str] = {}
+    element_table: Dict[int, int] = {}
     code_bodies: List[bytes] = []
     data_segments: List[Tuple[int, bytes]] = []
 
@@ -1326,6 +1432,15 @@ def reconstruct_wasm_project(
                 idx, p = _read_uleb128(sec, p)
                 if kind == 0:
                     exports_map[idx] = nm
+        elif sec_id == 9:  # Element (populate indirect funcref table slots)
+            cnt, p = _read_uleb128(sec, p)
+            for _ in range(cnt):
+                _tbl_idx, p = _read_uleb128(sec, p)
+                off_idx, p = _read_const_expr(sec, p)
+                n_elems, p = _read_uleb128(sec, p)
+                for ei in range(n_elems):
+                    f_i, p = _read_uleb128(sec, p)
+                    element_table[int(off_idx) + ei] = int(f_i)
         elif sec_id == 10:  # Code
             cnt, p = _read_uleb128(sec, p)
             for _ in range(cnt):
@@ -1358,7 +1473,7 @@ def reconstruct_wasm_project(
     inc_dir.mkdir(parents=True, exist_ok=True)
 
     c_lines = [
-        "/* Auto-Lifted WebAssembly -> C99 Project by AetherRE Megazord v8.2 */",
+        "/* Auto-Lifted WebAssembly -> C99 Project by AetherRE Megazord v10.5 */",
         "#include <stdint.h>",
         "#include <stddef.h>",
         "#include <string.h>",
@@ -1367,7 +1482,15 @@ def reconstruct_wasm_project(
         "#else",
         "#define W2C_EXP",
         "#endif",
-        "static uint8_t wasm_mem[65536];",
+        "static uint8_t wasm_mem[262144];",
+        "static uint32_t wasm_mem_pages = 1;",
+        "static inline int64_t _wasm_f64_to_bits(double d) { int64_t b = 0; memcpy(&b, &d, 8); return b; }",
+        "static inline double _wasm_bits_to_f64(int64_t b) { double d = 0.0; memcpy(&d, &b, 8); return d; }",
+        "static inline int64_t _wasm_mem_grow(int64_t delta) {",
+        "    uint32_t prev = wasm_mem_pages;",
+        "    if (delta >= 0 && (prev + (uint32_t)delta) <= 4U) { wasm_mem_pages += (uint32_t)delta; return (int64_t)prev; }",
+        "    return -1LL;",
+        "}",
         f"static int64_t wasm_globals[{max(1, len(globals_init))}] = {{"
         + (", ".join(f"{g}LL" for g in globals_init) if globals_init else "0LL")
         + "};",
@@ -1395,6 +1518,13 @@ def reconstruct_wasm_project(
         params = ", ".join(f"int64_t l{i}" for i in range(len(ptypes))) or "void"
         c_lines.append(f"W2C_EXP int64_t {c_nm}({params});")
     c_lines.append("")
+    max_tbl_slot = max(element_table.keys(), default=0) + 1
+    c_lines.append("typedef int64_t (*wasm_ind2_t)(int64_t, int64_t);")
+    c_lines.append("static inline int64_t _wasm_call_indirect(int64_t slot, int64_t a0, int64_t a1) {")
+    for s_idx, target_fidx in sorted(element_table.items()):
+        t_nm = re.sub(r"[^A-Za-z0-9_]", "_", exports_map.get(target_fidx, f"wasm_func_{target_fidx}"))
+        c_lines.append(f"    if (slot == {s_idx}) return ((wasm_ind2_t)(void*)&{t_nm})(a0, a1);")
+    c_lines.extend(["    (void)slot; (void)a0; (void)a1;", "    return 0LL;", "}", ""])
 
     lifted_fns = 0
     for local_idx, body in enumerate(code_bodies):
@@ -1584,6 +1714,35 @@ def reconstruct_wasm_project(
                     stack.append(f"((int64_t)(int32_t)((int32_t)({a_e}) {op_c} (int32_t)({b_e})))")
                 else:
                     stack.append(f"((int64_t)(({a_e}) {op_c} ({b_e})))")
+            elif op == 0x11:  # call_indirect (typeidx, tableidx=0)
+                t_idx_ind, bp = _read_uleb128(body, bp)
+                _tbl_i, bp = _read_uleb128(body, bp)
+                elem_slot = stack.pop() if stack else "0"
+                f_ptypes, _ = types_sig[t_idx_ind] if t_idx_ind < len(types_sig) else ([], [])
+                c_args = [stack.pop() for _ in range(min(len(f_ptypes), len(stack)))][::-1]
+                a0_e = c_args[0] if len(c_args) > 0 else "0LL"
+                a1_e = c_args[1] if len(c_args) > 1 else "0LL"
+                stack.append(f"_wasm_call_indirect({elem_slot}, {a0_e}, {a1_e})")
+            elif op == 0x40:  # memory.grow
+                _mem_i, bp = _read_uleb128(body, bp)
+                delta_e = stack.pop() if stack else "0"
+                stack.append(f"_wasm_mem_grow({delta_e})")
+            elif op == 0x44 and bp + 8 <= len(body):  # f64.const
+                bits64 = struct.unpack_from("<q", body, bp)[0]
+                bp += 8
+                stack.append(f"((int64_t)({bits64}LL))")
+            elif op in (0xA0, 0xA1, 0xA2, 0xA3) and len(stack) >= 2:  # f64.add/sub/mul/div
+                b_e, a_e = stack.pop(), stack.pop()
+                fop = {0xA0: "+", 0xA1: "-", 0xA2: "*", 0xA3: "/"}[op]
+                stack.append(f"_wasm_f64_to_bits(_wasm_bits_to_f64({a_e}) {fop} _wasm_bits_to_f64({b_e}))")
+            elif op == 0xAA and stack:  # i32.trunc_f64_s
+                stack.append(f"((int64_t)(int32_t)_wasm_bits_to_f64({stack.pop()}))")
+            elif op == 0xB7 and stack:  # f64.convert_i32_s
+                stack.append(f"_wasm_f64_to_bits((double)(int32_t)({stack.pop()}))")
+            elif op == 0xAC and stack:  # i64.extend_i32_s
+                stack.append(f"((int64_t)(int32_t)({stack.pop()}))")
+            elif op == 0xA7 and stack:  # i32.wrap_i64
+                stack.append(f"((int64_t)(int32_t)({stack.pop()}))")
             elif op == 0x0F:  # return
                 rv = stack.pop() if stack else "0LL"
                 c_lines.append(f"    return {rv};")
@@ -1694,19 +1853,61 @@ def _extract_js_bundle_modules(js_text: str) -> List[Tuple[str, str, str]]:
     return results
 
 
+def extract_inline_sourcemap_and_bytecode(raw_bytes: bytes, out_root: Path) -> Dict[str, Any]:
+    """Extracts inline Base64 SourceMaps (`sourcesContent`) and inspects Hermes (.hbc) / V8 (.jsc) headers."""
+    import base64
+
+    info: Dict[str, Any] = {"kind": "js_text", "recovered_sources": []}
+    if len(raw_bytes) >= 12 and raw_bytes[:8] == b"\xC6\x1F\xBC\x03\xC1\x03\x19\x1F":
+        ver = struct.unpack_from("<I", raw_bytes, 8)[0]
+        info["kind"] = "hermes_bytecode_hbc"
+        info["hermes_version"] = ver
+        strs = [m.decode("utf-8", errors="replace") for m in re.findall(rb"[A-Za-z_][A-Za-z0-9_./:-]{3,80}", raw_bytes)][:200]
+        (out_root / "src" / "hermes_strings.json").write_text(json.dumps({"version": ver, "strings": strs}, indent=2), encoding="utf-8")
+        info["recovered_sources"].append("src/hermes_strings.json")
+        return info
+    if len(raw_bytes) >= 16 and raw_bytes[2:4] == b"\xDE\xC0":
+        info["kind"] = "v8_cached_jsc"
+        return info
+
+    txt = raw_bytes.decode("utf-8", errors="replace")
+    m_sm = re.search(r"sourceMappingURL=data:application/json(?:;charset=[^;,\s]+)?;base64,([A-Za-z0-9+/=]+)", txt)
+    if m_sm:
+        try:
+            sm_obj = json.loads(base64.b64decode(m_sm.group(1)).decode("utf-8", errors="replace"))
+            srcs = sm_obj.get("sources") or []
+            contents = sm_obj.get("sourcesContent") or []
+            rec_dir = out_root / "src" / "recovered_sources"
+            for rel_s, body_s in zip(srcs, contents):
+                if not body_s:
+                    continue
+                safe_nm = Path(rel_s.lstrip("/\\")).name or "source.ts"
+                dest = rec_dir / safe_nm
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_text(body_s, encoding="utf-8")
+                info["recovered_sources"].append(f"src/recovered_sources/{safe_nm}")
+            info["kind"] = "sourcemap_recovered"
+        except Exception:
+            pass
+    return info
+
+
 def reconstruct_js_bundle_project(
     target_path: str | Path,
     output_dir: str | Path,
 ) -> Dict[str, Any]:
-    """Unbundles Webpack/ESBuild/CJS JS into clean modules + TypeScript interfaces + package.json."""
+    """Unbundles Webpack/ESBuild/CJS JS into clean modules + SourceMap/Hermes recovery + TypeScript/ESM."""
     t_path = Path(target_path).resolve()
     out_root = Path(output_dir).resolve()
     mod_dir = out_root / "src" / "modules"
     mod_dir.mkdir(parents=True, exist_ok=True)
-    js_text = t_path.read_text(encoding="utf-8", errors="replace")
+    raw_bytes = t_path.read_bytes()
+    js_text = raw_bytes.decode("utf-8", errors="replace")
 
     generated: List[str] = []
-    modules_extracted = 0
+    sm_info = extract_inline_sourcemap_and_bytecode(raw_bytes, out_root)
+    generated.extend(sm_info.get("recovered_sources", []))
+    modules_extracted = len(sm_info.get("recovered_sources", []))
 
     wb_text = ""
     # Try WebcrackBridge first if webcrack deps are available

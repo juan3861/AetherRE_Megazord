@@ -255,17 +255,135 @@ def _parse_squashfs_v4(blob: bytes, out_dir: Path, rootfs_dir: Optional[Path] = 
     }
 
 
+def _parse_fdt_dtb(blob: bytes) -> Dict[str, Any]:
+    """Parses Flattened Device Tree (.dtb, magic 0xD00DFEED) extracting memory & MMIO `reg` regions."""
+    pos = blob.find(b"\xD0\x0D\xFE\xED")
+    if pos == -1 or pos + 40 > len(blob):
+        return {"found": False, "nodes": [], "mmio_regions": []}
+    magic, totalsize, off_struct, off_strings, off_rsv, version, _last_comp, _boot_cpu, sz_strings, sz_struct = struct.unpack_from(">10I", blob, pos)
+    if magic != 0xD00DFEED or totalsize < 40 or pos + totalsize > len(blob):
+        return {"found": False, "nodes": [], "mmio_regions": []}
+
+    str_tbl = blob[pos + off_strings : pos + off_strings + sz_strings]
+    st_buf = blob[pos + off_struct : pos + off_struct + sz_struct]
+    p = 0
+    stack: List[str] = []
+    nodes: List[Dict[str, Any]] = []
+    mmio_regions: List[Dict[str, str]] = []
+    cur_props: Dict[str, Any] = {}
+
+    while p + 4 <= len(st_buf):
+        tok = struct.unpack_from(">I", st_buf, p)[0]
+        p += 4
+        if tok == 1:  # FDT_BEGIN_NODE
+            nul = st_buf.find(b"\x00", p)
+            if nul == -1:
+                break
+            nm = st_buf[p:nul].decode("utf-8", errors="replace") or "/"
+            p = (nul + 4) & ~3
+            stack.append(nm)
+            cur_props = {}
+        elif tok == 2:  # FDT_END_NODE
+            path_str = "/" + "/".join(x for x in stack if x != "/")
+            if stack:
+                nodes.append({"path": path_str or "/", "props": dict(cur_props)})
+                stack.pop()
+            cur_props = {}
+        elif tok == 3 and p + 8 <= len(st_buf):  # FDT_PROP
+            plen, nameoff = struct.unpack_from(">II", st_buf, p)
+            p += 8
+            pval = st_buf[p : p + plen]
+            p = (p + plen + 3) & ~3
+            nul_s = str_tbl.find(b"\x00", nameoff)
+            pname = str_tbl[nameoff : nul_s if nul_s != -1 else len(str_tbl)].decode("utf-8", errors="replace")
+            if pname == "compatible":
+                cur_props[pname] = pval.rstrip(b"\x00").decode("utf-8", errors="replace")
+            elif pname == "reg" and len(pval) >= 8:
+                base_a, sz_a = struct.unpack_from(">II", pval, 0)
+                cur_props["reg"] = f"{hex(base_a)}+{hex(sz_a)}"
+                mmio_regions.append({"node": stack[-1] if stack else "root", "base": hex(base_a), "size": hex(sz_a)})
+        elif tok == 4:  # FDT_NOP
+            continue
+        elif tok == 9:  # FDT_END
+            break
+        else:
+            break
+
+    return {"found": True, "offset_hex": hex(pos), "version": version, "nodes": nodes, "mmio_regions": mmio_regions}
+
+
+def _parse_uefi_fv(blob: bytes) -> Dict[str, Any]:
+    """Parses UEFI PI Firmware Volumes (`_FVH` at +40) and extracts FFS module GUIDs, PEIM/DXE/SMM types."""
+    sig_off = blob.find(b"_FVH")
+    if sig_off < 40:
+        return {"found": False, "modules": []}
+    fv_start = sig_off - 40
+    if fv_start + 64 > len(blob):
+        return {"found": False, "modules": []}
+    fv_len, sig, attrs, hdr_len = struct.unpack_from("<QIIH", blob, fv_start + 32)
+    if sig != 0x4856465F or hdr_len < 48:
+        return {"found": False, "modules": []}
+
+    fv_end = min(len(blob), fv_start + max(fv_len, hdr_len))
+    cur = (fv_start + hdr_len + 7) & ~7
+    ffs_types = {0x06: "PEI_CORE", 0x07: "PEIM", 0x05: "DXE_CORE", 0x07: "PEIM", 0x0A: "SMM_CORE", 0x0C: "MM_STANDALONE", 0x07: "DRIVER"}
+    type_names = {0x03: "SECURITY_CORE", 0x04: "PEI_CORE", 0x05: "DXE_CORE", 0x06: "PEIM", 0x07: "DXE_DRIVER", 0x08: "COMBINED_PEIM_DRIVER", 0x09: "APPLICATION", 0x0A: "SMM_DRIVER", 0x0B: "FIRMWARE_VOLUME_IMAGE"}
+    modules: List[Dict[str, Any]] = []
+    while cur + 24 <= fv_end:
+        guid_raw = blob[cur : cur + 16]
+        if guid_raw == b"\xFF" * 16:
+            break
+        ftype = blob[cur + 18]
+        sz_b = blob[cur + 20 : cur + 23]
+        fsize = sz_b[0] | (sz_b[1] << 8) | (sz_b[2] << 16)
+        if fsize < 24 or cur + fsize > fv_end:
+            break
+        d1, d2, d3 = struct.unpack_from("<IHH", guid_raw, 0)
+        guid_str = f"{d1:08x}-{d2:04x}-{d3:04x}-{guid_raw[8:10].hex()}-{guid_raw[10:16].hex()}"
+        mod_bytes = blob[cur + 24 : cur + fsize]
+        has_smm_risk = (ftype == 0x0A) and (b"gBS" in mod_bytes or b"LocateProtocol" in mod_bytes or b"MZ" in mod_bytes)
+        modules.append({
+            "guid": guid_str,
+            "type_id": hex(ftype),
+            "type_name": type_names.get(ftype, f"FFS_{ftype:#x}"),
+            "size_bytes": fsize,
+            "has_embedded_pe": b"MZ" in mod_bytes,
+            "smm_callout_candidate": has_smm_risk,
+        })
+        cur = (cur + fsize + 7) & ~7
+
+    return {"found": True, "fv_offset": hex(fv_start), "fv_length": fv_len, "modules_count": len(modules), "modules": modules}
+
+
+def _detect_embedded_filesystems(blob: bytes) -> List[Dict[str, Any]]:
+    """Detects CramFS, JFFS2, UBI/UBIFS, and EXT2/3/4 embedded firmware filesystems."""
+    hits: List[Dict[str, Any]] = []
+    if struct.unpack_from("<I", blob, 0)[0] == 0x28CD3D45 or b"\x45\x3d\xcd\x28" in blob[:4096]:
+        hits.append({"filesystem": "cramfs", "magic": "0x28cd3d45"})
+    if b"UBI#" in blob:
+        hits.append({"filesystem": "ubi_ubifs", "offset": hex(blob.find(b"UBI#"))})
+    if len(blob) >= 1082 and struct.unpack_from("<H", blob, 1080)[0] == 0xEF53:
+        hits.append({"filesystem": "ext2_3_4", "offset": "0x400"})
+    jpos = blob.find(b"\x85\x19")
+    if jpos != -1:
+        hits.append({"filesystem": "jffs2", "offset": hex(jpos)})
+    return hits
+
+
 def reconstruct_firmware_project(
     target_path: str | Path,
     output_dir: str | Path,
 ) -> Dict[str, Any]:
-    """Extracts firmware containers/rootfs/DTB/uImage and emits Unicorn MMIO re-hosting scaffold."""
+    """Extracts firmware containers/rootfs/DTB/UEFI/uImage and emits multi-arch Unicorn MMIO re-hosting scaffold."""
     t_path = Path(target_path).resolve()
     out_root = Path(output_dir).resolve()
     out_root.mkdir(parents=True, exist_ok=True)
     raw = t_path.read_bytes()
 
     fw_report = analyze_firmware(raw)
+    dtb_info = _parse_fdt_dtb(raw)
+    uefi_info = _parse_uefi_fv(raw)
+    ext_fs = _detect_embedded_filesystems(raw)
     generated: List[str] = []
 
     rootfs_dir = out_root / "rootfs"
@@ -311,6 +429,9 @@ def reconstruct_firmware_project(
         "schema": SCHEMA,
         "firmware_findings": fw_report,
         "squashfs_v4": sq_info,
+        "dtb_device_tree": dtb_info,
+        "uefi_firmware_volume": uefi_info,
+        "embedded_filesystems": ext_fs,
         "mmio_peripheral_pages": [hex(a) for a in sorted(mmio_addrs)],
         "rootfs_files_extracted": total_rootfs_files,
     }
@@ -319,8 +440,12 @@ def reconstruct_firmware_project(
 
     rehost_dir = out_root / "rehosting"
     rehost_dir.mkdir(parents=True, exist_ok=True)
+    dtb_bank_lines = [
+        f"    # DTB Auto-Mapped Region `{r['node']}`: {r['base']} ({r['size']})"
+        for r in dtb_info.get("mmio_regions", [])[:16]
+    ]
     harness_py = "\n".join([
-        '"""Auto-Generated Unicorn MMIO Re-Hosting Harness (AetherRE v8.0)."""',
+        '"""Auto-Generated Multi-Arch Fuzzware-Style Unicorn MMIO Re-Hosting Harness (AetherRE v11.0)."""',
         "from unicorn import Uc, UC_ARCH_ARM, UC_MODE_ARM, UC_PROT_ALL, UC_HOOK_MEM_READ, UC_HOOK_MEM_WRITE",
         "",
         "def create_rehost_uc(fw_bytes: bytes, load_addr: int = 0x08000000):",
@@ -329,6 +454,7 @@ def reconstruct_firmware_project(
         "    uc.mem_write(load_addr, fw_bytes)",
         "    uc.mem_map(0x40000000, 0x01000000, UC_PROT_ALL)  # MMIO peripheral bank",
         "    uc.mem_map(0x20000000, 0x00100000, UC_PROT_ALL)  # SRAM",
+        *dtb_bank_lines,
         "    return uc",
         "",
     ])
@@ -341,6 +467,10 @@ def reconstruct_firmware_project(
         "project_kind": "firmware_rehosted_project",
         "mmio_pages_count": len(mmio_addrs),
         "rootfs_files_count": total_rootfs_files,
+        "dtb_found": bool(dtb_info.get("found")),
+        "uefi_found": bool(uefi_info.get("found")),
+        "uefi_modules_count": int(uefi_info.get("modules_count", 0)),
+        "embedded_filesystems": ext_fs,
         "generated_files": generated,
     }
 

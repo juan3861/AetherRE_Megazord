@@ -218,6 +218,15 @@ def recover_golang_symbols_from_file(file_path: str | Path) -> dict[str, Any]:
     return result
 
 
+def recover_go_types_and_itabs(data: bytes) -> dict[str, list[str]]:
+    """Extracts recovered Go `go.itab.*` interface implementations and `type:*` structs from rodata/sym strings."""
+    import re as _re
+
+    itabs = sorted({m.decode("utf-8", errors="replace") for m in _re.findall(rb"go\.itab\.[A-Za-z0-9_.*\[\]/{}-]{3,160}", data)})[:200]
+    types = sorted({m.decode("utf-8", errors="replace") for m in _re.findall(rb"type[:\.](?:main|pkg|[A-Za-z_][A-Za-z0-9_/]+)\.[A-Za-z0-9_]{2,80}", data)})[:200]
+    return {"itabs": itabs, "types": types}
+
+
 def reconstruct_go_project(
     data: bytes,
     output_dir: str | Path,
@@ -251,6 +260,22 @@ def reconstruct_go_project(
 
     if not by_pkg:
         by_pkg["main"] = [{"name": "main.main", "entry_pc": 0, "hex_pc": "0x0", "package": "main"}]
+
+    go_meta_types = recover_go_types_and_itabs(data)
+    if go_meta_types["itabs"] or go_meta_types["types"]:
+        t_dir = out / "pkg" / "recovered_types"
+        t_dir.mkdir(parents=True, exist_ok=True)
+        t_lines = ["// Recovered Go runtime._type & go.itab metadata (AetherRE v10.5)", "package recovered_types", ""]
+        for idx_it, itb in enumerate(go_meta_types["itabs"][:60]):
+            t_lines.append(f"// Itab[{idx_it}]: {itb}")
+        for idx_ty, ty in enumerate(go_meta_types["types"][:60]):
+            cname = _re.sub(r"[^A-Za-z0-9_]", "_", ty.split(".")[-1]) or f"RecoveredType{idx_ty}"
+            if cname[0].isdigit():
+                cname = "T_" + cname
+            t_lines.extend([f"// Raw symbol: {ty}", f"type {cname} struct {{ RawPtr uintptr }}", ""])
+        f_ty = t_dir / "types.go"
+        f_ty.write_text("\n".join(t_lines), encoding="utf-8")
+        generated.append("pkg/recovered_types/types.go")
 
     for pkg, fns in sorted(by_pkg.items()):
         clean_pkg = _re.sub(r"[^A-Za-z0-9_/.-]", "_", pkg).strip("/") or "main"

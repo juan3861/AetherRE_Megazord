@@ -794,6 +794,178 @@ TOOLS = [
             "required": ["project_dir"]
         }
     },
+    {
+        "name": "aether_cxx_eh_analyze",
+        "description": "Analisa tabelas C++ Exception Handling Win64 (FH3/FH4 .pdata/.xdata) e thunks adjustor-this em binários PE.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "target": {"type": "string", "description": "Caminho do binário PE alvo"},
+            },
+            "required": ["target"]
+        }
+    },
+    {
+        "name": "aether_flirt_fidb_match",
+        "description": "Casa funções de binários contra banco estendido de assinaturas FLIRT (.pat), Ghidra FIDB e headers C.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "target": {"type": "string", "description": "Caminho do binário PE/ELF"},
+                "c_header_text": {"type": "string", "description": "Protótipos C opcionais para enriquecimento de tipos"},
+            },
+            "required": ["target"]
+        }
+    },
+    {
+        "name": "aether_mba_simplify",
+        "description": "Simplifica expressões Mixed Boolean-Arithmetic (MBA) e avalia predicados opacos via Z3 BV64.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "expr": {"type": "string", "description": "Expressão MBA ou predicado booleano em sintaxe C"},
+            },
+            "required": ["expr"]
+        }
+    },
+    {
+        "name": "aether_vm_devirtualize",
+        "description": "Desvirtualiza bytecode/handlers VM via trace concreto Unicorn + síntese Z3.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "hex_bytes": {"type": "string", "description": "Bytes hexadecimais do handler/stub VM"},
+                "arch": {"type": "string", "description": "amd64 ou x86_32", "default": "amd64"},
+            },
+            "required": ["hex_bytes"]
+        }
+    },
+    {
+        "name": "aether_elf_unpack",
+        "description": "Desempacota binário ELF em sandbox Unicorn localizando OEP após descompressão em memória.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "target": {"type": "string", "description": "Caminho do binário ELF packed"},
+                "out_elf": {"type": "string", "description": "Caminho opcional de saída do ELF desempacotado"},
+            },
+            "required": ["target"]
+        }
+    },
+    {
+        "name": "aether_concolic_fuzz",
+        "description": "Executa fuzzer híbrido Concolic (Unicorn BB-edge coverage + angr SMT branch cracking) e gera harness LibFuzzer.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "hex_bytes": {"type": "string", "description": "Bytes hexadecimais da função alvo"},
+                "arch": {"type": "string", "description": "amd64, x86_32 ou aarch64", "default": "amd64"},
+                "max_iters": {"type": "integer", "description": "Número máximo de iterações", "default": 16},
+            },
+            "required": ["hex_bytes"]
+        }
+    },
+    {
+        "name": "aether_patch_diff_cve",
+        "description": "Analisa diff semântico de patch de vulnerabilidade 1-day entre função C pré-patch e pós-patch.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "unpatched_c": {"type": "string", "description": "Código C da função vulnerável (pré-patch)"},
+                "patched_c": {"type": "string", "description": "Código C da função corrigida (pós-patch)"},
+            },
+            "required": ["unpatched_c", "patched_c"]
+        }
+    },
+    {
+        "name": "aether_cil_decompile",
+        "description": "Descompila assemblies .NET ECMA-335 (#~ metadata tables + CIL opcodes) em C# puro em Python.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "target": {"type": "string", "description": "Caminho do assembly .NET (.exe/.dll)"},
+            },
+            "required": ["target"]
+        }
+    },
+    {
+        "name": "aether_ioctl_prove",
+        "description": "Decodifica IOCTLs Windows CTL_CODE, identifica METHOD_NEITHER e prova integer overflows IRP via Z3.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "target": {"type": "string", "description": "Caminho do driver Windows (.sys) ou PE"},
+                "driver_c_code": {"type": "string", "description": "Código C levantado opcional do handler IRP"},
+            },
+            "required": ["target"]
+        }
+    },
+    {
+        "name": "aether_ram_forensics",
+        "description": "Audita dump físico de RAM x64 (PML4/DKOM hidden EPROCESS/RWX pages/inline hooks/carving MZ para reconstrução).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "target": {"type": "string", "description": "Caminho do dump de RAM raw"},
+                "out_dir": {"type": "string", "description": "Diretório opcional para carving de PEs injetados"},
+                "cr3": {"type": "string", "description": "Endereço CR3 hexadecimal opcional (ex: 0x1000)"},
+            },
+            "required": ["target"]
+        }
+    },
+    {
+        "name": "aether_disk_registry_evtx",
+        "description": "Disseca $MFT NTFS (timestomping SI vs FN), Registry Hive regf, logs EVTX e Prefetch SCCA.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "mft_path": {"type": "string", "description": "Caminho opcional do $MFT"},
+                "registry_hive_path": {"type": "string", "description": "Caminho opcional do hive NTUSER.DAT/SOFTWARE/SYSTEM"},
+                "evtx_path": {"type": "string", "description": "Caminho opcional do arquivo .evtx"},
+                "prefetch_path": {"type": "string", "description": "Caminho opcional do arquivo .pf"},
+            }
+        }
+    },
+    {
+        "name": "aether_pcap_forensics",
+        "description": "Disseca PCAP/PCAPNG extraindo streams TCP, DNS tunneling, HTTP payloads, TLS JA3 e beacons C2.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "target": {"type": "string", "description": "Caminho do arquivo .pcap ou .pcapng"},
+            },
+            "required": ["target"]
+        }
+    },
+    {
+        "name": "aether_supertimeline",
+        "description": "Correlaciona eventos RAM/Disk/PCAP em linha do tempo unificada Plaso JSONL/CSV com detecção MITRE ATT&CK.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "out_dir": {"type": "string", "description": "Diretório de saída dos artefatos supertimeline"},
+                "mft_path": {"type": "string"},
+                "registry_hive_path": {"type": "string"},
+                "evtx_path": {"type": "string"},
+                "pcap_path": {"type": "string"},
+                "ram_path": {"type": "string"},
+            },
+            "required": ["out_dir"]
+        }
+    },
+    {
+        "name": "aether_custody_verify",
+        "description": "Verifica integridade SHA-256/SHA-512, hashes em disco e assinatura HMAC-SHA512 de manifesto de custódia.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "manifest_path": {"type": "string", "description": "Caminho para custody-snapshot.v1.json"},
+                "hmac_key_hex": {"type": "string", "description": "Chave HMAC hexadecimal opcional para validar attestation"},
+                "verify_files_on_disk": {"type": "boolean", "default": True},
+            },
+            "required": ["manifest_path"]
+        }
+    },
 ]
 
 
@@ -1438,6 +1610,147 @@ class AetherMcpDispatcher:
         from aether_re.exploit_prover import audit_reconstructed_project_exploits
         return audit_reconstructed_project_exploits(project_dir)
 
+    @staticmethod
+    def handle_cxx_eh_analyze(target: str) -> dict[str, Any]:
+        from aether_re.cxx_eh_rtti import scan_file_cxx_eh
+        return scan_file_cxx_eh(target)
+
+    @staticmethod
+    def handle_flirt_fidb_match(target: str, c_header_text: str | None = None) -> dict[str, Any]:
+        from aether_re.signature_type_bank import merge_type_information, parse_c_header_prototypes
+        p = Path(target)
+        if not p.is_file():
+            raise FileNotFoundError(f"Arquivo não encontrado: {target}")
+        merged = merge_type_information(extra_c_headers=c_header_text)
+        extra_protos = parse_c_header_prototypes(c_header_text) if c_header_text else {}
+        return {
+            "schema": "aether_flirt_fidb.v1",
+            "target": str(p.resolve()),
+            "prototype_count": len(merged.get("prototypes", {})),
+            "parsed_header_prototypes": extra_protos,
+            "merged": merged,
+        }
+
+    @staticmethod
+    def handle_mba_simplify(expr: str) -> dict[str, Any]:
+        from aether_re.mba_synthesizer import simplify_mba_expr, solve_opaque_predicate_z3
+        return {
+            "schema": "aether_mba_simplify.v1",
+            "expr": expr,
+            "mba": simplify_mba_expr(expr),
+            "opaque_predicate": solve_opaque_predicate_z3(expr),
+        }
+
+    @staticmethod
+    def handle_vm_devirtualize(hex_bytes: str, arch: str = "amd64") -> dict[str, Any]:
+        from aether_re.vm_devirtualizer import devirtualize_vm_via_unicorn_trace
+        raw = bytes.fromhex(re.sub(r"\s+", "", hex_bytes))
+        return devirtualize_vm_via_unicorn_trace(raw, is_64=(arch in ("amd64", "x86_64")))
+
+    @staticmethod
+    def handle_elf_unpack(target: str, out_elf: str | None = None) -> dict[str, Any]:
+        from aether_re.dynamic_unpacker import unpack_elf_in_sandbox
+        res = unpack_elf_in_sandbox(target, output_elf_path=out_elf)
+        res.pop("unpacked_bytes", None)
+        return res
+
+    @staticmethod
+    def handle_concolic_fuzz(hex_bytes: str, arch: str = "amd64", max_iters: int = 16) -> dict[str, Any]:
+        from aether_re.concolic_fuzzer import generate_libfuzzer_harness, run_hybrid_concolic_fuzz
+        raw = bytes.fromhex(re.sub(r"\s+", "", hex_bytes))
+        fuzz_res = run_hybrid_concolic_fuzz(raw, arch=arch, mutation_budget=max_iters)
+        fuzz_res["libfuzzer_harness"] = generate_libfuzzer_harness(target_binary="fuzz_target")
+        return fuzz_res
+
+    @staticmethod
+    def handle_patch_diff_cve(unpatched_c: str, patched_c: str) -> dict[str, Any]:
+        from aether_re.binary_diff import audit_1day_patch_semantics
+        return audit_1day_patch_semantics(unpatched_c, patched_c)
+
+    @staticmethod
+    def handle_cil_decompile(target: str) -> dict[str, Any]:
+        from aether_re.cil_decompiler import decompile_dotnet_ecma335
+        p = Path(target)
+        if not p.is_file():
+            raise FileNotFoundError(f"Arquivo não encontrado: {target}")
+        return decompile_dotnet_ecma335(p.read_bytes(), assembly_name=p.stem)
+
+    @staticmethod
+    def handle_ioctl_prove(target: str, driver_c_code: str | None = None) -> dict[str, Any]:
+        from aether_re.driver_ioctl_fuzzer import audit_driver_ioctls_and_irps
+        p = Path(target)
+        if not p.is_file():
+            raise FileNotFoundError(f"Arquivo não encontrado: {target}")
+        return audit_driver_ioctls_and_irps(p.read_bytes(), driver_c_code=driver_c_code)
+
+    @staticmethod
+    def handle_ram_forensics(target: str, out_dir: str | None = None, cr3: str | None = None) -> dict[str, Any]:
+        from aether_re.ram_forensics import analyze_physical_ram_dump
+        p = Path(target)
+        if not p.is_file():
+            raise FileNotFoundError(f"Arquivo não encontrado: {target}")
+        cr3_val = int(cr3, 0) if cr3 else None
+        return analyze_physical_ram_dump(p.read_bytes(), output_dir=out_dir, cr3=cr3_val)
+
+    @staticmethod
+    def handle_disk_registry_evtx(
+        mft_path: str | None = None,
+        registry_hive_path: str | None = None,
+        evtx_path: str | None = None,
+        prefetch_path: str | None = None,
+    ) -> dict[str, Any]:
+        from aether_re.disk_registry_evtx import analyze_disk_registry_evtx
+        return analyze_disk_registry_evtx(
+            mft_bytes=Path(mft_path).read_bytes() if mft_path else None,
+            registry_hive_bytes=Path(registry_hive_path).read_bytes() if registry_hive_path else None,
+            evtx_bytes=Path(evtx_path).read_bytes() if evtx_path else None,
+            prefetch_blobs=[Path(prefetch_path).read_bytes()] if prefetch_path else None,
+        )
+
+    @staticmethod
+    def handle_pcap_forensics(target: str) -> dict[str, Any]:
+        from aether_re.pcap_forensics import analyze_pcap_capture
+        p = Path(target)
+        if not p.is_file():
+            raise FileNotFoundError(f"Arquivo não encontrado: {target}")
+        return analyze_pcap_capture(p.read_bytes())
+
+    @staticmethod
+    def handle_supertimeline(
+        out_dir: str,
+        mft_path: str | None = None,
+        registry_hive_path: str | None = None,
+        evtx_path: str | None = None,
+        pcap_path: str | None = None,
+        ram_path: str | None = None,
+    ) -> dict[str, Any]:
+        from aether_re.disk_registry_evtx import analyze_disk_registry_evtx
+        from aether_re.pcap_forensics import analyze_pcap_capture
+        from aether_re.ram_forensics import analyze_physical_ram_dump
+        from aether_re.supertimeline import build_supertimeline
+        ram_rep = analyze_physical_ram_dump(Path(ram_path).read_bytes()) if ram_path else None
+        disk_rep = (
+            analyze_disk_registry_evtx(
+                mft_bytes=Path(mft_path).read_bytes() if mft_path else None,
+                registry_hive_bytes=Path(registry_hive_path).read_bytes() if registry_hive_path else None,
+                evtx_bytes=Path(evtx_path).read_bytes() if evtx_path else None,
+            )
+            if (mft_path or registry_hive_path or evtx_path)
+            else None
+        )
+        pcap_rep = analyze_pcap_capture(Path(pcap_path).read_bytes()) if pcap_path else None
+        return build_supertimeline(ram_report=ram_rep, disk_report=disk_rep, pcap_report=pcap_rep, output_dir=out_dir)
+
+    @staticmethod
+    def handle_custody_verify(
+        manifest_path: str,
+        hmac_key_hex: str | None = None,
+        verify_files_on_disk: bool = True,
+    ) -> dict[str, Any]:
+        from aether_re.custody_release import verify_custody_snapshot
+        key = bytes.fromhex(hmac_key_hex) if hmac_key_hex else None
+        return verify_custody_snapshot(manifest_path, signing_key=key, verify_files_on_disk=verify_files_on_disk)
+
 
 def run_mcp_server() -> int:
     """Executa o loop stdio oficial do servidor MCP (JSON-RPC 2.0)."""
@@ -1672,6 +1985,50 @@ def run_mcp_server() -> int:
                         data = dispatcher.handle_symbolic_equivalence(args["hex_bytes"], arch=args.get("arch", "amd64"))
                     elif tool_name == "aether_exploit_prove":
                         data = dispatcher.handle_exploit_prove(args["project_dir"])
+                    elif tool_name == "aether_cxx_eh_analyze":
+                        data = dispatcher.handle_cxx_eh_analyze(args["target"])
+                    elif tool_name == "aether_flirt_fidb_match":
+                        data = dispatcher.handle_flirt_fidb_match(args["target"], c_header_text=args.get("c_header_text"))
+                    elif tool_name == "aether_mba_simplify":
+                        data = dispatcher.handle_mba_simplify(args["expr"])
+                    elif tool_name == "aether_vm_devirtualize":
+                        data = dispatcher.handle_vm_devirtualize(args["hex_bytes"], arch=args.get("arch", "amd64"))
+                    elif tool_name == "aether_elf_unpack":
+                        data = dispatcher.handle_elf_unpack(args["target"], out_elf=args.get("out_elf"))
+                    elif tool_name == "aether_concolic_fuzz":
+                        data = dispatcher.handle_concolic_fuzz(args["hex_bytes"], arch=args.get("arch", "amd64"), max_iters=args.get("max_iters", 16))
+                    elif tool_name == "aether_patch_diff_cve":
+                        data = dispatcher.handle_patch_diff_cve(args["unpatched_c"], args["patched_c"])
+                    elif tool_name == "aether_cil_decompile":
+                        data = dispatcher.handle_cil_decompile(args["target"])
+                    elif tool_name == "aether_ioctl_prove":
+                        data = dispatcher.handle_ioctl_prove(args["target"], driver_c_code=args.get("driver_c_code"))
+                    elif tool_name == "aether_ram_forensics":
+                        data = dispatcher.handle_ram_forensics(args["target"], out_dir=args.get("out_dir"), cr3=args.get("cr3"))
+                    elif tool_name == "aether_disk_registry_evtx":
+                        data = dispatcher.handle_disk_registry_evtx(
+                            mft_path=args.get("mft_path"),
+                            registry_hive_path=args.get("registry_hive_path"),
+                            evtx_path=args.get("evtx_path"),
+                            prefetch_path=args.get("prefetch_path"),
+                        )
+                    elif tool_name == "aether_pcap_forensics":
+                        data = dispatcher.handle_pcap_forensics(args["target"])
+                    elif tool_name == "aether_supertimeline":
+                        data = dispatcher.handle_supertimeline(
+                            args["out_dir"],
+                            mft_path=args.get("mft_path"),
+                            registry_hive_path=args.get("registry_hive_path"),
+                            evtx_path=args.get("evtx_path"),
+                            pcap_path=args.get("pcap_path"),
+                            ram_path=args.get("ram_path"),
+                        )
+                    elif tool_name == "aether_custody_verify":
+                        data = dispatcher.handle_custody_verify(
+                            args["manifest_path"],
+                            hmac_key_hex=args.get("hmac_key_hex"),
+                            verify_files_on_disk=bool(args.get("verify_files_on_disk", True)),
+                        )
                     else:
                         raise ValueError(f"Ferramenta desconhecida: {tool_name}")
 
@@ -1718,3 +2075,7 @@ def run_mcp_server() -> int:
                 pass
 
     return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(run_mcp_server())

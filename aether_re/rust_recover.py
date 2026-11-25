@@ -200,9 +200,34 @@ def reconstruct_rust_project(
         ])
 
     (src_dir / "lib.rs").write_text("\n".join(mod_lines), encoding="utf-8")
+
+    # Emit trait vtable skeletons from demangled `<Type as Trait>::method` implementations
+    trait_lines = ["//! Recovered Rust Trait & Struct Layouts (AetherRE v10.5)", ""]
+    seen_traits: set[str] = set()
+    for sym_rec in rep.get("demangled_symbols") or []:
+        dem = str(sym_rec.get("demangled") or "")
+        if " as " in dem and "<" in dem:
+            inner = dem.split("<", 1)[1].split(">", 1)[0]
+            if " as " in inner:
+                ty_part, tr_part = [p.strip() for p in inner.split(" as ", 1)]
+                tr_id = re.sub(r"[^A-Za-z0-9_]", "_", tr_part.split("::")[-1]) or "RecoveredTrait"
+                ty_id = re.sub(r"[^A-Za-z0-9_]", "_", ty_part.split("::")[-1]) or "RecoveredType"
+                if tr_id not in seen_traits:
+                    seen_traits.add(tr_id)
+                    trait_lines.extend([
+                        f"pub struct {ty_id};",
+                        f"pub trait {tr_id} {{ fn invoke(&self, v: i64) -> i64; }}",
+                        f"impl {tr_id} for {ty_id} {{ fn invoke(&self, v: i64) -> i64 {{ v }} }}",
+                        "",
+                    ])
+    gen_files = ["Cargo.toml", "src/lib.rs"]
+    if seen_traits:
+        (src_dir / "traits_recovered.rs").write_text("\n".join(trait_lines), encoding="utf-8")
+        gen_files.append("src/traits_recovered.rs")
+
     return {
         "status": "complete",
         "crate_name": crate_name,
-        "generated_files": ["Cargo.toml", "src/lib.rs"],
+        "generated_files": gen_files,
         "report": rep,
     }

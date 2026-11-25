@@ -190,18 +190,20 @@ def clone_and_audit_project(
         try:
             import pefile
             from aether_re.symbolic_equivalence import synthesize_branch_inputs_angr
-            pe_tmp = pefile.PE(data=effective_target.read_bytes(), fast_load=True)
+            pe_bytes_cur = effective_target.read_bytes()
+            pe_tmp = pefile.PE(data=pe_bytes_cur, fast_load=True)
             ep_rva = int(pe_tmp.OPTIONAL_HEADER.AddressOfEntryPoint or 0)
             if ep_rva:
                 off = pe_tmp.get_offset_from_rva(ep_rva)
-                slice_b = effective_target.read_bytes()[off : off + 128]
+                slice_b = pe_bytes_cur[off : off + 4096]
                 if slice_b:
                     angr_s = synthesize_branch_inputs_angr(
                         slice_b,
                         base_addr=0x400000,
                         arch="x86_32" if pe_tmp.FILE_HEADER.Machine == 0x014C else "amd64",
-                        max_states=16,
-                        max_steps=24,
+                        max_states=32,
+                        max_steps=64,
+                        image_bytes=pe_bytes_cur,
                     )
                     symbolic_summary = {
                         "executed": True,
