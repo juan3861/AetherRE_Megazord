@@ -18,6 +18,7 @@ tools/*
 !tools/benchmark_external_oss_and_dfir_parity.py
 !tools/benchmark_ground_truth_twin_reconstruction.py
 !tools/benchmark_multi_poly_ground_truth.py
+!tools/benchmark_v20_field_reality.py
 !tools/benchmark_world_sota_corpus.py
 !tools/build_discovery_100_catalog.py
 !tools/build_component_scorecard.py

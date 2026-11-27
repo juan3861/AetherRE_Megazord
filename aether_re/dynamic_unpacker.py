@@ -18,6 +18,7 @@ from unicorn import (
     UC_ARCH_X86,
     UC_HOOK_BLOCK,
     UC_HOOK_CODE,
+    UC_HOOK_INTR,
     UC_HOOK_MEM_WRITE,
     UC_MODE_32,
     UC_MODE_64,
@@ -390,6 +391,8 @@ def unpack_pe_in_sandbox(
         "oep_va": None,
         "resolved_apis": [],
         "exit_called": False,
+        "veh_handlers": [],
+        "seh_exceptions_dispatched": 0,
     }
 
     def _alloc(sz: int) -> int:
@@ -479,6 +482,10 @@ def unpack_pe_in_sandbox(
                     except Exception:
                         pass
                 ret_val = 1
+            elif api_low == "addvectoredexceptionhandler":
+                if image_base <= a1 < image_base + image_size:
+                    state["veh_handlers"].append(a1)
+                ret_val = a1 or 1
             elif api_low in ("gettickcount", "gettickcount64"):
                 ret_val = 1000 + state["insn_count"]
             elif api_low in ("exitprocess", "ntterminateprocess"):
@@ -523,9 +530,50 @@ def unpack_pe_in_sandbox(
             state["oep_va"] = address
             uc_inst.emu_stop()
 
+    def _on_intr(uc_inst: Uc, intno: int, user_data: Any) -> None:
+        """Real SEH (`FS:[0]`) / VEH exception dispatch for INT3 (`0xCC`) / UD2 (`0x0F 0x0B`)."""
+        handler_va: Optional[int] = state["veh_handlers"][0] if state["veh_handlers"] else None
+        if handler_va is None and not is_64:
+            try:
+                seh_head = struct.unpack("<I", bytes(uc_inst.mem_read(_TEB_BASE, 4)))[0]
+                if _STACK_BASE <= seh_head < _STACK_BASE + _STACK_SIZE - 8:
+                    cand = struct.unpack("<I", bytes(uc_inst.mem_read(seh_head + 4, 4)))[0]
+                    if image_base <= cand < image_base + image_size:
+                        handler_va = cand
+            except Exception:
+                handler_va = None
+        if handler_va is None:
+            uc_inst.emu_stop()
+            return
+        state["seh_exceptions_dispatched"] += 1
+        exc_code = 0x80000003 if intno == 3 else 0xC000001D
+        exc_rec = _alloc(0x100)
+        ctx_rec = _alloc(0x500)
+        try:
+            uc_inst.mem_write(exc_rec, struct.pack("<II", exc_code, 0))
+            if is_64:
+                rip_cur = uc_inst.reg_read(UC_X86_REG_RIP)
+                uc_inst.mem_write(exc_rec + 16, struct.pack("<Q", rip_cur))
+                uc_inst.mem_write(ctx_rec + 0xF8, struct.pack("<Q", rip_cur))
+                ep_ptrs = _alloc(16)
+                uc_inst.mem_write(ep_ptrs, struct.pack("<QQ", exc_rec, ctx_rec))
+                uc_inst.reg_write(UC_X86_REG_RCX, ep_ptrs)
+                uc_inst.reg_write(UC_X86_REG_RIP, handler_va)
+            else:
+                eip_cur = uc_inst.reg_read(UC_X86_REG_EIP)
+                uc_inst.mem_write(exc_rec + 12, struct.pack("<I", eip_cur))
+                uc_inst.mem_write(ctx_rec + 0xB8, struct.pack("<I", eip_cur))
+                sp = uc_inst.reg_read(UC_X86_REG_ESP) - 16
+                uc_inst.mem_write(sp, struct.pack("<IIII", _TRAMP_BASE, exc_rec, 0, ctx_rec))
+                uc_inst.reg_write(UC_X86_REG_ESP, sp)
+                uc_inst.reg_write(UC_X86_REG_EIP, handler_va)
+        except Exception:
+            uc_inst.emu_stop()
+
     uc.hook_add(UC_HOOK_MEM_WRITE, _on_mem_write)
     uc.hook_add(UC_HOOK_CODE, _on_code)
     uc.hook_add(UC_HOOK_BLOCK, _on_block)
+    uc.hook_add(UC_HOOK_INTR, _on_intr)
 
     # Set initial register state
     sp_init = _STACK_BASE + _STACK_SIZE - 0x2000
@@ -622,6 +670,7 @@ def unpack_pe_in_sandbox(
         "oep_rva": hex(oep_rva),
         "oep_detected": oep_va is not None or embedded_heap_pe is not None,
         "tls_callbacks_executed": tls_callbacks_executed,
+        "seh_veh_exceptions_dispatched": state["seh_exceptions_dispatched"],
         "peb_address": hex(_PEB_BASE),
         "instructions_executed": state["insn_count"],
         "memory_write_events": state["total_writes"],

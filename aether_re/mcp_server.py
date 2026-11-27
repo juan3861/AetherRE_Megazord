@@ -1027,6 +1027,55 @@ TOOLS = [
             "required": ["orig_dll", "twin_project_dir", "functions"]
         }
     },
+    {
+        "name": "aether_evtx_binxml",
+        "description": "Decodifica registros BinXML reais de arquivos Windows .evtx (EventID, Provider, Channel, MITRE).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "target": {"type": "string", "description": "Caminho do arquivo .evtx"},
+                "max_events": {"type": "integer", "default": 500},
+            },
+            "required": ["target"]
+        }
+    },
+    {
+        "name": "aether_cli_parity_certify",
+        "description": "Certifica paridade 100% de processo CLI inteiro (returncode, stdout, stderr, arquivos) entre original e twin.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "orig_exe": {"type": "string"},
+                "twin_exe": {"type": "string"},
+                "test_cases": {"type": "array", "items": {"type": "object"}},
+            },
+            "required": ["orig_exe", "twin_exe", "test_cases"]
+        }
+    },
+    {
+        "name": "aether_vm_cfg_devirtualize",
+        "description": "Devirtualiza handlers VM via trace Unicorn reconstruindo CFG estruturado com branches e loops.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "hex_bytes": {"type": "string"},
+                "fn_name": {"type": "string", "default": "devirt_vm_cfg"},
+            },
+            "required": ["hex_bytes"]
+        }
+    },
+    {
+        "name": "aether_workbench_export",
+        "description": "Gera Workbench Forense & RE HTML interativo offline (zero-CDN) com 6 painéis pesquisáveis.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "report_bundle": {"type": "object"},
+                "output_html": {"type": "string"},
+            },
+            "required": ["report_bundle", "output_html"]
+        }
+    },
 ]
 
 
@@ -1851,6 +1900,26 @@ class AetherMcpDispatcher:
         from aether_re.differential_certifier import certify_differential_parity
         return certify_differential_parity(orig_dll, twin_project_dir, functions, auto_repair=auto_repair)
 
+    @staticmethod
+    def handle_evtx_binxml(target: str, max_events: int = 500) -> dict[str, Any]:
+        from aether_re.disk_registry_evtx import parse_evtx_events
+        return parse_evtx_events(Path(target).read_bytes(), max_events=max_events)
+
+    @staticmethod
+    def handle_cli_parity_certify(orig_exe: str, twin_exe: str, test_cases: list[dict[str, Any]]) -> dict[str, Any]:
+        from aether_re.differential_certifier import certify_cli_executable_parity
+        return certify_cli_executable_parity(orig_exe, twin_exe, test_cases)
+
+    @staticmethod
+    def handle_vm_cfg_devirtualize(hex_bytes: str, fn_name: str = "devirt_vm_cfg") -> dict[str, Any]:
+        from aether_re.vm_devirtualizer import devirtualize_vm_bytecode_cfg
+        return devirtualize_vm_bytecode_cfg(bytes.fromhex(hex_bytes.replace(" ", "")), fn_name=fn_name)
+
+    @staticmethod
+    def handle_workbench_export(report_bundle: dict[str, Any], output_html: str) -> dict[str, Any]:
+        from aether_re.workbench_ui import generate_workbench_html
+        return generate_workbench_html(report_bundle, output_html)
+
 
 def run_mcp_server() -> int:
     """Executa o loop stdio oficial do servidor MCP (JSON-RPC 2.0)."""
@@ -2144,6 +2213,14 @@ def run_mcp_server() -> int:
                             list(args["functions"]),
                             auto_repair=bool(args.get("auto_repair", True)),
                         )
+                    elif tool_name == "aether_evtx_binxml":
+                        data = dispatcher.handle_evtx_binxml(args["target"], max_events=int(args.get("max_events", 500)))
+                    elif tool_name == "aether_cli_parity_certify":
+                        data = dispatcher.handle_cli_parity_certify(args["orig_exe"], args["twin_exe"], list(args["test_cases"]))
+                    elif tool_name == "aether_vm_cfg_devirtualize":
+                        data = dispatcher.handle_vm_cfg_devirtualize(args["hex_bytes"], fn_name=args.get("fn_name", "devirt_vm_cfg"))
+                    elif tool_name == "aether_workbench_export":
+                        data = dispatcher.handle_workbench_export(dict(args["report_bundle"]), args["output_html"])
                     else:
                         raise ValueError(f"Ferramenta desconhecida: {tool_name}")
 

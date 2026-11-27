@@ -65,7 +65,7 @@ MODULE_PHASE: dict[str, str] = {
     # F10 -- consenso calibrado e avaliacao cega
     "metrics": "F10", "benchmark": "F10",
     # F11 -- inteligencia assistida e revisao
-    "assistant": "F11", "claims": "F11", "review_ui": "F11",
+    "assistant": "F11", "claims": "F11", "review_ui": "F11", "workbench_ui": "F12",
     "mcp_server": "F11",
     # F12 -- homologacao independente e operacao
     "documentation": "F12", "external_attestations": "F12",

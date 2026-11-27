@@ -249,8 +249,16 @@ def _lift_cil_body_to_csharp(
             rel = struct.unpack_from("<i", il, p)[0]
             p += 4
             targets.add(p + rel)
-        elif op in (0x20, 0x28, 0x6F, 0x72, 0x73, 0x7B, 0x7C, 0x7D, 0x7E, 0x7F, 0x80) and p + 4 <= len(il):
+        elif op in (0x20, 0x28, 0x6F, 0x72, 0x73, 0x7B, 0x7C, 0x7D, 0x7E, 0x7F, 0x80, 0x8D) and p + 4 <= len(il):
             p += 4
+        elif op == 0x45 and p + 4 <= len(il):
+            n_sw = struct.unpack_from("<I", il, p)[0]
+            p += 4
+            if p + n_sw * 4 <= len(il):
+                rels_sw = [struct.unpack_from("<i", il, p + i * 4)[0] for i in range(n_sw)]
+                p += n_sw * 4
+                for rel in rels_sw:
+                    targets.add(p + rel)
         elif op == 0x21 and p + 8 <= len(il):
             p += 8
 
@@ -386,7 +394,48 @@ def _lift_cil_body_to_csharp(
             else:
                 rv = stack.pop() if stack else "0"
                 out.append(f"            return ({ret_type})({rv});")
-        elif op in (0x0F, 0x10, 0x12, 0x29, 0x73, 0x7B, 0x7C, 0x7D, 0x7E, 0x7F, 0x80):
+        elif op == 0x73 and p + 4 <= len(il):  # newobj
+            tok = struct.unpack_from("<I", il, p)[0]
+            p += 4
+            ctor_nm = method_names.get(tok, f"Type_{tok:08X}")
+            arg_o = stack.pop() if stack else ""
+            stack.append(f"new {ctor_nm}({arg_o})")
+        elif op in (0x7B, 0x7E) and p + 4 <= len(il):  # ldfld / ldsfld
+            tok = struct.unpack_from("<I", il, p)[0]
+            p += 4
+            fnm = method_names.get(tok, f"field_{tok & 0xFFFFFF}")
+            obj = (stack.pop() if stack else "this") if op == 0x7B else "/*static*/"
+            stack.append(f"{obj}.{fnm}" if op == 0x7B else fnm)
+        elif op in (0x7D, 0x80) and p + 4 <= len(il):  # stfld / stsfld
+            tok = struct.unpack_from("<I", il, p)[0]
+            p += 4
+            fnm = method_names.get(tok, f"field_{tok & 0xFFFFFF}")
+            val_e = stack.pop() if stack else "0"
+            obj = (stack.pop() if stack else "this") if op == 0x7D else ""
+            out.append(f"            {obj}.{fnm} = {val_e};" if obj else f"            {fnm} = {val_e};")
+        elif op == 0x8D and p + 4 <= len(il):  # newarr
+            _tok = struct.unpack_from("<I", il, p)[0]
+            p += 4
+            sz_e = stack.pop() if stack else "0"
+            stack.append(f"new int[{sz_e}]")
+        elif op == 0x8E and stack:  # ldlen
+            stack.append(f"{stack.pop()}.Length")
+        elif op in (0x90, 0x91, 0x92, 0x93, 0x94, 0x95, 0x96, 0x9A) and len(stack) >= 2:  # ldelem.*
+            idx_e, arr_e = stack.pop(), stack.pop()
+            stack.append(f"{arr_e}[{idx_e}]")
+        elif op in (0x9C, 0x9D, 0x9E, 0x9F, 0xA2) and len(stack) >= 3:  # stelem.*
+            val_e, idx_e, arr_e = stack.pop(), stack.pop(), stack.pop()
+            out.append(f"            {arr_e}[{idx_e}] = {val_e};")
+        elif op == 0x45 and p + 4 <= len(il):  # switch
+            n_cases = struct.unpack_from("<I", il, p)[0]
+            p += 4
+            if p + n_cases * 4 <= len(il):
+                rels = [struct.unpack_from("<i", il, p + i * 4)[0] for i in range(n_cases)]
+                p += n_cases * 4
+                sw_val = stack.pop() if stack else "0"
+                for ci, rel in enumerate(rels[:32]):
+                    out.append(f"            if (({sw_val}) == {ci}) goto IL_{p + rel:04X};")
+        elif op in (0x0F, 0x10, 0x12, 0x29, 0x7C, 0x7F):
             p += 1 if op in (0x0F, 0x10, 0x12) else 4
 
     if not any("return" in ln for ln in out):
@@ -467,6 +516,8 @@ def decompile_dotnet_ecma335(raw: bytes, *, assembly_name: str = "RecoveredAsm")
     parsed_typedefs: List[Dict[str, Any]] = []
     parsed_methods: List[Dict[str, Any]] = []
     method_tokens: Dict[int, str] = {}
+    typeref_tokens: Dict[int, str] = {}
+    field_tokens: Dict[int, str] = {}
 
     for tid in range(0x24):
         cnt = row_counts.get(tid, 0)
@@ -475,7 +526,13 @@ def decompile_dotnet_ecma335(raw: bytes, *, assembly_name: str = "RecoveredAsm")
         if tid == _TBL_MODULE:
             tp += cnt * (2 + str_sz + guid_sz * 3)
         elif tid == _TBL_TYPEREF:
-            tp += cnt * (res_sz + str_sz * 2)
+            for tr_i in range(1, cnt + 1):
+                _scope, tp = _read_int_n(tbl_buf, tp, res_sz)
+                tr_name_i, tp = _read_int_n(tbl_buf, tp, str_sz)
+                tr_ns_i, tp = _read_int_n(tbl_buf, tp, str_sz)
+                tr_nm = _read_cstr_heap(str_heap, tr_name_i) or f"TypeRef_{tr_i}"
+                tr_ns = _read_cstr_heap(str_heap, tr_ns_i)
+                typeref_tokens[0x01000000 | tr_i] = f"{tr_ns}.{tr_nm}" if tr_ns else tr_nm
         elif tid == _TBL_TYPEDEF:
             for _ in range(cnt):
                 t_flags = struct.unpack_from("<I", tbl_buf, tp)[0]
@@ -493,7 +550,12 @@ def decompile_dotnet_ecma335(raw: bytes, *, assembly_name: str = "RecoveredAsm")
                     "first_method": mth_i,
                 })
         elif tid == _TBL_FIELD:
-            tp += cnt * (2 + str_sz + blob_sz)
+            for fld_idx in range(1, cnt + 1):
+                _fflags = struct.unpack_from("<H", tbl_buf, tp)[0]
+                tp += 2
+                f_name_i, tp = _read_int_n(tbl_buf, tp, str_sz)
+                _f_sig, tp = _read_int_n(tbl_buf, tp, blob_sz)
+                field_tokens[0x04000000 | fld_idx] = _read_cstr_heap(str_heap, f_name_i) or f"field_{fld_idx}"
         elif tid == _TBL_METHODDEF:
             for midx in range(1, cnt + 1):
                 m_rva, _impl, m_flags = struct.unpack_from("<IHH", tbl_buf, tp)

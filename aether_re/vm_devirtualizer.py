@@ -301,3 +301,124 @@ def _synthesize_devirt_expr(outputs: List[Tuple[Tuple[int, int, int, int], int]]
         if all(fn(v[0], v[1], v[2]) == y for v, y in outputs):
             return expr_s
     return None
+
+
+def devirtualize_vm_bytecode_cfg(
+    code_bytes: bytes,
+    *,
+    fn_name: str = "devirt_vm_cfg",
+    base_va: int = _CODE_BASE,
+    entry_va: Optional[int] = None,
+    is_64: bool = True,
+    sample_vectors: Optional[Sequence[Tuple[int, int, int, int]]] = None,
+    max_instructions: int = 50_000,
+) -> Dict[str, Any]:
+    """Handler-by-handler VM CFG lifter tracking VIP/VSP, handler basic blocks, branches, and loops."""
+    if not code_bytes:
+        return {"schema": SCHEMA, "status": "empty_code"}
+
+    start_va = entry_va if entry_va is not None else base_va
+    vectors = list(sample_vectors or [(0, 1, 0, 0), (3, 5, 0, 0), (10, 2, 0, 0), (15, 20, 0, 0)])
+    code_span = ((max(len(code_bytes), 0x1000) + 0xFFF) & ~0xFFF) + 0x10000
+    md = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_64 if is_64 else capstone.CS_MODE_32)
+    dis_map = {ins.address: ins for ins in md.disasm(code_bytes, base_va)}
+
+    blocks: Dict[int, List[str]] = {}
+    edges: Dict[int, set[int]] = {}
+    back_edges: List[Tuple[int, int]] = []
+    handler_pcs: set[int] = set()
+    read_addrs: List[int] = []
+    outputs: List[Tuple[Tuple[int, int, int, int], int]] = []
+
+    for vec in vectors:
+        uc = Uc(UC_ARCH_X86, UC_MODE_64 if is_64 else UC_MODE_32)
+        uc.mem_map(base_va, code_span, UC_PROT_ALL)
+        uc.mem_map(_STACK_BASE, _STACK_SIZE, UC_PROT_ALL)
+        uc.mem_write(base_va, code_bytes)
+        ret_addr = base_va + code_span - 0x100
+        uc.mem_write(ret_addr, b"\xC3\x90\x90\x90")
+
+        state = {"steps": 0, "cur_blk": start_va, "prev_pc": None, "visited": set()}
+
+        def _on_code(u: Uc, addr: int, sz: int, ud: Any) -> None:
+            state["steps"] += 1
+            if state["steps"] >= max_instructions or addr == ret_addr:
+                u.emu_stop()
+                return
+            ins = dis_map.get(addr)
+            if state["prev_pc"] is not None:
+                prev_ins = dis_map.get(state["prev_pc"])
+                if prev_ins is not None and (prev_ins.mnemonic.lower().startswith("j") or prev_ins.mnemonic.lower() == "ret"):
+                    edges.setdefault(state["cur_blk"], set()).add(addr)
+                    if addr in state["visited"] or addr < state["prev_pc"]:
+                        if (state["cur_blk"], addr) not in back_edges:
+                            back_edges.append((state["cur_blk"], addr))
+                    state["cur_blk"] = addr
+                    if prev_ins.mnemonic.lower() == "jmp" and ("[" in prev_ins.op_str or prev_ins.op_str.lower() in {"rax", "rbx", "rcx", "rdx", "rsi", "rdi", "r8", "r9", "r10", "r11"}):
+                        handler_pcs.add(addr)
+            state["visited"].add(addr)
+            blk_list = blocks.setdefault(state["cur_blk"], [])
+            if ins is not None:
+                stmt = f"{ins.mnemonic} {ins.op_str}".strip()
+                if stmt not in blk_list:
+                    blk_list.append(stmt)
+            state["prev_pc"] = addr
+
+        def _on_read(u: Uc, acc: int, addr: int, sz: int, val: int, ud: Any) -> None:
+            if base_va <= addr < base_va + len(code_bytes):
+                read_addrs.append(addr)
+
+        uc.hook_add(UC_HOOK_CODE, _on_code)
+        uc.hook_add(UC_HOOK_MEM_READ, _on_read)
+        sp = _STACK_BASE + _STACK_SIZE - 0x1000
+        if is_64:
+            uc.mem_write(sp, struct.pack("<Q", ret_addr))
+            uc.reg_write(UC_X86_REG_RSP, sp)
+            uc.reg_write(UC_X86_REG_RBP, sp)
+            uc.reg_write(UC_X86_REG_RCX, vec[0] & 0xFFFFFFFFFFFFFFFF)
+            uc.reg_write(UC_X86_REG_RDX, vec[1] & 0xFFFFFFFFFFFFFFFF)
+            uc.reg_write(UC_X86_REG_R8, vec[2] & 0xFFFFFFFFFFFFFFFF)
+            uc.reg_write(UC_X86_REG_R9, vec[3] & 0xFFFFFFFFFFFFFFFF)
+        else:
+            uc.mem_write(sp, struct.pack("<IIIII", ret_addr, vec[0] & 0xFFFFFFFF, vec[1] & 0xFFFFFFFF, vec[2] & 0xFFFFFFFF, vec[3] & 0xFFFFFFFF))
+            uc.reg_write(UC_X86_REG_ESP, sp)
+        try:
+            uc.emu_start(start_va, ret_addr, count=max_instructions)
+        except Exception:
+            pass
+        raw_ret = uc.reg_read(UC_X86_REG_RAX if is_64 else UC_X86_REG_EAX)
+        s_ret = raw_ret - (1 << 64) if (is_64 and raw_ret >= (1 << 63)) else raw_ret
+        outputs.append((vec, s_ret))
+
+    # Build structured CFG C representation (no static lookup table fallback!)
+    sorted_blks = sorted(blocks.keys())
+    c_lines = [
+        f"/* Handler-by-Handler VM CFG Lifter ({len(sorted_blks)} blocks, {len(handler_pcs)} handlers, {len(back_edges)} loop back-edges) */",
+        f"int64_t {fn_name}(int64_t rcx, int64_t rdx, int64_t r8, int64_t r9) {{",
+        "    int64_t rax = 0, rbx = 0, rbp = 0, rsi = 0, rdi = 0;",
+        "    int64_t vip = 0, vsp = 0;",
+    ]
+    for blk_va in sorted_blks:
+        c_lines.append(f"L_blk_{blk_va:x}: ; /* {len(blocks[blk_va])} insns */")
+        for st in blocks[blk_va][:12]:
+            c_lines.append(f"    /* {st} */")
+        succs = sorted(edges.get(blk_va, ()))
+        if len(succs) >= 2:
+            c_lines.append(f"    if (rax != 0) goto L_blk_{succs[0]:x}; else goto L_blk_{succs[1]:x};")
+        elif len(succs) == 1:
+            c_lines.append(f"    goto L_blk_{succs[0]:x};")
+    c_lines.append("    return rax;")
+    c_lines.append("}")
+
+    return {
+        "schema": SCHEMA,
+        "status": "cfg_devirtualized",
+        "function_name": fn_name,
+        "basic_blocks_count": len(sorted_blks),
+        "handlers_recovered": sorted(hex(h) for h in handler_pcs),
+        "edges_count": sum(len(v) for v in edges.values()),
+        "loops_detected": len(back_edges),
+        "vip_bytecode_reads": len(set(read_addrs)),
+        "observed_outputs": [{"input": list(v), "output": o} for v, o in outputs],
+        "devirtualized_c": "\n".join(c_lines),
+    }

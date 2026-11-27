@@ -231,3 +231,180 @@ def certify_differential_parity(
         cp.write_text(json.dumps(cert, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
         cert["certificate_path"] = str(cp)
     return cert
+
+
+def certify_cli_executable_parity(
+    orig_exe_path: str | Path,
+    twin_exe_path: str | Path,
+    test_cases: Sequence[dict[str, Any]],
+    *,
+    timeout_s: float = 10.0,
+    output_cert_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Certify whole-process CLI parity (`returncode`, `stdout`, `stderr`, and output file SHA-256) in isolated sandboxes."""
+    import shutil
+    import subprocess
+    import tempfile
+
+    orig_p = Path(orig_exe_path).resolve()
+    twin_p = Path(twin_exe_path).resolve()
+    if not orig_p.is_file() or not twin_p.is_file():
+        raise FileNotFoundError(f"Both executables must exist: orig={orig_p}, twin={twin_p}")
+
+    divergences: list[dict[str, Any]] = []
+    passed = 0
+    for idx, tc in enumerate(test_cases):
+        argv = [str(a) for a in tc.get("argv", [])]
+        stdin_txt = tc.get("stdin", "")
+        in_files: dict[str, bytes] = tc.get("input_files", {})
+        out_files: list[str] = list(tc.get("output_files", []))
+
+        with tempfile.TemporaryDirectory() as tmp_o, tempfile.TemporaryDirectory() as tmp_t:
+            do, dt = Path(tmp_o), Path(tmp_t)
+            for fname, content in in_files.items():
+                (do / fname).write_bytes(content)
+                (dt / fname).write_bytes(content)
+
+            po = subprocess.run([str(orig_p), *argv], cwd=do, input=stdin_txt, capture_output=True, text=True, timeout=timeout_s)
+            pt = subprocess.run([str(twin_p), *argv], cwd=dt, input=stdin_txt, capture_output=True, text=True, timeout=timeout_s)
+
+            file_diffs: list[str] = []
+            for ofn in out_files:
+                fo, ft = do / ofn, dt / ofn
+                ho = hashlib.sha256(fo.read_bytes()).hexdigest() if fo.is_file() else "MISSING"
+                ht = hashlib.sha256(ft.read_bytes()).hexdigest() if ft.is_file() else "MISSING"
+                if ho != ht:
+                    file_diffs.append(f"{ofn}: orig={ho} twin={ht}")
+
+            if po.returncode == pt.returncode and po.stdout == pt.stdout and po.stderr == pt.stderr and not file_diffs:
+                passed += 1
+            else:
+                divergences.append({
+                    "case_index": idx,
+                    "argv": argv,
+                    "orig_rc": po.returncode,
+                    "twin_rc": pt.returncode,
+                    "orig_stdout": po.stdout[:200],
+                    "twin_stdout": pt.stdout[:200],
+                    "file_diffs": file_diffs,
+                })
+
+    total = len(test_cases)
+    pct = round((passed / total) * 100.0, 4) if total else 0.0
+    cert = {
+        "schema": "cli-differential-parity.v1",
+        "orig_exe": str(orig_p),
+        "twin_exe": str(twin_p),
+        "total_cases": total,
+        "passed_cases": passed,
+        "differential_parity_pct": pct,
+        "certified_100pct": total > 0 and passed == total,
+        "divergences": divergences[:10],
+    }
+    if output_cert_path is not None:
+        cp = Path(output_cert_path)
+        cp.parent.mkdir(parents=True, exist_ok=True)
+        cp.write_text(json.dumps(cert, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    return cert
+
+
+def certify_buffer_function_parity(
+    orig_dll_path: str | Path,
+    twin_project_dir: str | Path,
+    function_name: str,
+    byte_payloads: Sequence[bytes],
+    *,
+    twin_dll_name: str = "reconstructed_twin.dll",
+) -> dict[str, Any]:
+    """Certify parity for `(const uint8_t* buf, size_t len)` or in-place buffer mutating DLL functions."""
+    orig_p = Path(orig_dll_path).resolve()
+    twin_p = Path(twin_project_dir).resolve() / twin_dll_name
+    lo = ctypes.CDLL(str(orig_p))
+    lt = ctypes.CDLL(str(twin_p))
+    divergences: list[dict[str, Any]] = []
+    try:
+        fo = getattr(lo, function_name)
+        ft = getattr(lt, function_name)
+        fo.argtypes = [ctypes.c_void_p, ctypes.c_uint64]
+        fo.restype = ctypes.c_int64
+        ft.argtypes = [ctypes.c_void_p, ctypes.c_uint64]
+        ft.restype = ctypes.c_int64
+        for idx, pay in enumerate(byte_payloads):
+            bo = ctypes.create_string_buffer(pay, max(1, len(pay)))
+            bt = ctypes.create_string_buffer(pay, max(1, len(pay)))
+            ro = int(fo(ctypes.cast(bo, ctypes.c_void_p), len(pay)))
+            rt = int(ft(ctypes.cast(bt, ctypes.c_void_p), len(pay)))
+            if ro != rt or bo.raw[: len(pay)] != bt.raw[: len(pay)]:
+                divergences.append({"index": idx, "orig_ret": ro, "twin_ret": rt})
+    finally:
+        _unload_cdll(lo)
+        _unload_cdll(lt)
+
+    total = len(byte_payloads)
+    passed = max(0, total - len(divergences))
+    return {
+        "schema": "buffer-differential-parity.v1",
+        "function": function_name,
+        "total_payloads": total,
+        "passed_payloads": passed,
+        "differential_parity_pct": round((passed / total) * 100.0, 4) if total else 0.0,
+        "certified_100pct": total > 0 and not divergences,
+        "divergences": divergences[:10],
+    }
+
+
+def locate_divergence_rva(
+    orig_binary_path: str | Path,
+    rva: int,
+    regs_init: dict[str, int] | None = None,
+    max_steps: int = 64,
+) -> dict[str, Any]:
+    """Trace an x64 function in Unicorn + Capstone to pinpoint basic-block RVAs and register states."""
+    import capstone
+    import pefile
+    import unicorn
+    import unicorn.x86_const as uc_x86
+
+    pe = pefile.PE(str(orig_binary_path), fast_load=True)
+    img = pe.get_memory_mapped_image()
+    base = 0x100000
+    mu = unicorn.Uc(unicorn.UC_ARCH_X86, unicorn.UC_MODE_64)
+    img_sz = max(0x10000, ((len(img) + 0xFFF) & ~0xFFF))
+    mu.mem_map(base, img_sz)
+    mu.mem_write(base, img)
+    stack_base = 0x10000000
+    mu.mem_map(stack_base - 0x10000, 0x20000)
+    mu.reg_write(uc_x86.UC_X86_REG_RSP, stack_base)
+    mu.mem_write(stack_base, (0xDEAD0000).to_bytes(8, "little"))
+
+    reg_map = {
+        "rcx": uc_x86.UC_X86_REG_RCX,
+        "rdx": uc_x86.UC_X86_REG_RDX,
+        "r8": uc_x86.UC_X86_REG_R8,
+        "r9": uc_x86.UC_X86_REG_R9,
+    }
+    for k, v in (regs_init or {}).items():
+        if k.lower() in reg_map:
+            mu.reg_write(reg_map[k.lower()], v & 0xFFFFFFFFFFFFFFFF)
+
+    trace: list[dict[str, Any]] = []
+    md = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_64)
+
+    def _hook_code(_uc: Any, address: int, size: int, _user: Any) -> None:
+        if len(trace) >= max_steps:
+            _uc.emu_stop()
+            return
+        code = bytes(_uc.mem_read(address, min(size, 15)))
+        ins = next(md.disasm(code, address), None)
+        trace.append({
+            "rva": hex(address - base),
+            "insn": f"{ins.mnemonic} {ins.op_str}" if ins else code.hex(),
+            "rax": hex(_uc.reg_read(uc_x86.UC_X86_REG_RAX)),
+        })
+
+    mu.hook_add(unicorn.UC_HOOK_CODE, _hook_code)
+    try:
+        mu.emu_start(base + rva, 0xDEAD0000, count=max_steps)
+    except Exception:
+        pass
+    return {"schema": "divergence-trace.v1", "entry_rva": hex(rva), "steps": len(trace), "trace": trace}

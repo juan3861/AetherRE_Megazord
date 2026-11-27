@@ -210,22 +210,72 @@ def _parse_tls_client_hello_ja3(payload: bytes) -> dict[str, Any] | None:
     return {"sni": sni, "ja3_string": ja3_str, "ja3_md5": ja3_md5}
 
 
+def _tls13_hkdf_expand_label(secret: bytes, label: bytes, context: bytes, length: int, hash_alg: Any) -> bytes:
+    """RFC 8446 Section 7.1 HKDF-Expand-Label."""
+    from cryptography.hazmat.primitives.kdf.hkdf import HKDFExpand
+
+    full_label = b"tls13 " + label
+    hkdf_label = struct.pack("!HB", length, len(full_label)) + full_label + struct.pack("!B", len(context)) + context
+    return HKDFExpand(algorithm=hash_alg, length=length, info=hkdf_label).derive(secret)
+
+
+def tls13_derive_traffic_key_iv(traffic_secret: bytes, key_len: int = 16) -> tuple[bytes, bytes]:
+    """Derive RFC 8446 TLS 1.3 AEAD `key` and 12-byte `iv` from a traffic secret."""
+    from cryptography.hazmat.primitives import hashes
+
+    alg = hashes.SHA384() if len(traffic_secret) == 48 else hashes.SHA256()
+    k = _tls13_hkdf_expand_label(traffic_secret, b"key", b"", key_len, alg)
+    iv = _tls13_hkdf_expand_label(traffic_secret, b"iv", b"", 12, alg)
+    return k, iv
+
+
+def decrypt_tls13_record(record_bytes: bytes, traffic_secret: bytes, seq_num: int = 0, key_len: int = 16) -> bytes | None:
+    """Decrypt a genuine RFC 8446 TLS 1.3 ApplicationData (0x17) AES-GCM record using AAD + seq XOR nonce."""
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+    if len(record_bytes) < 5 + 17 or record_bytes[0] != 0x17:
+        return None
+    aad = bytes(record_bytes[:5])
+    rec_len = struct.unpack_from("!H", aad, 3)[0]
+    ct = bytes(record_bytes[5 : 5 + rec_len])
+    if len(ct) != rec_len or rec_len < 17:
+        return None
+    for klen in (key_len, 32 if key_len == 16 else 16):
+        key, iv = tls13_derive_traffic_key_iv(traffic_secret, key_len=klen)
+        nonce_int = int.from_bytes(iv, "big") ^ seq_num
+        nonce = nonce_int.to_bytes(12, "big")
+        try:
+            inner = AESGCM(key).decrypt(nonce, ct, aad)
+            # Strip trailing zero padding + inner ContentType byte (RFC 8446 Section 5.4)
+            trimmed = inner.rstrip(b"\x00")
+            if trimmed:
+                return trimmed[:-1]
+            return inner
+        except Exception:
+            continue
+    return None
+
+
 def decrypt_tls_with_ram_secrets(
     pcap_bytes: bytes | Any,
     tls_secrets: list[dict[str, str]],
 ) -> list[dict[str, Any]]:
-    """Decrypt TLS Application Data (0x17) AES-GCM packets using matched 16/32B session secrets."""
+    """Decrypt TLS 1.3 RFC 8446 (`CLIENT/SERVER_TRAFFIC_SECRET_0`) or explicit-nonce AES-GCM records."""
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-    key_map: dict[bytes, bytes] = {}
+    key_map: dict[bytes, dict[str, bytes]] = {}
     for entry in tls_secrets:
         cr = bytes.fromhex(entry["client_random"])
         sec = bytes.fromhex(entry["secret_hex"])
-        key_map[cr] = sec
+        lbl = entry.get("label", "CLIENT_RANDOM")
+        key_map.setdefault(cr, {})[lbl] = sec
 
     pkts = _iter_pcapng_packets(pcap_bytes) if pcap_bytes[:4] == b"\x0a\x0d\x0d\x0a" else _iter_pcap_packets(pcap_bytes)
-    active_key: bytes | None = None
+    active_secrets: dict[str, bytes] | None = None
+    client_ip: str | None = None
+    seq_counters: dict[str, int] = {"client": 0, "server": 0}
     decrypted: list[dict[str, Any]] = []
+
     for ts, lt, frame in pkts:
         l3_off = 14 if lt == 1 else 0
         if len(frame) < l3_off + 20:
@@ -234,6 +284,7 @@ def decrypt_tls_with_ram_secrets(
         if ip[9] != 6:
             continue
         ihl = (ip[0] & 0xF) * 4
+        src_ip = socket.inet_ntoa(ip[12:16])
         l4 = ip[ihl:]
         if len(l4) < 20:
             continue
@@ -242,20 +293,38 @@ def decrypt_tls_with_ram_secrets(
         if len(payload) >= 43 and payload[0] == 0x16 and payload[5] == 0x01:
             crand = bytes(payload[11:43])
             if crand in key_map:
-                active_key = key_map[crand]
-        elif active_key is not None and len(payload) >= 18 and payload[0] == 0x17:
-            # Explicit 12-byte nonce + AES-GCM ciphertext + 16-byte tag inside ApplicationData body
-            body = bytes(payload[5:])
-            if len(body) > 28:
-                nonce, ct = body[:12], body[12:]
-                try:
-                    pt = AESGCM(active_key[:32] if len(active_key) >= 32 else active_key[:16]).decrypt(nonce, ct, None)
+                active_secrets = key_map[crand]
+                client_ip = src_ip
+                seq_counters = {"client": 0, "server": 0}
+        elif active_secrets is not None and len(payload) >= 22 and payload[0] == 0x17:
+            direction = "client" if src_ip == client_ip else "server"
+            tls13_lbl = "CLIENT_TRAFFIC_SECRET_0" if direction == "client" else "SERVER_TRAFFIC_SECRET_0"
+            if tls13_lbl in active_secrets:
+                pt = decrypt_tls13_record(payload, active_secrets[tls13_lbl], seq_num=seq_counters[direction])
+                if pt is not None:
+                    seq_counters[direction] += 1
                     decrypted.append({
                         "timestamp_utc": _ts_to_iso(ts),
+                        "protocol": "TLS_1.3_RFC8446",
+                        "direction": direction,
                         "plaintext_utf8": pt.decode("utf-8", errors="replace"),
                     })
-                except Exception:
-                    pass
+                    continue
+            # Explicit-nonce fallback for `CLIENT_RANDOM`
+            raw_key = active_secrets.get("CLIENT_RANDOM")
+            if raw_key:
+                body = bytes(payload[5:])
+                if len(body) > 28:
+                    nonce, ct = body[:12], body[12:]
+                    try:
+                        pt = AESGCM(raw_key[:32] if len(raw_key) >= 32 else raw_key[:16]).decrypt(nonce, ct, None)
+                        decrypted.append({
+                            "timestamp_utc": _ts_to_iso(ts),
+                            "protocol": "AES_GCM_SESSION",
+                            "plaintext_utf8": pt.decode("utf-8", errors="replace"),
+                        })
+                    except Exception:
+                        pass
     return decrypted
 
 

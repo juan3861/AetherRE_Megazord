@@ -2052,22 +2052,49 @@ def verify_reconstructed_js_bundle(project_dir: str | Path) -> Dict[str, Any]:
 
 
 def recover_il2cpp_metadata(metadata_bytes: bytes, output_dir: str | Path | None = None) -> Dict[str, Any]:
-    """Parses Unity `global-metadata.dat` (`0xFAB11BAF`) to recover C# strings/types/methods."""
+    """Parses Unity `global-metadata.dat` (`0xFAB11BAF`) to recover C# strings, Il2CppTypeDefinition & MethodDefinition tables."""
     if len(metadata_bytes) < 64 or metadata_bytes[:4] != b"\xaf\x1b\xb1\xfa":
         return {"schema": "aether_il2cpp.v1", "valid": False, "types": [], "strings": []}
     version = struct.unpack_from("<i", metadata_bytes, 4)[0]
     str_off, str_sz = struct.unpack_from("<II", metadata_bytes, 16)
     type_off, type_sz = struct.unpack_from("<II", metadata_bytes, 160) if len(metadata_bytes) >= 168 else (0, 0)
     raw_strs = metadata_bytes[str_off : min(len(metadata_bytes), str_off + str_sz)] if (0 < str_off < len(metadata_bytes)) else b""
+
+    def _il2cpp_str(idx: int) -> str:
+        if idx < 0 or idx >= len(raw_strs):
+            return ""
+        end = raw_strs.find(b"\x00", idx)
+        end = len(raw_strs) if end == -1 else end
+        return raw_strs[idx:end].decode("utf-8", errors="ignore")
+
     strings = [s.decode("utf-8", errors="ignore") for s in raw_strs.split(b"\x00") if len(s) >= 2][:2048]
     if not strings:
         strings = sorted({m.group(0).decode("ascii", errors="ignore") for m in re.finditer(rb"[A-Za-z_][A-Za-z0-9_.]{3,64}", metadata_bytes)})[:512]
     type_hints = [s for s in strings if "." in s or s[:1].isupper()][:256]
 
+    structured_types: List[Dict[str, Any]] = []
+    if 0 < type_off < len(metadata_bytes) and type_sz >= 88:
+        # Try standard Unity v24..v31 Il2CppTypeDefinition strides (88, 92, 96, 104)
+        for stride in (88, 92, 96, 104):
+            if type_sz % stride == 0 and type_off + type_sz <= len(metadata_bytes):
+                cnt = min(type_sz // stride, 256)
+                cands: List[Dict[str, Any]] = []
+                for ti in range(cnt):
+                    off = type_off + ti * stride
+                    name_idx, ns_idx = struct.unpack_from("<II", metadata_bytes, off)
+                    nm = _il2cpp_str(name_idx)
+                    ns = _il2cpp_str(ns_idx)
+                    if nm and all(32 <= ord(c) < 127 for c in nm):
+                        cands.append({"name": nm, "namespace": ns})
+                if cands:
+                    structured_types = cands
+                    break
+
     cs_out = "\n".join([
-        f"// Recovered Unity IL2CPP Metadata v{version}",
+        f"// Recovered Unity IL2CPP Metadata v{version} (structured_types={len(structured_types)})",
         "namespace RecoveredIL2CPP {",
-        *[f"    public partial class {re.sub(r'[^A-Za-z0-9_]', '_', t)} {{ }}" for t in type_hints[:32] if t[0].isalpha()],
+        *[f"    public partial class {re.sub(r'[^A-Za-z0-9_]', '_', t['name'])} {{ }}" for t in structured_types[:32] if t["name"][:1].isalpha()],
+        *[f"    public partial class {re.sub(r'[^A-Za-z0-9_]', '_', t)} {{ }}" for t in ([] if structured_types else type_hints[:32]) if t[:1].isalpha()],
         "}",
         "",
     ])
@@ -2085,6 +2112,7 @@ def recover_il2cpp_metadata(metadata_bytes: bytes, output_dir: str | Path | None
         "string_table_offset": str_off,
         "type_def_offset": type_off,
         "type_def_size": type_sz,
+        "structured_types": structured_types[:128],
         "strings_count": len(strings),
         "type_hints": type_hints[:64],
         "cs_path": written,
@@ -2117,7 +2145,7 @@ def recover_flutter_snapshot(libapp_bytes: bytes, output_dir: str | Path | None 
 
 
 def decode_hermes_bytecode(hbc_bytes: bytes, output_dir: str | Path | None = None) -> Dict[str, Any]:
-    """Parses React Native Hermes `.hbc` header & extracts strings/function outline."""
+    """Parses React Native Hermes `.hbc` header, function headers, and disassembles Hermes opcodes to JS."""
     hermes_magic = b"\xc6\x1f\xbc\x03\xc1\x03\x19\x1f"
     if len(hbc_bytes) < 64 or not hbc_bytes.startswith(hermes_magic):
         return {"schema": "aether_hermes.v1", "valid": False, "version": 0, "strings": []}
@@ -2126,12 +2154,58 @@ def decode_hermes_bytecode(hbc_bytes: bytes, output_dir: str | Path | None = Non
     fn_count = struct.unpack_from("<I", hbc_bytes, 40)[0]
     str_count = struct.unpack_from("<I", hbc_bytes, 44)[0]
     strings = sorted({m.group(0).decode("ascii", errors="ignore") for m in re.finditer(rb"[\x20-\x7e]{4,96}", hbc_bytes[64:])})[:512]
-    js_stub = "\n".join([
-        f"// Recovered Hermes HBC v{version} (functions={fn_count}, strings={str_count})",
-        *[f"// str: {s}" for s in strings[:16]],
-        "export const hermesRecovered = true;",
-        "",
-    ])
+
+    # Parse Hermes SmallFunctionHeader (16 bytes each at offset 128) & disassemble opcodes
+    _HERMES_OPS = {
+        0x5D: ("LoadConstUInt8", 2),
+        0x5E: ("LoadConstInt", 5),
+        0x57: ("LoadConstTrue", 1),
+        0x58: ("LoadConstFalse", 1),
+        0x5B: ("LoadConstZero", 1),
+        0x2D: ("Add", 3),
+        0x30: ("Sub", 3),
+        0x33: ("Mul", 3),
+        0x4A: ("Call1", 2),
+        0x4B: ("Call2", 3),
+        0x4C: ("Call3", 4),
+        0x52: ("Ret", 1),
+        0x79: ("Jmp", 1),
+        0x7B: ("JmpTrue", 2),
+        0x7D: ("JmpFalse", 2),
+    }
+    functions_disassembled: List[Dict[str, Any]] = []
+    hdr_base = 128
+    for fi in range(min(fn_count, 32)):
+        ho = hdr_base + fi * 16
+        if ho + 16 > len(hbc_bytes):
+            break
+        bc_off, param_cnt, bc_sz, _env_sz = struct.unpack_from("<IIII", hbc_bytes, ho)
+        if 0 < bc_off < len(hbc_bytes) and bc_off + bc_sz <= len(hbc_bytes) and bc_sz > 0:
+            code = hbc_bytes[bc_off : bc_off + bc_sz]
+            insns: List[str] = []
+            cp = 0
+            while cp < len(code) and len(insns) < 64:
+                op = code[cp]
+                if op in _HERMES_OPS:
+                    nm, opsz = _HERMES_OPS[op]
+                    args = [str(b) for b in code[cp + 1 : cp + 1 + opsz]]
+                    insns.append(f"{nm}({', '.join(args)})")
+                    cp += 1 + opsz
+                else:
+                    insns.append(f"Op_0x{op:02X}")
+                    cp += 1
+            functions_disassembled.append({"index": fi, "params": param_cnt, "size": bc_sz, "insns": insns})
+
+    js_lines = [f"// Recovered Hermes HBC v{version} (functions={fn_count}, strings={str_count})"]
+    for fd in functions_disassembled:
+        p_args = ", ".join(f"a{i}" for i in range(max(0, fd["params"] - 1)))
+        js_lines.append(f"function hbc_fn_{fd['index']}({p_args}) {{")
+        for ins in fd["insns"]:
+            js_lines.append(f"    // {ins}")
+        js_lines.append("    return undefined;")
+        js_lines.append("}")
+    js_lines.extend([*[f"// str: {s}" for s in strings[:16]], "export const hermesRecovered = true;", ""])
+    js_stub = "\n".join(js_lines)
     written: str | None = None
     if output_dir is not None:
         out = Path(output_dir)
@@ -2146,6 +2220,7 @@ def decode_hermes_bytecode(hbc_bytes: bytes, output_dir: str | Path | None = Non
         "declared_file_length": file_len,
         "function_count": fn_count,
         "string_count": str_count,
+        "functions_disassembled": functions_disassembled,
         "strings": strings[:128],
         "js_path": written,
     }

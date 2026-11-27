@@ -216,13 +216,13 @@ _XMM_REGS = tuple(f"xmm{i}" for i in range(16))
 _XMM_HI_REGS = tuple(f"xmm{i}_hi" for i in range(16))
 _REG_MAP: Dict[str, str] = {k: v[0] for k, v in _REG_INFO.items()}
 _VALID_C_REGS = set(_REG_MAP.values())
-_SIZE_PREFIX_MAP = {"byte": 1, "word": 2, "dword": 4, "qword": 8, "xmmword": 8}
+_SIZE_PREFIX_MAP = {"byte": 1, "word": 2, "dword": 4, "qword": 8, "xmmword": 8, "ymmword": 8}
 _MEM_OP_RE = re.compile(
-    r"^(?:(byte|word|dword|qword|xmmword)\s+ptr\s+)?\[([^\]]+)\]$",
+    r"^(?:(byte|word|dword|qword|xmmword|ymmword)\s+ptr\s+)?\[([^\]]+)\]$",
     re.IGNORECASE,
 )
 _RIP_REL_RE = re.compile(
-    r"^(?:(byte|word|dword|qword|xmmword)\s+ptr\s+)?\[rip\s*([+-])\s*(0x[0-9a-f]+|\d+)\]$",
+    r"^(?:(byte|word|dword|qword|xmmword|ymmword)\s+ptr\s+)?\[rip\s*([+-])\s*(0x[0-9a-f]+|\d+)\]$",
     re.IGNORECASE,
 )
 
@@ -1027,6 +1027,24 @@ def _emit_reg_write_stmt(dst_reg_raw: str, val_expr: str) -> Optional[str]:
     return f"    {canon} = (int64_t)({val_expr});"
 
 
+def _build_pe_iat_slot_map(pe: Any) -> Dict[int, Tuple[str, str]]:
+    """Map every PE IAT slot RVA to `(dll_name, symbol_name)` for dynamic host IAT bridging."""
+    iat_map: Dict[int, Tuple[str, str]] = {}
+    if pe is None:
+        return iat_map
+    image_base = pe.OPTIONAL_HEADER.ImageBase
+    for imp in getattr(pe, "DIRECTORY_ENTRY_IMPORT", []):
+        dll_b = getattr(imp, "dll", b"") or b""
+        dll_name = dll_b.decode("utf-8", errors="ignore")
+        for entry in getattr(imp, "imports", []):
+            if not getattr(entry, "name", None):
+                continue
+            sym = entry.name.decode("utf-8", errors="ignore")
+            slot_rva = int(entry.address) - image_base
+            iat_map[slot_rva] = (dll_name, sym)
+    return iat_map
+
+
 def _lift_x64_function_full(
     fn_name: str,
     code_bytes: bytes,
@@ -1043,6 +1061,7 @@ def _lift_x64_function_full(
     rw_ranges: Optional[List[Tuple[int, int]]] = None,
     meta_out: Optional[Dict[str, Any]] = None,
     sysv_abi: bool = False,
+    iat_rva_map: Optional[Dict[int, Tuple[str, str]]] = None,
 ) -> Tuple[str, List[Tuple[int, str, str]], bool, bool, Dict[int, int], bool, List[int]]:
     """Lifts an x86_64 function byte slice into compilable C code, IR, ro-constants, CRT calls, and internal callees."""
     c_ident = _sanitize_c_ident(fn_name, f"sub_{base_rva:x}")
@@ -1128,16 +1147,28 @@ def _lift_x64_function_full(
         for _, mn_i, op_i in insns
         if mn_i in ("call", "jmp")
     )
+    if pe is not None and iat_rva_map is None:
+        iat_rva_map = _build_pe_iat_slot_map(pe)
+    uses_ymm = any("ymm" in op_i.lower() for _, _, op_i in insns)
     uses_xmm = (
         any("xmm" in op_i.lower() for _, _, op_i in insns)
+        or uses_ymm
         or takes_double_arg0
         or takes_double_arg1
         or uses_float_callee
     )
+    uses_stack_args = False
+    for _, mn_i, op_i in insns[:16]:
+        if mn_i in ("sub", "add") and op_i.lower().startswith("rsp"):
+            break
+        if any(tok in op_i.lower().replace(" ", "") for tok in ("rsp+0x28", "rsp+0x30", "rsp+0x38", "rsp+0x40")):
+            uses_stack_args = True
+            break
     ret_type_c = "double" if returns_double else "int64_t"
     p0_c = "double xmm0_arg" if takes_double_arg0 else "int64_t rcx"
     p1_c = "double xmm1_arg" if takes_double_arg1 else "int64_t rdx"
-    sig_line = f"{ret_type_c} {c_ident}({p0_c}, {p1_c}, int64_t r8, int64_t r9) {{"
+    extra_params = ", int64_t stk0, int64_t stk1, int64_t stk2, int64_t stk3" if uses_stack_args else ""
+    sig_line = f"{ret_type_c} {c_ident}({p0_c}, {p1_c}, int64_t r8, int64_t r9{extra_params}) {{"
     c_lines = [
         sig_line,
         "    int64_t rcx = 0;" if takes_double_arg0 else "",
@@ -1149,8 +1180,15 @@ def _lift_x64_function_full(
         "    int64_t cmp_lhs = 0, cmp_rhs = 0;",
     ]
     c_lines = [ln for ln in c_lines if ln]
+    if uses_stack_args:
+        c_lines.extend([
+            "    aether_mem_write(rsp + 0x28, 8, stk0);",
+            "    aether_mem_write(rsp + 0x30, 8, stk1);",
+            "    aether_mem_write(rsp + 0x38, 8, stk2);",
+            "    aether_mem_write(rsp + 0x40, 8, stk3);",
+        ])
     if uses_xmm or returns_double:
-        c_lines.append("    int64_t " + ", ".join(f"{xr} = 0, {xr}_hi = 0" for xr in _XMM_REGS) + ";")
+        c_lines.append("    int64_t " + ", ".join(f"{xr} = 0, {xr}_hi = 0, {xr}_y2 = 0, {xr}_y3 = 0" for xr in _XMM_REGS) + ";")
         if takes_double_arg0:
             c_lines.append("    xmm0 = aether_f64_to_bits(xmm0_arg);")
         if takes_double_arg1:
@@ -1327,6 +1365,84 @@ def _lift_x64_function_full(
                 if s_res is not None:
                     conv_fn = "aether_f32_to_f64" if mnem == "cvtps2pd" else "aether_i32_to_f64"
                     c_lines.append(f"    {d_low} = {conv_fn}({s_res[0]}); {d_low}_hi = 0;")
+                    continue
+
+        # AVX / AVX2 128-bit & 256-bit vector/scalar lowering
+        if mnem in ("vmovdqu", "vmovdqa", "vmovups", "vmovaps", "vmovapd") and len(parts) == 2:
+            d_raw, s_raw = parts[0].lower(), parts[1].lower()
+            d_is_y, s_is_y = d_raw.startswith("ymm"), s_raw.startswith("ymm")
+            d_x = ("xmm" + d_raw[3:]) if d_is_y else d_raw
+            s_x = ("xmm" + s_raw[3:]) if s_is_y else s_raw
+            if d_x in _XMM_REGS and s_x in _XMM_REGS:
+                c_lines.append(f"    {d_x} = {s_x}; {d_x}_hi = {s_x}_hi;")
+                if d_is_y or s_is_y:
+                    c_lines.append(f"    {d_x}_y2 = {s_x}_y2; {d_x}_y3 = {s_x}_y3;")
+                continue
+            elif d_x in _XMM_REGS:
+                ms = _parse_mem_operand(parts[1], default_width=8)
+                if ms is not None:
+                    c_lines.append(f"    {d_x} = (int64_t)aether_mem_read({ms[0]}, 8); {d_x}_hi = (int64_t)aether_mem_read(({ms[0]}) + 8, 8);")
+                    if d_is_y:
+                        c_lines.append(f"    {d_x}_y2 = (int64_t)aether_mem_read(({ms[0]}) + 16, 8); {d_x}_y3 = (int64_t)aether_mem_read(({ms[0]}) + 24, 8);")
+                    continue
+            elif s_x in _XMM_REGS:
+                md_op = _parse_mem_operand(parts[0], default_width=8)
+                if md_op is not None:
+                    c_lines.append(f"    aether_mem_write({md_op[0]}, 8, {s_x}); aether_mem_write(({md_op[0]}) + 8, 8, {s_x}_hi);")
+                    if s_is_y:
+                        c_lines.append(f"    aether_mem_write(({md_op[0]}) + 16, 8, {s_x}_y2); aether_mem_write(({md_op[0]}) + 24, 8, {s_x}_y3);")
+                    continue
+
+        if mnem in ("vpaddd", "vpsubd", "vpxor", "vpand", "vpor") and len(parts) == 3:
+            d_raw, s1_raw, s2_raw = parts[0].lower(), parts[1].lower(), parts[2].lower()
+            is_y = d_raw.startswith("ymm")
+            dx = ("xmm" + d_raw[3:]) if d_raw.startswith("ymm") else d_raw
+            s1x = ("xmm" + s1_raw[3:]) if s1_raw.startswith("ymm") else s1_raw
+            s2x = ("xmm" + s2_raw[3:]) if s2_raw.startswith("ymm") else s2_raw
+            if dx in _XMM_REGS and s1x in _XMM_REGS:
+                s2_lanes = (s2x, f"{s2x}_hi", f"{s2x}_y2", f"{s2x}_y3") if s2x in _XMM_REGS else None
+                if s2_lanes is None:
+                    ms2 = _parse_mem_operand(parts[2], default_width=8)
+                    if ms2 is not None:
+                        s2_lanes = (
+                            f"(int64_t)aether_mem_read({ms2[0]}, 8)",
+                            f"(int64_t)aether_mem_read(({ms2[0]}) + 8, 8)",
+                            f"(int64_t)aether_mem_read(({ms2[0]}) + 16, 8)",
+                            f"(int64_t)aether_mem_read(({ms2[0]}) + 24, 8)",
+                        )
+                if s2_lanes is not None:
+                    lanes = [("", 0), ("_hi", 1)] + ([("_y2", 2), ("_y3", 3)] if is_y else [])
+                    for suf, li in lanes:
+                        a_e, b_e = f"{s1x}{suf}", s2_lanes[li]
+                        if mnem == "vpaddd":
+                            c_lines.append(f"    {dx}{suf} = aether_vpaddd64({a_e}, {b_e});")
+                        elif mnem == "vpsubd":
+                            c_lines.append(f"    {dx}{suf} = aether_vpsubd64({a_e}, {b_e});")
+                        else:
+                            bop = {"vpxor": "^", "vpand": "&", "vpor": "|"}[mnem]
+                            c_lines.append(f"    {dx}{suf} = ({a_e}) {bop} ({b_e});")
+                    continue
+
+        if mnem in ("vaddsd", "vsubsd", "vmulsd", "vdivsd") and len(parts) == 3:
+            dx, s1x, s2x = parts[0].lower(), parts[1].lower(), parts[2].lower()
+            if dx in _XMM_REGS and s1x in _XMM_REGS:
+                fn_v = {"vaddsd": "aether_f64_add", "vsubsd": "aether_f64_sub", "vmulsd": "aether_f64_mul", "vdivsd": "aether_f64_div"}[mnem]
+                s2_e = s2x if s2x in _XMM_REGS else (lambda r: f"(int64_t)({r[0]})" if r else None)(_resolve_read_with_rip(parts[2], addr, default_w=8))
+                if s2_e is not None:
+                    c_lines.append(f"    {dx} = {fn_v}({s1x}, {s2_e});")
+                    continue
+
+        if mnem in ("vfmadd213sd", "vfmadd132sd", "vfmadd231sd") and len(parts) == 3:
+            dx, s1x, s2x = parts[0].lower(), parts[1].lower(), parts[2].lower()
+            if dx in _XMM_REGS and s1x in _XMM_REGS:
+                s2_e = s2x if s2x in _XMM_REGS else (lambda r: f"(int64_t)({r[0]})" if r else None)(_resolve_read_with_rip(parts[2], addr, default_w=8))
+                if s2_e is not None:
+                    if mnem == "vfmadd213sd":
+                        c_lines.append(f"    {dx} = aether_f64_fma({s1x}, {dx}, {s2_e});")
+                    elif mnem == "vfmadd132sd":
+                        c_lines.append(f"    {dx} = aether_f64_fma({dx}, {s2_e}, {s1x});")
+                    else:
+                        c_lines.append(f"    {dx} = aether_f64_fma({s1x}, {s2_e}, {dx});")
                     continue
 
         # XMM scalar & 128-bit floating-point instructions (xmm0..xmm15 + upper 64-bit halves)
@@ -1808,6 +1924,15 @@ def _lift_x64_function_full(
                     c_lines.append(_emit_crt_call_stmt(crt_kind))
                     c_lines.append(ret_stmt)
                     continue
+                if iat_rva_map and crt_tgt is not None and crt_tgt in iat_rva_map:
+                    _dll_n, _sym_n = iat_rva_map[crt_tgt]
+                    c_lines.append(
+                        f'    rax = aether_iat_call("{_dll_n}", "{_sym_n}", rcx, rdx, r8, r9, '
+                        "aether_mem_read(rsp + 0x20, 8), aether_mem_read(rsp + 0x28, 8), "
+                        "aether_mem_read(rsp + 0x30, 8), aether_mem_read(rsp + 0x38, 8));"
+                    )
+                    c_lines.append(ret_stmt)
+                    continue
                 if (
                     target_addr is not None
                     and exec_ranges
@@ -1838,6 +1963,14 @@ def _lift_x64_function_full(
                 crt_kind = crt_alloc_map[crt_tgt]
                 crt_call_sites[addr] = crt_kind
                 c_lines.append(_emit_crt_call_stmt(crt_kind))
+                continue
+            if iat_rva_map and crt_tgt is not None and crt_tgt in iat_rva_map:
+                _dll_n, _sym_n = iat_rva_map[crt_tgt]
+                c_lines.append(
+                    f'    rax = aether_iat_call("{_dll_n}", "{_sym_n}", rcx, rdx, r8, r9, '
+                    "aether_mem_read(rsp + 0x20, 8), aether_mem_read(rsp + 0x28, 8), "
+                    "aether_mem_read(rsp + 0x30, 8), aether_mem_read(rsp + 0x38, 8));"
+                )
                 continue
             if (
                 target_addr is not None
@@ -4156,6 +4289,31 @@ def reconstruct_project(
             "static inline int64_t aether_f64_sub(int64_t a, int64_t b) { return aether_f64_to_bits(aether_bits_to_f64(a) - aether_bits_to_f64(b)); }",
             "static inline int64_t aether_f64_mul(int64_t a, int64_t b) { return aether_f64_to_bits(aether_bits_to_f64(a) * aether_bits_to_f64(b)); }",
             "static inline int64_t aether_f64_div(int64_t a, int64_t b) { return aether_f64_to_bits(aether_bits_to_f64(a) / aether_bits_to_f64(b)); }",
+            "AETHER_RT int64_t aether_f64_fma(int64_t a, int64_t b, int64_t c) { return aether_f64_to_bits(aether_bits_to_f64(a) * aether_bits_to_f64(b) + aether_bits_to_f64(c)); }",
+            "AETHER_RT int64_t aether_vpaddd64(int64_t a, int64_t b) {",
+            "    uint32_t al = (uint32_t)a + (uint32_t)b;",
+            "    uint32_t ah = (uint32_t)((uint64_t)a >> 32) + (uint32_t)((uint64_t)b >> 32);",
+            "    return (int64_t)((uint64_t)al | ((uint64_t)ah << 32));",
+            "}",
+            "AETHER_RT int64_t aether_vpsubd64(int64_t a, int64_t b) { return aether_psubd64(a, b); }",
+            "#ifdef _WIN32",
+            "__declspec(dllimport) void* __stdcall LoadLibraryA(const char* lpLibFileName);",
+            "__declspec(dllimport) void* __stdcall GetProcAddress(void* hModule, const char* lpProcName);",
+            "#else",
+            "#include <dlfcn.h>",
+            "#endif",
+            "typedef int64_t (*_aether_iat8_fn)(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);",
+            "AETHER_RT int64_t aether_iat_call(const char* dll_name, const char* sym_name, int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5, int64_t a6, int64_t a7, int64_t a8) {",
+            "#ifdef _WIN32",
+            "    void* mod = LoadLibraryA(dll_name);",
+            "    void* fn = mod ? GetProcAddress(mod, sym_name) : NULL;",
+            "#else",
+            "    void* mod = dlopen(dll_name, 1);",
+            "    void* fn = mod ? dlsym(mod, sym_name) : NULL;",
+            "#endif",
+            "    if (!fn) return 0;",
+            "    return ((_aether_iat8_fn)fn)(a1, a2, a3, a4, a5, a6, a7, a8);",
+            "}",
             "",
         ]
         if report.rtti_classes:

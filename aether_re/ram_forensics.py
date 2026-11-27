@@ -580,19 +580,143 @@ def extract_keys_from_ram(dump_bytes: bytes | Any) -> dict[str, Any]:
     }
 
 
+def parse_pagedu64_header(dump_bytes: bytes | Any) -> dict[str, Any]:
+    """Parse Windows x64 Kernel/Full Crash Dump (`PAGEDU64`) header & physical memory runs."""
+    if len(dump_bytes) < 0x2000 or bytes(dump_bytes[:8]) != b"PAGEDU64":
+        return {"valid": False}
+    cr3 = _u64(dump_bytes, 0x10)
+    ps_loaded_mods = _u64(dump_bytes, 0x18)
+    ps_active_head = _u64(dump_bytes, 0x20)
+    num_runs = _u32(dump_bytes, 0x88)
+    runs: list[dict[str, int]] = []
+    file_off = 0x2000
+    for i in range(min(num_runs, 64)):
+        ro = 0x98 + i * 16
+        if ro + 16 > 0x2000:
+            break
+        base_page, page_count = struct.unpack_from("<QQ", dump_bytes, ro)
+        runs.append({"base_pa": base_page * 0x1000, "size_bytes": page_count * 0x1000, "file_offset": file_off})
+        file_off += page_count * 0x1000
+    return {
+        "schema": "aether_pagedu64.v1",
+        "valid": True,
+        "cr3": hex(cr3),
+        "ps_loaded_module_list": hex(ps_loaded_mods),
+        "ps_active_process_head": hex(ps_active_head),
+        "physical_runs_count": len(runs),
+        "physical_runs": runs,
+    }
+
+
+def resolve_pdb_tpi_struct_offsets(pdb_bytes: bytes, target_struct: str = "_EPROCESS") -> dict[str, Any]:
+    """Pure-Python MSF 7.00 PDB Stream #2 (TPI) parser extracting struct member field offsets."""
+    magic = b"Microsoft C/C++ MSF 7.00\r\n\x1aDS\x00\x00\x00"
+    if len(pdb_bytes) < 64 or not pdb_bytes.startswith(magic):
+        return {"valid": False, "struct": target_struct, "fields": {}}
+    block_sz, _free, _num_blks, dir_sz, _u, root_map_blk = struct.unpack_from("<IIIIII", pdb_bytes, 32)
+    if block_sz < 512 or root_map_blk * block_sz + 4 > len(pdb_bytes):
+        return {"valid": False, "struct": target_struct, "fields": {}}
+
+    # Reconstruct Stream Directory from root map block
+    dir_blk_cnt = (dir_sz + block_sz - 1) // block_sz
+    dir_blks = [struct.unpack_from("<I", pdb_bytes, root_map_blk * block_sz + i * 4)[0] for i in range(dir_blk_cnt)]
+    dir_data = b"".join(pdb_bytes[b * block_sz : (b + 1) * block_sz] for b in dir_blks)[:dir_sz]
+    if len(dir_data) < 4:
+        return {"valid": False, "struct": target_struct, "fields": {}}
+
+    num_streams = struct.unpack_from("<I", dir_data, 0)[0]
+    if num_streams < 3:
+        return {"valid": False, "struct": target_struct, "fields": {}}
+    stream_sizes = [struct.unpack_from("<I", dir_data, 4 + i * 4)[0] for i in range(num_streams)]
+    pos = 4 + num_streams * 4
+    stream_blocks: list[list[int]] = []
+    for sz in stream_sizes:
+        cnt = 0 if sz in (0, 0xFFFFFFFF) else (sz + block_sz - 1) // block_sz
+        blks = [struct.unpack_from("<I", dir_data, pos + j * 4)[0] for j in range(cnt)] if pos + cnt * 4 <= len(dir_data) else []
+        stream_blocks.append(blks)
+        pos += cnt * 4
+
+    # Read TPI stream (#2)
+    tpi_sz = stream_sizes[2]
+    tpi_data = b"".join(pdb_bytes[b * block_sz : (b + 1) * block_sz] for b in stream_blocks[2])[:tpi_sz]
+    if len(tpi_data) < 56:
+        return {"valid": False, "struct": target_struct, "fields": {}}
+    hdr_sz = struct.unpack_from("<I", tpi_data, 4)[0]
+    ti_min = struct.unpack_from("<I", tpi_data, 8)[0]
+
+    # Walk CodeView type records (`LF_FIELDLIST` 0x1203 & `LF_STRUCTURE` 0x1505)
+    fieldlists: dict[int, dict[str, int]] = {}
+    structs_found: dict[str, int] = {}
+    cur = hdr_sz
+    ti = ti_min
+    while cur + 4 <= len(tpi_data):
+        rec_len, leaf = struct.unpack_from("<HH", tpi_data, cur)
+        if rec_len < 2 or cur + 2 + rec_len > len(tpi_data):
+            break
+        rec = tpi_data[cur + 4 : cur + 2 + rec_len]
+        if leaf == 0x1203:  # LF_FIELDLIST
+            fmap: dict[str, int] = {}
+            fp = 0
+            while fp + 2 <= len(rec):
+                sub_leaf = struct.unpack_from("<H", rec, fp)[0]
+                if sub_leaf == 0x150D and fp + 10 <= len(rec):  # LF_MEMBER
+                    off_val = struct.unpack_from("<H", rec, fp + 8)[0]
+                    fp += 10
+                    nul = rec.find(b"\x00", fp)
+                    if nul == -1:
+                        break
+                    fname = rec[fp:nul].decode("ascii", errors="ignore")
+                    fmap[fname] = off_val
+                    fp = nul + 1
+                    while fp < len(rec) and rec[fp] >= 0xF0:
+                        fp += rec[fp] & 0x0F
+                else:
+                    break
+            fieldlists[ti] = fmap
+        elif leaf == 0x1505 and len(rec) >= 16:  # LF_STRUCTURE
+            fl_ti = struct.unpack_from("<I", rec, 4)[0]
+            name_start = 16
+            nul = rec.find(b"\x00", name_start)
+            if nul != -1:
+                sname = rec[name_start:nul].decode("ascii", errors="ignore")
+                structs_found[sname] = fl_ti
+        cur += 2 + rec_len
+        ti += 1
+
+    fl_idx = structs_found.get(target_struct)
+    fields = fieldlists.get(fl_idx, {}) if fl_idx is not None else {}
+    return {
+        "schema": "aether_pdb_tpi.v1",
+        "valid": True,
+        "struct": target_struct,
+        "field_count": len(fields),
+        "fields": {k: hex(v) for k, v in fields.items()},
+    }
+
+
 def analyze_physical_ram_file(
     dump_path: str | Path,
     **kwargs: Any,
 ) -> dict[str, Any]:
-    """Zero-copy `mmap` RAM forensic analyzer supporting multi-gigabyte dumps."""
+    """Zero-copy `mmap` RAM forensic analyzer supporting Raw, `PAGEDU64` crash dumps, and `MDMP` MiniDumps."""
     import mmap as _mmap
 
     p = Path(dump_path).resolve()
     if not p.is_file():
         raise FileNotFoundError(f"RAM dump not found: {p}")
+    head8 = p.open("rb").read(8)
+    if head8[:4] == b"MDMP":
+        from aether_re.minidump_parser import MiniDumpParser
+        md = MiniDumpParser(p)
+        rep = md.audit_memory_security()
+        rep["delegated_format"] = "windows_minidump_mdmp"
+        rep["modules"] = md.get_modules()
+        return rep
+
     with p.open("rb") as fh:
         with _mmap.mmap(fh.fileno(), 0, access=_mmap.ACCESS_READ) as mm:
             rep = analyze_physical_ram_dump(mm, **kwargs)
+            rep["pagedu64"] = parse_pagedu64_header(mm)
             rep["kernel_profile"] = detect_kernel_profile(mm)
             rep["extracted_keys"] = extract_keys_from_ram(mm)
             rep["zero_copy_mmap"] = True
